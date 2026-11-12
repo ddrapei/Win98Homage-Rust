@@ -1,0 +1,23 @@
+# Win98 Widgets -- four Windows 98 style desktop widgets as one small native
+# program.  The .ini files in skins/ are the source of truth for every pixel:
+# build.rs compiles them into static tables, and the logic behind each widget
+# is in src/.
+#
+#   cargo build --release     ->  target/release/win98-widgets.exe
+
+[package]
+name = "win98-widgets"
+version = "1.0.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[build-dependencies]
+png = "0.18"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
