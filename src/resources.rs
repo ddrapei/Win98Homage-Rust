@@ -1,10 +1,9 @@
 //! The Resource Meter: CPU and physical memory as two segmented Win98
-//! progress bars, read the way Rainmeter's CPU and PhysicalMemory measures
-//! read them.
+//! progress bars.
 //!
 //! The bars are drawn backwards, as in the skin: every block is in the .ini,
 //! always, and what moves is one field-coloured rectangle per bar that covers
-//! the tail the measure has not earned.  The cover moves in whole blocks and
+//! the tail the reading has not earned.  The cover moves in whole blocks and
 //! the label in whole percents, so a steady load repaints nothing.
 
 use crate::canvas::{Canvas, Rect};
@@ -66,7 +65,7 @@ impl Resources {
         self.fixed = Some((cpu, ram));
     }
 
-    /// Rainmeter's CPU measure: the share of the last interval the processors
+    /// CPU load: the share of the last interval the processors
     /// were not idle.  The first reading has nothing to compare with and is 0.
     fn cpu_load(&mut self) -> f64 {
         let (mut idle, mut kernel, mut user) = (sys::FILETIME::default(), sys::FILETIME::default(), sys::FILETIME::default());
@@ -86,7 +85,7 @@ impl Resources {
         load.clamp(0.0, 1.0)
     }
 
-    /// Rainmeter's PhysicalMemory measure: memory in use over memory fitted.
+    /// Memory load: memory in use over memory fitted.
     fn ram_load() -> f64 {
         let mut status = sys::MEMORYSTATUSEX { dwLength: size_of::<sys::MEMORYSTATUSEX>() as u32, ..Default::default() };
         if unsafe { sys::GlobalMemoryStatusEx(&mut status) } == 0 || status.ullTotalPhys == 0 {

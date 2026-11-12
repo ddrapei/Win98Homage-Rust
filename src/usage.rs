@@ -1,7 +1,5 @@
 //! The usage journal: when this computer was on, and when it was on and
-//! unlocked.  It reads and writes the same file, in the same format, as the
-//! Date/Time skin did under Rainmeter, so a history kept there carries
-//! straight on.
+//! unlocked.
 //!
 //! Two facts are enough to reconstruct a day: the program ticked at second T,
 //! so the machine was on at T; and the workstation was or was not locked.  A

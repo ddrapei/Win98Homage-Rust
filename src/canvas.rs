@@ -1,14 +1,12 @@
 //! A software canvas: 32-bit premultiplied BGRA, the format a layered window
 //! is updated from.
 //!
-//! Rainmeter draws these skins with Direct2D, which costs tens of megabytes
-//! for what is, in these skins, a few hundred pixel-aligned rectangles, a
-//! dozen small polygons and some bilevel text.  This does the same drawing in
-//! a few hundred lines: rectangles are plain fills, and anything with an edge
-//! that is not on the pixel grid -- the clock hands, the faces of the usage
-//! blocks, the half-pixel dashes of the graph's floor -- is filled by exact
-//! area coverage, which is what Direct2D's per-primitive antialiasing comes
-//! to.
+//! Direct2D would cost tens of megabytes for what is, in these skins, a few
+//! hundred pixel-aligned rectangles, a dozen small polygons and some bilevel
+//! text.  This does that drawing in a few hundred lines: rectangles are plain
+//! fills, and anything with an edge that is not on the pixel grid -- the clock
+//! hands, the faces of the usage blocks, the half-pixel dashes of the graph's
+//! floor -- is filled by exact area coverage.
 //!
 //! Everything honours `clip`, so repainting the clock every second touches
 //! only the clock.

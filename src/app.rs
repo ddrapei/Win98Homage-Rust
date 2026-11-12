@@ -1,14 +1,13 @@
 //! The host: one small process, one thread, four layered windows.
 //!
 //! Each widget is a borderless layered window that never takes the keyboard
-//! and never shows in the taskbar or Alt-Tab -- a desktop widget, the way a
-//! Rainmeter skin is, not an application window.  It is drawn into one shared
-//! 32-bit buffer and handed to the window manager with UpdateLayeredWindow;
-//! only the part that changed is redrawn and sent.
+//! and never shows in the taskbar or Alt-Tab -- a desktop widget, not an
+//! application window.  It is drawn into one shared 32-bit buffer and handed
+//! to the window manager with UpdateLayeredWindow; only the part that changed
+//! is redrawn and sent.
 //!
-//! Like Rainmeter, the process is not DPI aware, on purpose: on a scaled
-//! display Windows stretches the widgets exactly as it stretched the skins,
-//! so they come out the same size in the same place.
+//! The process is not DPI aware, on purpose: the skins are laid out in whole
+//! pixels, and on a scaled display Windows stretches the widgets as a whole.
 //!
 //! Re-entrancy.  Windows calls a window procedure in the middle of other
 //! calls (SetWindowPos sends WM_WINDOWPOSCHANGING, and so on).  So the
@@ -706,9 +705,8 @@ impl App {
         Later::Nothing
     }
 
-    /// Tell the meter the pointer left and the one it arrived on, in that
-    /// order -- which Rainmeter does not promise, and the skin had to guard
-    /// against.
+    /// Tell the meter the pointer left and the one it arrived on, always in
+    /// that order.
     fn set_hover(&mut self, i: usize, over: Option<usize>) {
         let was = self.slots[i].hover;
         if was == over {
@@ -756,7 +754,7 @@ impl App {
 
     /// Where a dragged window lands: pulled onto the edges of the other
     /// widgets and of the screen when it comes within SNAP of them, unless
-    /// Ctrl or Shift is held.  Rainmeter's rule, and its distance.
+    /// Ctrl or Shift is held.
     fn snapped(&self, i: usize, mut x: i32, mut y: i32) -> (i32, i32) {
         let skin = skin_of(i);
         let (w, h) = (skin.w, skin.h);

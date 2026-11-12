@@ -2,8 +2,8 @@
 //! program.
 //!
 //! Date/Time Properties, Resource Meter, Sticky Note and Weather, drawn from
-//! the Rainmeter-format .ini files in `skins/` -- with no Rainmeter, no
-//! Direct2D and no script engine underneath.
+//! the .ini files in `skins/` -- with no Direct2D and no script engine
+//! underneath.
 //!
 //! # Where things are
 //!
@@ -11,7 +11,7 @@
 //!   build.rs     the .ini files in skins/ compiled into static tables
 //!   skin         those tables, and drawing and hit-testing them
 //!   canvas       the software canvas they are drawn on
-//!   text         DirectWrite text, laid out as Rainmeter lays it out
+//!   text         DirectWrite text, rasterised into the canvas
 //!   widget       what the host asks of a widget
 //!   datetime     Date/Time Properties  (with usage: the on/unlocked journal)
 //!   resources    Resource Meter
@@ -21,7 +21,7 @@
 //!   settings     settings.ini
 //!   clock        time and time zones
 //!   sys          the Win32 declarations all of it uses
-//!   dump         off-screen rendering, for checking against Rainmeter
+//!   dump         off-screen rendering, for checking a change
 //! ```
 
 #![windows_subsystem = "windows"]

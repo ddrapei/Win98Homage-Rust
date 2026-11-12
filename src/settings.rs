@@ -1,10 +1,9 @@
 //! settings.ini: where each widget sits, whether it is shown, and the knobs
 //! that start out at the values in the skins' [Variables].
 //!
-//! The file is kept as its own lines and edited in place, the way Rainmeter's
-//! !WriteKeyValue edits a skin: a value the program writes back (a position
-//! after a drag, the paper colour) replaces one line and leaves every comment
-//! and every other line as the user wrote them.
+//! The file is kept as its own lines and edited in place: a value the program
+//! writes back (a position after a drag, the paper colour) replaces one line
+//! and leaves every comment and every other line as the user wrote them.
 
 use std::path::{Path, PathBuf};
 
@@ -179,7 +178,7 @@ fn default_file() -> String {
 ; written back here by the program; everything else is yours.
 
 [General]
-; desktop = behind every window, like a Rainmeter skin set to \"On desktop\"
+; desktop = behind every window, on the desktop itself
 ; normal  = an ordinary window that never takes the keyboard
 ; topmost = above every window
 Position=desktop

@@ -25,27 +25,25 @@ Run the .exe. Nothing is installed: it can live anywhere. Only one copy runs at 
 
 ## The widgets are the skins
 
-Each widget's layout is a Rainmeter-format `.ini` file in [`skins/`](skins). `build.rs`
-compiles the four of them into static tables — every meter's position, shapes, colours,
-text options and mouse actions — so **the `.ini` files are the single source of truth for
-the layout**. Change a colour or move a meter there, rebuild, and the widget follows.
-Nothing parses an `.ini` while the program runs, and Rainmeter itself is not involved: the
-logic behind each widget is plain Rust (`datetime.rs`, `resources.rs`, `notes.rs`,
-`weather.rs`).
+Each widget's layout is an `.ini` file in [`skins/`](skins): a `[Variables]` section for the
+palette and the layout figures, then one section per meter — a shape, a line of text or an
+image — in the order they are painted. `build.rs` compiles the four of them into static
+tables — every meter's position, shapes, colours, text options and mouse actions — so
+**the `.ini` files are the single source of truth for the layout**. Change a colour or move
+a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
+runs: the logic behind each widget is plain Rust (`datetime.rs`, `resources.rs`,
+`notes.rs`, `weather.rs`), and a mouse action in a skin, such as
+`LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
-Text is laid out by DirectWrite with the same calls Rainmeter makes for a String meter
-(`AccurateText=1`, `AntiAlias=0`), and rasterised with the same aliased glyph renderer
-Direct2D would have used. Shapes are filled by a small software canvas.
+Text is laid out by DirectWrite and rasterised with aliased glyphs. Shapes are filled by a
+small software canvas.
 
-Checked against Rainmeter 4.5.28 drawing the same layouts: with the same clock time,
-usage log, note and readings fed to both, each widget's render was compared with a
-capture of Rainmeter's — **0 differing pixels in all four** at a tolerance of 10/255 (the
-capture path itself filters slightly); at 4/255 the only differences left are the
-antialiased edges of the clock hands, by at most 10 levels. `--dump` (see `src/dump.rs`)
-is the harness.
+`--dump <dir> [--state <file>]` draws each widget off-screen, in a state given by the
+file, and writes it out as a BMP — for comparing before and after a change (see
+`src/dump.rs`).
 
-Like Rainmeter 4.5, the program is deliberately not DPI aware, so on a scaled display
-Windows stretches the widgets as a whole.
+The program is deliberately not DPI aware, so on a scaled display Windows stretches the
+widgets as a whole.
 
 ## Using them
 
@@ -98,7 +96,7 @@ skins/       the four layouts (.ini) and the weather icons
 build.rs     those .ini files compiled into static tables
 skin         the tables, and drawing and hit-testing them
 canvas       the software canvas they are drawn on
-text         DirectWrite text, laid out as Rainmeter lays it out
+text         DirectWrite text, rasterised into the canvas
 datetime     Date/Time Properties   (usage: the on/unlocked journal)
 resources    Resource Meter
 notes        Sticky Note            (editor: the box you type in)
@@ -107,5 +105,5 @@ app          windows, mouse, menus, tray, the once-a-second tick
 settings     settings.ini
 clock        time and time zones
 sys          the Win32 declarations all of it uses
-dump         off-screen rendering, for checking against Rainmeter
+dump         off-screen rendering, for checking a change
 ```

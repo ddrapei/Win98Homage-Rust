@@ -1,15 +1,11 @@
-//! Text, laid out by DirectWrite exactly as Rainmeter lays out a String meter
-//! and rasterised into the canvas.
+//! Text, laid out by DirectWrite and rasterised into the canvas.
 //!
-//! The skins ask for `AccurateText=1` and `AntiAlias=0`, which in Rainmeter
-//! means a natural (not GDI-compatible) DirectWrite layout drawn with aliased
-//! glyphs.  This file makes the same calls in the same order -- the same text
-//! format, the same measuring for auto-sized meters, the same trimming for
-//! `ClipString=1`, the same line-gap adjustment -- and then, instead of handing
-//! the layout to Direct2D, receives its glyph runs through IDWriteTextRenderer
-//! and rasterises each with IDWriteGlyphRunAnalysis in the aliased mode
-//! Direct2D would have used.  Same font engine, same glyph positions, no
-//! Direct2D.
+//! A String meter is a natural (not GDI-compatible) DirectWrite layout drawn
+//! with aliased glyphs: a text format per font, measuring for auto-sized
+//! meters, trimming for `ClipString=1`, and a line-gap adjustment.  The layout
+//! is not handed to Direct2D; its glyph runs arrive through IDWriteTextRenderer
+//! and each is rasterised with IDWriteGlyphRunAnalysis in the aliased mode.
+//! The system's font engine and glyph positions, with no Direct2D.
 //!
 //! DirectWrite is COM; the handful of methods needed are called through their
 //! vtable slots, which are fixed by dwrite.h.
@@ -161,7 +157,7 @@ impl Text {
             let family = sys::wide(face);
             let locale = sys::wide("");
             for &(points, bold) in fonts {
-                // Rainmeter: a point is 4/3 of a DIP, whatever the display.
+                // A point is 4/3 of a DIP, whatever the display.
                 let size = points * (4.0 / 3.0);
                 let weight = if bold { WEIGHT_BOLD } else { WEIGHT_REGULAR };
                 let create_format: unsafe extern "system" fn(
@@ -179,7 +175,8 @@ impl Text {
     }
 
     /// The font's line gap in pixels at `size`: DirectWrite puts it above the
-    /// first line, and Rainmeter takes it back off to match GDI+.
+    /// first line, and it is taken back off, so a meter's Y is where its text
+    /// starts.
     unsafe fn line_gap(&self, format: Com, family: &[u16], weight: u32, size: f32) -> f32 {
         unsafe {
             let get_collection: unsafe extern "system" fn(Com, *mut Com) -> HRESULT = slot(format, 19);
@@ -247,9 +244,8 @@ impl Text {
         }
     }
 
-    /// TextFormat::GetMetrics with accurate text: the size an auto-sized
-    /// meter takes.  (width, height), each already rounded up as Rainmeter
-    /// rounds them, less the line gap.
+    /// The size an auto-sized meter takes: (width, height), each already
+    /// rounded up, less the line gap.
     unsafe fn measure(&mut self, format: Com, line_gap: f32) -> (f32, f32) {
         unsafe {
             let layout = self.layout(format, 10000.0, 10000.0);

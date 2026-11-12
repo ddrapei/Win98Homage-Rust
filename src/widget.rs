@@ -82,7 +82,7 @@ pub trait Widget: Hooks {
     /// Once a second.
     fn tick(&mut self, ctx: &mut Ctx) -> Dirty;
     /// A mouse action from the skin.  `x`, `y` are relative to the meter that
-    /// carried it, as Rainmeter's $MOUSEX$ and $MOUSEY$ are.
+    /// carried it.
     fn command(&mut self, cmd: &str, arg: i32, x: i32, y: i32, ctx: &mut Ctx) -> Outcome;
     /// Its own entries for the right-click menu.
     fn menu(&self, _items: &mut Vec<MenuItem>) {}

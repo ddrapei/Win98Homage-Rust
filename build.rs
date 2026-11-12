@@ -334,7 +334,7 @@ fn shape_code(val: &str, opts: &[(String, String)], ctx: &Ctx, b: &mut Bounds) -
     }
 
     // A shape that turns: its outline as a polygon, the variable holding the
-    // angle, and the pivot -- which Rainmeter measures from the corner of the
+    // angle, and the pivot -- which is measured from the corner of the
     // shape's own bounds.
     if let Some(rot) = rotate {
         let args = split_top(&rot, ',');
@@ -437,35 +437,16 @@ fn shape_code(val: &str, opts: &[(String, String)], ctx: &Ctx, b: &mut Bounds) -
     }
 }
 
-/// `[!CommandMeasure MeasureSkin "Select(7)"]` and the three bangs that are
-/// not calls into the widget, as (command, argument, mouse).  `mouse` is 1 if
-/// the call is handed the pointer's x and y, 2 if only its y.
-fn action(v: &str) -> Option<(String, i32, u8)> {
-    if let Some(p) = v.find("!CommandMeasure") {
-        let q1 = v[p..].find('"')? + p;
-        let q2 = v[q1 + 1..].find('"')? + q1 + 1;
-        let call = &v[q1 + 1..q2];
-        let open = call.find('(')?;
-        let args = call[open + 1..].trim_end_matches(')').trim();
-        let (arg, mouse) = if args.is_empty() {
-            (0, 0)
-        } else if args.contains("$MOUSEX$") {
-            (0, 1)
-        } else if args.contains("$MOUSEY$") {
-            (0, 2)
-        } else {
-            (args.parse().ok()?, 0)
-        };
-        Some((call[..open].to_string(), arg, mouse))
-    } else if v.contains("!About") {
-        Some(("About".into(), 0, 0))
-    } else if v.contains("!DeactivateConfig") {
-        Some(("Close".into(), 0, 0))
-    } else if v.trim_start().starts_with("[\"") {
-        Some(("OpenFile".into(), 0, 0))
-    } else {
-        None
-    }
+/// A mouse action, `Select(7)` or `Close()`, as (command, argument): the
+/// command is the widget's own, or About / Close / OpenFile, and the argument
+/// is one whole number, 0 if there is none.  Every command is handed the
+/// pointer's x and y as well, so a click that needs them asks for nothing.
+fn action(v: &str) -> Option<(String, i32)> {
+    let (cmd, args) = v.trim().strip_suffix(')')?.split_once('(')?;
+    let (cmd, args) = (cmd.trim(), args.trim());
+    let is_name = !cmd.is_empty() && cmd.bytes().all(|c| c.is_ascii_alphanumeric());
+    let arg = if args.is_empty() { 0 } else { args.parse().ok()? };
+    is_name.then(|| (cmd.to_string(), arg))
 }
 
 const EVENTS: [(&str, &str); 6] = [
@@ -477,11 +458,11 @@ const EVENTS: [(&str, &str); 6] = [
     ("mouseleaveaction", "Ev::Leave"),
 ];
 
-fn actions_code(opts: &dyn Fn(&str) -> Option<String>) -> String {
+fn actions_code(section: &str, opts: &dyn Fn(&str) -> Option<String>) -> String {
     let mut out = String::new();
     for (key, ev) in EVENTS {
-        if let Some((cmd, arg, mouse)) = opts(key).as_deref().and_then(action) {
-            let _ = mouse; // every call is handed the point; the ones that want it use it
+        if let Some(v) = opts(key) {
+            let (cmd, arg) = action(&v).unwrap_or_else(|| panic!("[{section}] {key}={v} is not Command(number)"));
             write!(out, "Act{{ev:{ev},cmd:{cmd:?},arg:{arg}}},").unwrap();
         }
     }
@@ -523,7 +504,7 @@ fn dyn_notes(n: &str) -> bool {
 }
 
 fn dyn_weather(n: &str) -> bool {
-    matches!(n, "TempNow" | "Condition" | "HighLowText" | "LocationLabel" | "IconFile" | "Lat" | "Lon")
+    matches!(n, "TempNow" | "Condition" | "HighLowText" | "LocationLabel" | "Lat" | "Lon")
 }
 
 const SKINS: [SkinDef; 4] = [
@@ -579,7 +560,7 @@ fn compile_skin(def: &SkinDef, root: &Path, fonts: &mut Vec<(String, bool)>, out
             Some(h) if h.trim() != "0" => h,
             _ => String::new(),
         };
-        let acts = actions_code(&|k| get(k));
+        let acts = actions_code(&sec.name, &|k| get(k));
 
         let mut bounds = Bounds::default();
         let kind_code = match kind.to_ascii_lowercase().as_str() {
@@ -681,8 +662,10 @@ fn compile_skin(def: &SkinDef, root: &Path, fonts: &mut Vec<(String, bool)>, out
     }
     assert!(size.0 > 0 && size.1 > 0, "{}: no [MeterCanvas] to size the window from", def.file);
 
-    let rainmeter = sections.iter().find(|s| s.name.eq_ignore_ascii_case("Rainmeter"));
-    let skin_acts = actions_code(&|k| rainmeter.and_then(|r| r.get(k)).map(|v| ctx.resolve(v)));
+    // [Widget]: the mouse actions of the widget as a whole, for wherever no
+    // meter claims them.
+    let widget = sections.iter().find(|s| s.name.eq_ignore_ascii_case("Widget"));
+    let skin_acts = actions_code("Widget", &|k| widget.and_then(|w| w.get(k)).map(|v| ctx.resolve(v)));
 
     writeln!(out, "pub mod {} {{", def.module).unwrap();
     writeln!(out, "    use super::*;").unwrap();
@@ -692,9 +675,9 @@ fn compile_skin(def: &SkinDef, root: &Path, fonts: &mut Vec<(String, bool)>, out
     for (spelled, key) in &var_order {
         writeln!(out, "        ({spelled:?}, {:?}),", ctx.resolve(&ctx.vars[key])).unwrap();
     }
-    // The edit box is a measure, not a meter, but where it sits over the
-    // paper is layout all the same.
-    if let Some(input) = sections.iter().find(|s| s.name.eq_ignore_ascii_case("MeasureInput")) {
+    // The edit box is not a meter, but where it sits over the paper is
+    // layout all the same.
+    if let Some(input) = sections.iter().find(|s| s.name.eq_ignore_ascii_case("EditBox")) {
         for key in ["x", "y", "w", "h", "autosave"] {
             if let Some(n) = input.get(key).and_then(|v| eval(&ctx.resolve(v))) {
                 writeln!(out, "        (\"Input{}\", \"{n}\"),", key.to_ascii_uppercase()).unwrap();

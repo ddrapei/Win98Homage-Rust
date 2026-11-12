@@ -1,10 +1,10 @@
 //! A skin, as build.rs compiled it from its .ini, and the little it takes to
 //! draw one and to find what a click landed on.
 //!
-//! The tables are the layout.  What Rainmeter would resolve at run time from
-//! variables -- a meter's text, a colour, whether it is hidden, where a
-//! moving one sits -- is asked of the widget through [`Hooks`], and
-//! the widget answers from plain fields.  Meters whose geometry itself is
+//! The tables are the layout.  What depends on a variable that changes while
+//! the program runs -- a meter's text, a colour, whether it is hidden, where a
+//! moving one sits -- is asked of the widget through [`Hooks`], and the
+//! widget answers from plain fields.  Meters whose geometry itself is
 //! computed (`Kind::Custom`) are handed to the widget whole.
 
 use crate::canvas::{Canvas, Rect};
@@ -14,8 +14,8 @@ pub struct Skin {
     pub w: i32,
     pub h: i32,
     pub meters: &'static [Meter],
-    /// The [Rainmeter] section's own mouse actions: what the wheel does
-    /// anywhere no meter claims it.
+    /// The [Widget] section's mouse actions: what the wheel does anywhere no
+    /// meter claims it.
     pub acts: &'static [Act],
     pub vars: &'static [(&'static str, &'static str)],
 }
@@ -173,7 +173,7 @@ fn origin(m: &Meter, hooks: &dyn Hooks) -> (i32, i32) {
 }
 
 /// Every meter that touches the canvas's clip, in the order the .ini lists
-/// them: later ones paint over earlier ones, as in Rainmeter.
+/// them: later ones paint over earlier ones.
 /// Where each text meter was when it was last drawn, so that repainting part
 /// of the window does not lay out text that is nowhere near that part.  Text
 /// is the expensive thing to draw, and the clock is repainted every second.

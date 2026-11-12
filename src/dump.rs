@@ -1,10 +1,10 @@
 //! `--dump <dir> [--state <file>]`: draw each widget off-screen, at a moment
 //! and in a state given by the file, and write it out as a 32-bit BMP.
 //!
-//! This is how the port is checked against Rainmeter: the same clock time,
-//! the same usage log, the same note and the same readings go in, and the
-//! picture that comes out is compared pixel for pixel with a capture of the
-//! skin.  Nothing here touches the user's settings or data.
+//! This is how a change to a skin or to the drawing is checked: the same clock
+//! time, the same usage log, the same note and the same readings go in, and
+//! the pictures that come out before and after can be compared pixel for
+//! pixel.  Nothing here touches the user's settings or data.
 //!
 //! The state file is `key=value` lines:
 //!
@@ -103,7 +103,8 @@ pub fn run(args: &[String]) -> i32 {
             w.set_live(start, now);
         }
         // The usage panel is brought up to date on the minute, the clock on
-        // the second: to match a capture, tick at the minute it last was.
+        // the second: to draw a moment between the two, tick first at the
+        // minute the panel last was.
         if let Some(earlier) = get("panel_at").and_then(clock::parse_local) {
             ctx.now = earlier;
             w.tick(&mut ctx);
