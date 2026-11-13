@@ -1,10 +1,14 @@
-//! The host: one small process, one thread, four layered windows.
+//! The host: one small process, one thread, five layered windows.
 //!
 //! Each widget is a borderless layered window that never takes the keyboard
 //! and never shows in the taskbar or Alt-Tab -- a desktop widget, not an
 //! application window.  It is drawn into one shared 32-bit buffer and handed
 //! to the window manager with UpdateLayeredWindow; only the part that changed
 //! is redrawn and sent.
+//!
+//! Everything runs off one tick a second.  A widget that moves more often
+//! than that -- the rain -- asks for frames, and a second timer runs for as
+//! long as one does and there is a screen to show them on.
 //!
 //! The process is not DPI aware, on purpose: the skins are laid out in whole
 //! pixels, and on a scaled display Windows stretches the widgets as a whole.
@@ -26,6 +30,7 @@ use crate::datetime::DateTime;
 use crate::editor::{self, Editor, Look};
 use crate::entry::{self, Entry};
 use crate::notes::Notes;
+use crate::rain::Rain;
 use crate::resources::Resources;
 use crate::settings::Settings;
 use crate::skin::{self, Act, Ev, Hooks, Skin};
@@ -34,11 +39,12 @@ use crate::text::Text;
 use crate::weather::Weather;
 use crate::widget::{Ctx, Dirty, Outcome, Request, Widget};
 
-const WIDGETS: usize = 4;
+const WIDGETS: usize = 5;
 const NOTES: usize = 2;
 const WEATHER: usize = 3;
-const SECTIONS: [&str; WIDGETS] = ["DateTime", "Resources", "Notes", "Weather"];
-const TITLES: [&str; WIDGETS] = ["Date/Time", "Resource Meter", "Sticky Note", "Weather"];
+const RAIN: usize = 4;
+const SECTIONS: [&str; WIDGETS] = ["DateTime", "Resources", "Notes", "Weather", "Rain"];
+const TITLES: [&str; WIDGETS] = ["Date/Time", "Resource Meter", "Sticky Note", "Weather", "Rain Window"];
 
 const WIDGET_CLASS: &str = "Win98Widget";
 const MAIN_CLASS: &str = "Win98WidgetsMain";
@@ -48,6 +54,8 @@ const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const RUN_VALUE: &str = "Win98Widgets";
 
 const TICK_TIMER: usize = 1;
+/// Runs only while a widget is asking for frames.
+const FRAME_TIMER: usize = 2;
 const WM_TRAY: u32 = WM_APP + 2;
 /// Skins snap to each other and to the screen edge from this far away.
 const SNAP: i32 = 10;
@@ -136,6 +144,7 @@ struct Widgets {
     resources: Option<Resources>,
     notes: Option<Notes>,
     weather: Option<Weather>,
+    rain: Option<Rain>,
 }
 
 impl Widgets {
@@ -144,7 +153,8 @@ impl Widgets {
             0 => self.datetime.as_ref().map(|w| w as &dyn Widget),
             1 => self.resources.as_ref().map(|w| w as &dyn Widget),
             2 => self.notes.as_ref().map(|w| w as &dyn Widget),
-            _ => self.weather.as_ref().map(|w| w as &dyn Widget),
+            3 => self.weather.as_ref().map(|w| w as &dyn Widget),
+            _ => self.rain.as_ref().map(|w| w as &dyn Widget),
         }
     }
 
@@ -153,7 +163,8 @@ impl Widgets {
             0 => self.datetime.as_mut().map(|w| w as &mut dyn Widget),
             1 => self.resources.as_mut().map(|w| w as &mut dyn Widget),
             2 => self.notes.as_mut().map(|w| w as &mut dyn Widget),
-            _ => self.weather.as_mut().map(|w| w as &mut dyn Widget),
+            3 => self.weather.as_mut().map(|w| w as &mut dyn Widget),
+            _ => self.rain.as_mut().map(|w| w as &mut dyn Widget),
         }
     }
 }
@@ -163,7 +174,8 @@ fn skin_of(i: usize) -> &'static Skin {
         0 => &skin::datetime::SKIN,
         1 => &skin::resources::SKIN,
         2 => &skin::notes::SKIN,
-        _ => &skin::weather::SKIN,
+        3 => &skin::weather::SKIN,
+        _ => &skin::rain::SKIN,
     }
 }
 
@@ -189,6 +201,10 @@ struct App {
     ticks: u32,
     /// The tick at which to hand unused pages back to Windows.
     trim_at: u32,
+    /// What the frame timer is set to, 0 while it is not running, and when
+    /// the last frame was, in milliseconds.
+    frame_ms: u32,
+    frame_at: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -410,7 +426,8 @@ impl App {
                 0 => widgets.datetime = Some(DateTime::new(&ctx, None)),
                 1 => widgets.resources = Some(Resources::new()),
                 2 => widgets.notes = Some(Notes::new(&mut ctx, None)),
-                _ => widgets.weather = Some(Weather::new(&ctx)),
+                3 => widgets.weather = Some(Weather::new(&ctx)),
+                _ => widgets.rain = Some(Rain::new(&ctx)),
             }
             if let Some(w) = widgets.get_mut(i) {
                 w.tick(&mut ctx);
@@ -433,6 +450,7 @@ impl App {
             place_in_z_order(wnd, self.position, self.show_desktop);
             ShowWindow(wnd, SW_SHOWNOACTIVATE);
         }
+        self.pace();
     }
 
     /// Take a widget away, window and state, so it costs nothing while shut.
@@ -452,7 +470,8 @@ impl App {
                 0 => widgets.datetime = None,
                 1 => widgets.resources = None,
                 2 => widgets.notes = None,
-                _ => widgets.weather = None,
+                3 => widgets.weather = None,
+                _ => widgets.rain = None,
             }
         }
         let wnd = core::mem::take(&mut self.slots[i].hwnd);
@@ -462,6 +481,7 @@ impl App {
         if self.press.as_ref().is_some_and(|p| p.idx == i) {
             self.press = None;
         }
+        self.pace();
     }
 
     fn set_enabled(&mut self, i: usize, on: bool) {
@@ -515,6 +535,8 @@ impl App {
     /// Act on what a command asked for, and say what is left to do later.
     fn apply(&mut self, i: usize, outcome: Outcome) -> Later {
         self.paint(i, outcome.dirty);
+        // the command may have been the one that pauses a widget, or wakes it
+        self.pace();
         let later = match outcome.request {
             Request::None => Later::Nothing,
             Request::About => Later::About(i),
@@ -654,6 +676,51 @@ impl App {
         // not needed again.  Hand those pages back once things have settled.
         if self.ticks == self.trim_at {
             unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX) };
+        }
+    }
+
+    // ---- in between: frames ------------------------------------------------------
+
+    fn now_ms() -> i64 {
+        let (seconds, ms) = clock::now_ms();
+        seconds * 1000 + ms as i64
+    }
+
+    /// Set the frame timer to the pace the widgets ask for: the quickest of
+    /// them, or no timer at all when none is moving, or the workstation is
+    /// locked and nothing would be drawn anyway.  Called whenever either may
+    /// have changed -- a widget started or stopped, a command, the lock.
+    fn pace(&mut self) {
+        let asked = (0..WIDGETS).filter_map(|i| self.widgets.get(i)).map(|w| w.frame_ms()).filter(|&ms| ms > 0).min();
+        let want = if self.locked { 0 } else { asked.unwrap_or(0) };
+        if want == self.frame_ms {
+            return;
+        }
+        self.frame_ms = want;
+        let main = MAIN.load(Relaxed);
+        unsafe {
+            if want > 0 {
+                self.frame_at = Self::now_ms();
+                SetTimer(main, FRAME_TIMER, want, null());
+            } else {
+                KillTimer(main, FRAME_TIMER);
+            }
+        }
+    }
+
+    /// One frame for each widget that wants them, told how long it has been
+    /// since the last: timers are not punctual, and the rain should fall at
+    /// the same speed whether or not this one is.
+    fn animate(&mut self) {
+        let now = Self::now_ms();
+        let elapsed = (now - self.frame_at).clamp(0, 1000) as u32;
+        self.frame_at = now;
+        for i in 0..WIDGETS {
+            let dirty = match self.widgets.get_mut(i) {
+                Some(w) if w.frame_ms() > 0 => w.frame(elapsed),
+                _ => continue,
+            };
+            self.paint(i, dirty);
         }
     }
 
@@ -969,7 +1036,8 @@ impl App {
 
     /// Where each widget sits: where it was left, or -- the first time -- in
     /// a column down the right-hand side of the screen, frames ten pixels
-    /// apart, the note and the weather side by side at the foot.
+    /// apart, the note and the weather side by side at the foot and the rain
+    /// to the left of the note, frame against frame.
     fn read_slots(&mut self) {
         let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
         let size = |i: usize| (skin_of(i).w, skin_of(i).h);
@@ -979,7 +1047,13 @@ impl App {
         let y0 = work.top + 4;
         let y1 = y0 + size(0).1 - overlap;
         let y2 = y1 + size(1).1 - overlap;
-        let defaults = [(x0, y0), (x0, y1), (x0, y2), (x0 + size(0).0 - size(3).0, y2)];
+        let defaults = [
+            (x0, y0),
+            (x0, y1),
+            (x0, y2),
+            (x0 + size(0).0 - size(3).0, y2),
+            (x0 - size(RAIN).0 + 2 * pad, y2),
+        ];
         for i in 0..WIDGETS {
             self.slots[i].x = self.settings.int(SECTIONS[i], "X", defaults[i].0);
             self.slots[i].y = self.settings.int(SECTIONS[i], "Y", defaults[i].1);
@@ -1240,6 +1314,9 @@ unsafe extern "system" fn main_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 with_app(|app| app.tick());
                 schedule_tick(wnd);
             }
+            WM_TIMER if wp == FRAME_TIMER => {
+                with_app(|app| app.animate());
+            }
             // This window marks the bottom of the stack; it stays there.
             WM_WINDOWPOSCHANGING => (*(lp as *mut WINDOWPOS)).flags |= SWP_NOZORDER,
             WM_TRAY if lp as u32 == WM_RBUTTONUP || lp as u32 == WM_LBUTTONUP => run_later(Later::Menu(None)),
@@ -1253,6 +1330,7 @@ unsafe extern "system" fn main_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     // let the log hear of it now, and catch the picture up
                     app.tick();
                     app.repaint_all();
+                    app.pace();
                 });
             }
             WM_POWERBROADCAST => {
@@ -1355,8 +1433,8 @@ pub fn run() -> i32 {
             settings: Settings::load(),
             text,
             buffer: Buffer::new(w, h),
-            widgets: Widgets { datetime: None, resources: None, notes: None, weather: None },
-            slots: [slot(), slot(), slot(), slot()],
+            widgets: Widgets { datetime: None, resources: None, notes: None, weather: None, rain: None },
+            slots: core::array::from_fn(|_| slot()),
             editor: Editor::new(),
             city: Entry::new(),
             press: None,
@@ -1370,6 +1448,8 @@ pub fn run() -> i32 {
             tray: 0,
             ticks: 0,
             trim_at: 5,
+            frame_ms: 0,
+            frame_at: 0,
         };
         app.read_general();
         app.read_slots();

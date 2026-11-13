@@ -1,7 +1,7 @@
 # Win98 Widgets
 
-Four Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note
-and Weather — as one small Rust program.
+Five Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
+Weather and Rain Window — as one small Rust program.
 
 | | |
 |--------------------------|---------|
@@ -10,7 +10,7 @@ and Weather — as one small Rust program.
 | run-time dependencies    | none |
 | program                  | one 700 KB .exe |
 
-Measured with all four widgets showing.
+Measured with the first four widgets showing, before Rain Window was added.
 
 ## Build and run
 
@@ -27,12 +27,12 @@ Run the .exe. Nothing is installed: it can live anywhere. Only one copy runs at 
 
 Each widget's layout is an `.ini` file in [`skins/`](skins): a `[Variables]` section for the
 palette and the layout figures, then one section per meter — a shape, a line of text or an
-image — in the order they are painted. `build.rs` compiles the four of them into static
+image — in the order they are painted. `build.rs` compiles the five of them into static
 tables — every meter's position, shapes, colours, text options and mouse actions — so
 **the `.ini` files are the single source of truth for the layout**. Change a colour or move
 a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
 runs: the logic behind each widget is plain Rust (`datetime.rs`, `resources.rs`,
-`notes.rs`, `weather.rs`), and a mouse action in a skin, such as
+`notes.rs`, `weather.rs`, `rain.rs`), and a mouse action in a skin, such as
 `LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
 Text is laid out by DirectWrite and rasterised with aliased glyphs. Shapes are filled by a
@@ -68,6 +68,11 @@ the forecast to it; Escape leaves things as they were; an empty field goes back 
 place your public IP address gives. The pin is kept in `settings.ini` as `ManualLat`,
 `ManualLon` and `ManualLocation`, which can also be written by hand.
 
+**Rain Window** does nothing: it is rain the colour of rust falling past a small dark
+window, the size of the Sticky Note, to be looked at. Right-click it for how hard it
+rains — *Light*, *Steady*, *Heavy* — and to *Pause* it; both are kept in `settings.ini`
+as `Rate` and `Paused`. Its colours are the `Rain*` variables in `skins/Win98Rain.ini`.
+
 **Position** (right-click → Position): *On desktop* (default) keeps the widgets behind
 every window; *Normal*; *Always on top*.
 
@@ -92,6 +97,10 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 - **Weather** shows the last forecast immediately after a restart, and each fetch runs in
   a short-lived child process, so the networking libraries are never resident.
 - **Nothing is drawn while the workstation is locked**; the usage log keeps running.
+- **Rain Window is the one widget drawn more than once a second**: 25 frames a second, of
+  its pane only, from a timer that runs only while there is rain to show — not while it
+  is paused or closed, nor while the workstation is locked. A frame takes about a fifth
+  of a millisecond to draw.
 - The note is wrapped by a fixed table of character widths, so it wraps in the same place
   on every machine.
 - `?` opens a small About box.
@@ -99,7 +108,7 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 ## Layout of the source
 
 ```text
-skins/       the four layouts (.ini) and the weather icons
+skins/       the five layouts (.ini) and the weather icons
 build.rs     those .ini files compiled into static tables
 skin         the tables, and drawing and hit-testing them
 canvas       the software canvas they are drawn on
@@ -108,7 +117,8 @@ datetime     Date/Time Properties   (usage: the on/unlocked journal)
 resources    Resource Meter
 notes        Sticky Note            (editor: the box you type in)
 weather      Weather                (and the child that fetches it; entry: the city box)
-app          windows, mouse, menus, tray, the once-a-second tick
+rain         Rain Window            (the one that is animated)
+app          windows, mouse, menus, tray, the once-a-second tick, the frames in between
 settings     settings.ini
 clock        time and time zones
 sys          the Win32 declarations all of it uses

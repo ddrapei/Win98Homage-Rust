@@ -15,6 +15,7 @@
 //!   cpu=0.44   ram=0.95                the Resource Meter's two readings
 //!   note_file=C:\path\Notes.txt
 //!   weather=9.3,3,0,10.1,4.9,Place     temp, code, is_day, max, min, city
+//!   rain=2.5                           seconds into the shower (always the same one)
 //!   set.Notes.Created=30 Jul 2026      any settings.ini value
 //!   do.datetime=SetPage 1;Select 12    commands to run before drawing
 
@@ -24,6 +25,7 @@ use crate::canvas::Canvas;
 use crate::clock;
 use crate::datetime::DateTime;
 use crate::notes::Notes;
+use crate::rain::Rain;
 use crate::resources::Resources;
 use crate::settings::Settings;
 use crate::skin::{self, Hooks};
@@ -134,6 +136,11 @@ pub fn run(args: &[String]) -> i32 {
             w.set_fixed(num(0), num(1) as i32, num(2) != 0.0, num(3), num(4), p.get(5).copied().unwrap_or(""));
         }
         render(&w, &mut text, &dir.join("weather.bmp"));
+    }
+    {
+        let mut w = Rain::new(&ctx);
+        w.set_fixed(get("rain").and_then(|v| v.parse().ok()).unwrap_or(2.5));
+        render(&w, &mut text, &dir.join("rain.bmp"));
     }
     0
 }

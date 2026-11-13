@@ -1,5 +1,6 @@
 //! What the window host knows about a widget: a skin to draw, a tick once a
-//! second, and commands -- the names the skins' mouse actions call.
+//! second -- and frames in between, for the one that asks -- and commands,
+//! the names the skins' mouse actions call.
 
 use std::path::PathBuf;
 
@@ -83,6 +84,16 @@ pub trait Widget: Hooks {
     fn about(&self) -> &'static str;
     /// Once a second.
     fn tick(&mut self, ctx: &mut Ctx) -> Dirty;
+    /// Milliseconds between frames, for a widget that moves more often than
+    /// the tick; 0 for one that does not, or is not moving now.  The host
+    /// runs a timer only while some widget asks for one.
+    fn frame_ms(&self) -> u32 {
+        0
+    }
+    /// One frame, `ms` after the last.
+    fn frame(&mut self, _ms: u32) -> Dirty {
+        Dirty::None
+    }
     /// A mouse action from the skin.  `x`, `y` are relative to the meter that
     /// carried it.
     fn command(&mut self, cmd: &str, arg: i32, x: i32, y: i32, ctx: &mut Ctx) -> Outcome;

@@ -1,9 +1,9 @@
-//! Win98 Widgets -- four Windows 98 style desktop widgets as one small native
+//! Win98 Widgets -- five Windows 98 style desktop widgets as one small native
 //! program.
 //!
-//! Date/Time Properties, Resource Meter, Sticky Note and Weather, drawn from
-//! the .ini files in `skins/` -- with no Direct2D and no script engine
-//! underneath.
+//! Date/Time Properties, Resource Meter, Sticky Note, Weather and Rain Window,
+//! drawn from the .ini files in `skins/` -- with no Direct2D and no script
+//! engine underneath.
 //!
 //! # Where things are
 //!
@@ -18,7 +18,9 @@
 //!   notes        Sticky Note           (with editor: the box you type in)
 //!   weather      Weather               (and the child that fetches it; entry:
 //!                                       the box the city is typed in)
-//!   app          windows, mouse, menus, tray, the once-a-second tick
+//!   rain         Rain Window           (the one that is animated)
+//!   app          windows, mouse, menus, tray, the once-a-second tick and
+//!                the frames in between
 //!   settings     settings.ini
 //!   clock        time and time zones
 //!   sys          the Win32 declarations all of it uses
@@ -35,6 +37,7 @@ mod dump;
 mod editor;
 mod entry;
 mod notes;
+mod rain;
 mod resources;
 mod settings;
 mod skin;
