@@ -263,6 +263,7 @@ pub const WM_QUERYENDSESSION: u32 = 0x0011;
 pub const WM_ENDSESSION: u32 = 0x0016;
 pub const WM_ERASEBKGND: u32 = 0x0014;
 pub const WM_SETTINGCHANGE: u32 = 0x001A;
+pub const WM_SETCURSOR: u32 = 0x0020;
 pub const WM_MOUSEACTIVATE: u32 = 0x0021;
 pub const WM_SETFONT: u32 = 0x0030;
 pub const WM_WINDOWPOSCHANGING: u32 = 0x0046;
@@ -289,10 +290,27 @@ pub const WM_NULL: u32 = 0;
 pub const WA_INACTIVE: usize = 0;
 pub const MA_NOACTIVATE: isize = 3;
 pub const EN_CHANGE: usize = 0x0300;
+pub const VK_BACK: usize = 0x08;
+pub const VK_TAB: usize = 0x09;
 pub const VK_RETURN: usize = 0x0D;
 pub const VK_ESCAPE: usize = 0x1B;
+pub const VK_PRIOR: usize = 0x21;
+pub const VK_NEXT: usize = 0x22;
+pub const VK_END: usize = 0x23;
+pub const VK_HOME: usize = 0x24;
+pub const VK_LEFT: usize = 0x25;
+pub const VK_UP: usize = 0x26;
+pub const VK_RIGHT: usize = 0x27;
+pub const VK_DOWN: usize = 0x28;
+pub const VK_INSERT: usize = 0x2D;
+pub const VK_DELETE: usize = 0x2E;
 pub const VK_CONTROL: i32 = 0x11;
 pub const VK_SHIFT: i32 = 0x10;
+pub const VK_MENU: i32 = 0x12;
+
+pub const HTCLIENT: i32 = 1;
+pub const CF_UNICODETEXT: u32 = 13;
+pub const GMEM_MOVEABLE: u32 = 0x0002;
 
 pub const WTS_SESSION_LOCK: usize = 7;
 pub const WTS_SESSION_UNLOCK: usize = 8;
@@ -409,6 +427,7 @@ unsafe extern "system" {
     pub fn DefWindowProcW(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT;
     pub fn CallWindowProcW(prev: isize, wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT;
     pub fn GetMessageW(msg: *mut MSG, wnd: HWND, min: u32, max: u32) -> BOOL;
+    pub fn PeekMessageW(msg: *mut MSG, wnd: HWND, min: u32, max: u32, remove: u32) -> BOOL;
     pub fn TranslateMessage(msg: *const MSG) -> BOOL;
     pub fn DispatchMessageW(msg: *const MSG) -> LRESULT;
     pub fn PostQuitMessage(code: i32);
@@ -457,6 +476,16 @@ unsafe extern "system" {
     pub fn GetWindowTextW(wnd: HWND, buf: *mut u16, len: i32) -> i32;
     pub fn SetWindowTextW(wnd: HWND, text: PCWSTR) -> BOOL;
     pub fn FillRect(dc: HDC, rect: *const RECT, brush: HGDIOBJ) -> i32;
+    pub fn SetCursor(cursor: isize) -> isize;
+    pub fn GetCaretBlinkTime() -> u32;
+    pub fn GetFocus() -> HWND;
+    pub fn SetActiveWindow(wnd: HWND) -> HWND;
+    pub fn GetActiveWindow() -> HWND;
+    pub fn OpenClipboard(owner: HWND) -> BOOL;
+    pub fn CloseClipboard() -> BOOL;
+    pub fn EmptyClipboard() -> BOOL;
+    pub fn GetClipboardData(format: u32) -> HANDLE;
+    pub fn SetClipboardData(format: u32, data: HANDLE) -> HANDLE;
 }
 
 #[link(name = "gdi32")]
@@ -494,6 +523,11 @@ unsafe extern "system" {
     pub fn GetTimeZoneInformation(tz: *mut TIME_ZONE_INFORMATION) -> u32;
     pub fn GetSystemTimes(idle: *mut FILETIME, kernel: *mut FILETIME, user: *mut FILETIME) -> BOOL;
     pub fn GlobalMemoryStatusEx(status: *mut MEMORYSTATUSEX) -> BOOL;
+    pub fn GlobalAlloc(flags: u32, bytes: usize) -> HANDLE;
+    pub fn GlobalFree(mem: HANDLE) -> HANDLE;
+    pub fn GlobalLock(mem: HANDLE) -> *mut c_void;
+    pub fn GlobalUnlock(mem: HANDLE) -> BOOL;
+    pub fn GlobalSize(mem: HANDLE) -> usize;
 }
 
 #[link(name = "shell32")]

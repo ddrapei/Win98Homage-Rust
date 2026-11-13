@@ -1,626 +1,840 @@
-//! The note's keyboard: a real multi-line Windows edit box laid over the
-//! paper, which saves the way a sticky note does -- as you type, and when you
-//! click anywhere else.
+//! The note as something typed on: its text, the caret and the selection in
+//! it, what each key does to them, undo -- and the rows the text wraps to.
 //!
-//!   open     the file as it is on disk, with the caret where the pointer is
-//!   typing   written back a second after it pauses
-//!   leaving  a click outside the box, Escape, another window coming forward:
-//!            save, hide, and tell the note to read the file back
+//! The text is the note file, character for character, with `\n` between
+//! lines.  A line that opens with `[ ]` or `[x]` is a checklist item: those
+//! brackets (and the space after them) are in the text but never on the
+//! paper, where a checkbox in the margin stands for them.  So the caret is
+//! kept out of them, and the keys that would otherwise meet them know what to
+//! do instead: Backspace at the head of an item takes its checkbox away,
+//! Enter on an item starts another, and typing `[ ]` at the start of a line
+//! makes one.
 //!
-//! The box is a borderless popup owned by the widget's window rather than a
-//! child of it: a layered window does not paint children.  Owned, it stays
-//! above the widget, and losing activation is exactly "clicked elsewhere".
+//! Nothing here knows about Windows, the file or the screen.  Widths come
+//! from whoever calls `layout`, which is what lets the same rows be drawn
+//! whether or not anyone is typing -- see `notes`.
 
-use core::ptr::{null, null_mut};
-use core::sync::atomic::{AtomicIsize, AtomicU32, Ordering::Relaxed};
-use std::path::{Path, PathBuf};
+/// The spaces a tab is as wide as.
+pub const TAB: usize = 4;
+/// Steps of undo kept.
+const UNDO_MAX: usize = 200;
 
-use crate::settings::write_whole;
-use crate::sys::*;
+pub fn blank(c: char) -> bool {
+    c == ' ' || c == '\t'
+}
 
-/// Posted to the box when the user asks to leave it.
-pub const WM_LEAVE: u32 = WM_APP + 1;
-const AUTOSAVE_TIMER: usize = 1;
-const CLASS: &str = "Win98NoteEdit";
+// ---------------------------------------------------------------------------
+//  Lines and rows
+// ---------------------------------------------------------------------------
 
-/// Where things stand after an open or a close, as the note needs to know it.
+/// The `[ ]` or `[x]` a checklist item's line opens with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Status {
-    Open,
-    Saved,
-    Unchanged,
-    /// The note could not be written.  The typing is kept in the box and
-    /// comes back the next time it opens.
-    WriteError,
-    ReadError,
-    NoWindow,
+pub struct Marker {
+    /// How much of the line is not shown: its indent, the brackets, and one
+    /// space after them if there is one.
+    pub hidden: usize,
+    /// Where the character between the brackets is.
+    pub mark: usize,
+    pub done: bool,
 }
 
-/// Where the box sits over the widget and how it is painted.
-pub struct Look {
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-    /// left, top, right, bottom: where the text may not go
-    pub padding: [i32; 4],
-    pub paper: u32,
-    pub ink: u32,
-    pub face: String,
-    pub points: f64,
-    pub autosave_ms: u32,
+pub fn marker(line: &[char]) -> Option<Marker> {
+    let lead = line.iter().take_while(|&&c| blank(c)).count();
+    match line.get(lead..lead + 3)? {
+        ['[', m @ (' ' | 'x' | 'X'), ']'] => {
+            let space = usize::from(line.get(lead + 3) == Some(&' '));
+            Some(Marker { hidden: lead + 3 + space, mark: lead + 1, done: *m != ' ' })
+        }
+        _ => None,
+    }
 }
 
-// ---------------------------------------------------------------------------
-//  The note on disk
-// ---------------------------------------------------------------------------
-
-const CR: u16 = b'\r' as u16;
-const LF: u16 = b'\n' as u16;
-const BOM: &[u8] = b"\xEF\xBB\xBF";
-
-#[derive(Clone, Copy, Default)]
-struct Format {
-    bom: bool,
-    crlf: bool,
+/// One row of the paper: a run of the text, and where a caret stands in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Row {
+    /// The characters it shows are `start..end` of the text.
+    pub start: usize,
+    pub end: usize,
+    /// Px from the left of the text column to each caret position,
+    /// `start..=end`: one more entry than the row has characters.
+    pub xs: Vec<f32>,
+    /// The first row of its line -- the one a checkbox hangs off -- and the
+    /// last, whose end is the end of the line.
+    pub head: bool,
+    pub last: bool,
+    /// Its line is a checklist item, and a ticked one.
+    pub todo: bool,
+    pub done: bool,
+    /// Where its line starts in the text, hidden marker and all.
+    pub line: usize,
 }
 
-/// File bytes to what an edit control wants: UTF-16 with every line break as
-/// CR LF.  A note that is not valid UTF-8 is from before the skin was, and is
-/// read as Windows-1252.
-fn decode(bytes: &[u8]) -> (Vec<u16>, Format) {
-    let (bom, body) = match bytes.strip_prefix(BOM) {
-        Some(rest) => (true, rest),
-        None => (false, bytes),
-    };
-    let crlf = bytes.windows(2).any(|w| w == b"\r\n");
-    let wide: Vec<u16> = match core::str::from_utf8(body) {
-        Ok(s) => s.encode_utf16().collect(),
-        Err(_) => body.iter().map(|&b| from_1252(b)).collect(),
-    };
-    let mut out = Vec::with_capacity(wide.len() + wide.len() / 16);
+/// Where a line of these characters and advances breaks into rows of `room`
+/// px, as ranges of it.  Rows after the first are `hang` px narrower.
+///
+/// Words are kept whole and blanks never start a row: at the end of one they
+/// run on past its edge unseen, as they do in any edit box.  A word that no
+/// row could hold fills the row it starts on and is cut where it stops
+/// fitting, rather than leave that row half empty.
+fn wrap(chars: &[char], adv: &[f32], room: f32, hang: f32) -> Vec<(usize, usize)> {
+    let mut rows = Vec::new();
+    let (mut start, mut width) = (0, 0.0f32);
+    // the latest place this row could end: just after a blank
+    let mut gap: Option<usize> = None;
     let mut i = 0;
-    while i < wide.len() {
-        match wide[i] {
-            CR => {
-                out.extend_from_slice(&[CR, LF]);
-                if wide.get(i + 1) == Some(&LF) {
-                    i += 1;
-                }
-            }
-            LF => out.extend_from_slice(&[CR, LF]),
-            c => out.push(c),
+    while i < chars.len() {
+        if blank(chars[i]) {
+            width += adv[i];
+            i += 1;
+            gap = Some(i);
+            continue;
         }
-        i += 1;
-    }
-    (out, Format { bom, crlf })
-}
-
-/// Edit control text back to file bytes: UTF-8, in the file's own line
-/// endings, ending in one line break when there is anything in it.
-fn encode(text: &[u16], format: Format) -> Vec<u8> {
-    let mut wide: Vec<u16> = Vec::with_capacity(text.len() + 2);
-    let mut i = 0;
-    while i < text.len() {
-        if !format.crlf && text[i] == CR && text.get(i + 1) == Some(&LF) {
-            i += 1; // drop the CR, keep the LF
-        }
-        wide.push(text[i]);
-        i += 1;
-    }
-    if wide.last().is_some_and(|&c| c != LF) {
-        if format.crlf {
-            wide.push(CR);
-        }
-        wide.push(LF);
-    }
-    let mut out = if format.bom { BOM.to_vec() } else { Vec::new() };
-    out.extend_from_slice(String::from_utf16_lossy(&wide).as_bytes());
-    out
-}
-
-fn from_1252(b: u8) -> u16 {
-    const HIGH: [u16; 32] = [
-        0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152,
-        0x008D, 0x017D, 0x008F, 0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122,
-        0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178,
-    ];
-    match b {
-        0x80..=0x9F => HIGH[usize::from(b - 0x80)],
-        _ => u16::from(b),
-    }
-}
-
-struct NoteFile {
-    path: PathBuf,
-    format: Format,
-    /// The file's bytes as of the last read or write; None if there was none.
-    disk: Option<Vec<u8>>,
-    /// Whether this edit has already put the previous note in the .bak file.
-    backed_up: bool,
-}
-
-fn read_optional(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
-impl NoteFile {
-    /// A missing file is an empty note; one that is there but cannot be read
-    /// is an error, because saving over it would destroy it.
-    fn open(path: &Path) -> std::io::Result<(NoteFile, Vec<u16>)> {
-        let disk = read_optional(path)?;
-        let (text, format) = disk.as_deref().map(decode).unwrap_or_default();
-        Ok((NoteFile { path: path.to_owned(), format, disk, backed_up: false }, text))
-    }
-
-    /// Catch up with the file, for typing that is being kept because it could
-    /// not be saved: if something else wrote the note meanwhile, that version
-    /// becomes what the next save backs up.
-    fn resync(&mut self) -> std::io::Result<()> {
-        let now = read_optional(&self.path)?;
-        if now != self.disk {
-            self.disk = now;
-            self.backed_up = false;
-        }
-        Ok(())
-    }
-
-    /// Ok(true) is a write, Ok(false) is nothing to write.  On an error the
-    /// note is as it was, and the same call can simply be made again.
-    fn save(&mut self, text: &[u16]) -> std::io::Result<bool> {
-        let bytes = encode(text, self.format);
-        let unchanged = match self.disk.as_deref() {
-            Some(disk) => disk == bytes.as_slice(),
-            None => bytes.is_empty(),
-        };
-        if unchanged {
-            return Ok(false);
-        }
-        // The note as it was before this edit: once per edit, not once per
-        // autosave, or the backup would only ever be a second old.
-        if !self.backed_up {
-            if let Some(disk) = self.disk.as_deref() {
-                let mut bak = self.path.as_os_str().to_owned();
-                bak.push(".bak");
-                std::fs::write(PathBuf::from(bak), disk)?;
-            }
-            self.backed_up = true;
-        }
-        write_whole(&self.path, &bytes)?;
-        self.disk = Some(bytes);
-        Ok(true)
-    }
-}
-
-// ---------------------------------------------------------------------------
-//  Finding your way around the box
-// ---------------------------------------------------------------------------
-
-/// Where the 1-based `line` of `text` starts, in UTF-16 units.
-fn line_start(text: &[u16], line: usize) -> usize {
-    if line <= 1 {
-        return 0;
-    }
-    text.iter().enumerate().filter(|&(_, &c)| c == LF).nth(line - 2).map_or(text.len(), |(i, _)| i + 1)
-}
-
-/// The start of the word before `at`, for CTRL-Backspace: back over any
-/// spaces, then back over the word -- but never across a line break.
-fn word_start(text: &[u16], at: usize) -> usize {
-    let at = at.min(text.len());
-    let blank = |c: u16| c == b' ' as u16 || c == b'\t' as u16;
-    let mut i = at;
-    while i > 0 && blank(text[i - 1]) {
-        i -= 1;
-    }
-    if i == at && i > 0 && text[i - 1] == LF {
-        return if i >= 2 && text[i - 2] == CR { i - 2 } else { i - 1 };
-    }
-    while i > 0 && !blank(text[i - 1]) && text[i - 1] != LF {
-        i -= 1;
-    }
-    i
-}
-
-// ---------------------------------------------------------------------------
-//  The box
-// ---------------------------------------------------------------------------
-
-pub struct Editor {
-    host: HWND,
-    edit: HWND,
-    /// The edit control's own window procedure, under the subclass.
-    edit_proc: isize,
-    font: HGDIOBJ,
-    brush: HGDIOBJ,
-    file: Option<NoteFile>,
-    registered: bool,
-}
-
-/// What the box's window procedure needs.  Kept apart from the Editor because
-/// Windows calls that procedure in the middle of the Editor's own calls --
-/// showing the box activates it -- when the Editor is not free to be read.
-static EDIT: AtomicIsize = AtomicIsize::new(0);
-static BRUSH: AtomicIsize = AtomicIsize::new(0);
-static INK: AtomicU32 = AtomicU32::new(0);
-static PAPER: AtomicU32 = AtomicU32::new(0x00FF_FFFF);
-static AUTOSAVE_MS: AtomicU32 = AtomicU32::new(0);
-
-/// Win32 packs a colour as 0x00BBGGRR.
-pub fn colorref(argb: u32) -> u32 {
-    (argb >> 16 & 255) | (argb & 0xFF00) | (argb & 255) << 16
-}
-
-impl Editor {
-    pub const fn new() -> Editor {
-        Editor { host: 0, edit: 0, edit_proc: 0, font: 0, brush: 0, file: None, registered: false }
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.host != 0 && unsafe { IsWindowVisible(self.host) } != 0
-    }
-
-    fn send(&self, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-        unsafe { SendMessageW(self.edit, msg, wp, lp) }
-    }
-
-    fn text(&self) -> Vec<u16> {
-        unsafe {
-            let n = GetWindowTextLengthW(self.edit).max(0);
-            let mut buf = vec![0u16; n as usize + 1];
-            let got = GetWindowTextW(self.edit, buf.as_mut_ptr(), n + 1).max(0);
-            buf.truncate(got as usize);
-            buf
-        }
-    }
-
-    fn is_modified(&self) -> bool {
-        self.edit != 0 && self.send(EM_GETMODIFY, 0, 0) != 0
-    }
-
-    fn create(&mut self, owner: HWND, proc_: WNDPROC) -> bool {
-        if self.host != 0 {
-            return true;
-        }
-        unsafe {
-            let module = GetModuleHandleW(null());
-            let class = wide(CLASS);
-            if !self.registered {
-                let wc = WNDCLASSEXW {
-                    cbSize: size_of::<WNDCLASSEXW>() as u32,
-                    style: 0,
-                    lpfnWndProc: Some(proc_),
-                    cbClsExtra: 0,
-                    cbWndExtra: 0,
-                    hInstance: module,
-                    hIcon: 0,
-                    hCursor: LoadCursorW(0, IDC_IBEAM as PCWSTR),
-                    hbrBackground: 0,
-                    lpszMenuName: null(),
-                    lpszClassName: class.as_ptr(),
-                    hIconSm: 0,
-                };
-                RegisterClassExW(&wc);
-                self.registered = true;
-            }
-            self.host = CreateWindowExW(
-                WS_EX_TOOLWINDOW, class.as_ptr(), wide("").as_ptr(), WS_POPUP | WS_CLIPCHILDREN,
-                0, 0, 0, 0, owner, 0, module, null_mut(),
-            );
-            if self.host == 0 {
-                return false;
-            }
-            self.edit = CreateWindowExW(
-                0, wide("EDIT").as_ptr(), wide("").as_ptr(),
-                WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
-                0, 0, 0, 0, self.host, 1, module, null_mut(),
-            );
-            if self.edit == 0 {
-                DestroyWindow(self.host);
-                self.host = 0;
-                return false;
-            }
-            self.send(EM_SETLIMITTEXT, 0, 0); // as long as a note gets
-            EDIT.store(self.edit, Relaxed);
-            self.edit_proc = SetWindowLongPtrW(self.edit, GWLP_WNDPROC, keys as *const () as isize);
-            SetWindowLongPtrW(self.edit, GWLP_USERDATA, self.edit_proc);
-            true
-        }
-    }
-
-    /// Put the box up over `owner`, showing the file's 1-based `line` at the
-    /// top and `rows` wrapped rows into it, with the caret under the pointer.
-    pub fn open(&mut self, owner: HWND, proc_: WNDPROC, look: &Look, path: &Path, line: usize, rows: usize) -> Status {
-        if !self.create(owner, proc_) {
-            return Status::NoWindow;
-        }
-        let reopening = self.is_open();
-        unsafe {
-            // New objects in before the old ones go: the control never holds
-            // a deleted font.  Points become pixels at 96 dpi, as on the skin.
-            let font = CreateFontW(
-                -((look.points * 96.0 / 72.0).round() as i32), 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                DEFAULT_CHARSET, 0, 0, NONANTIALIASED_QUALITY, 0, wide(&look.face).as_ptr(),
-            );
-            if font != 0 {
-                self.send(WM_SETFONT, font as WPARAM, 0);
-                DeleteObject(core::mem::replace(&mut self.font, font));
-            }
-            let brush = CreateSolidBrush(colorref(look.paper));
-            if brush != 0 {
-                BRUSH.store(brush, Relaxed);
-                DeleteObject(core::mem::replace(&mut self.brush, brush));
-            }
-            INK.store(colorref(look.ink), Relaxed);
-            PAPER.store(colorref(look.paper), Relaxed);
-            AUTOSAVE_MS.store(look.autosave_ms, Relaxed);
-
-            let mut frame = RECT::default();
-            GetWindowRect(owner, &mut frame);
-            MoveWindow(self.host, frame.left + look.x, frame.top + look.y, look.w, look.h, 0);
-            MoveWindow(self.edit, 0, 0, look.w, look.h, 0);
-            // A resize resets the text rectangle, so this comes after it.
-            self.send(EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
-            let area = RECT { left: look.padding[0], top: look.padding[1], right: look.w - look.padding[2], bottom: look.h - look.padding[3] };
-            self.send(EM_SETRECTNP, 0, &area as *const RECT as LPARAM);
-        }
-
-        if !reopening {
-            // Typing that could not be saved last time is still in the box,
-            // and stays there: reloading the note would lose it a second time.
-            let pending = self.is_modified() && self.file.as_ref().is_some_and(|f| f.path == path);
-            let ready = if pending {
-                self.file.as_mut().is_some_and(|f| f.resync().is_ok())
-            } else {
-                match NoteFile::open(path) {
-                    Ok((file, text)) => {
-                        self.file = Some(file);
-                        let mut z = text;
-                        z.push(0);
-                        unsafe { SetWindowTextW(self.edit, z.as_ptr()) };
-                        self.send(EM_EMPTYUNDOBUFFER, 0, 0);
-                        self.send(EM_SETMODIFY, 0, 0);
-                        true
-                    }
-                    Err(_) => false,
-                }
+        let avail = room - if rows.is_empty() { 0.0 } else { hang };
+        if width + adv[i] > avail && i > start {
+            let whole = |from: usize| {
+                let end = chars[from..].iter().position(|&c| blank(c)).map_or(chars.len(), |n| from + n);
+                adv[from..end].iter().sum::<f32>() <= room - hang
             };
-            if !ready {
-                return Status::ReadError;
+            let cut = gap.filter(|&g| g > start && whole(g)).unwrap_or(i);
+            rows.push((start, cut));
+            start = cut;
+            width = adv[cut..i].iter().sum();
+            gap = None;
+            continue; // this character again, against the new row
+        }
+        width += adv[i];
+        i += 1;
+    }
+    rows.push((start, chars.len()));
+    rows
+}
+
+/// Every line of `text` wrapped to `room` px, in one flat list.  `measure`
+/// gives the advance of each character of a line's shown part.
+///
+/// A line's indent is repeated on the rows it wraps to, unless that would
+/// leave them less than `min_room` to wrap in.
+pub fn layout(text: &[char], room: f32, min_room: f32, measure: &mut dyn FnMut(&[char]) -> Vec<f32>) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let mut at = 0;
+    for line in text.split(|&c| c == '\n') {
+        let mark = marker(line);
+        let hidden = mark.map_or(0, |m| m.hidden);
+        let shown = &line[hidden..];
+        let mut adv = measure(shown);
+        adv.resize(shown.len(), 0.0);
+
+        // An item's indent is hidden with its brackets: the box is in the margin.
+        let indent = if mark.is_some() { 0 } else { shown.iter().take_while(|&&c| blank(c)).count() };
+        // whole pixels, so the rows under the first start where its words do
+        let mut hang = adv[..indent].iter().sum::<f32>().round();
+        if room - hang < min_room {
+            hang = 0.0;
+        }
+
+        let pieces = wrap(shown, &adv, room, hang);
+        let count = pieces.len();
+        for (n, (a, b)) in pieces.into_iter().enumerate() {
+            let mut x = if n == 0 { 0.0 } else { hang };
+            let mut xs = Vec::with_capacity(b - a + 1);
+            xs.push(x);
+            for w in &adv[a..b] {
+                x += w;
+                xs.push(x);
             }
-            let at = line_start(&self.text(), line);
-            let target = self.send(EM_LINEFROMCHAR, at, 0) + rows as isize;
-            let first = self.send(EM_GETFIRSTVISIBLELINE, 0, 0);
-            self.send(EM_LINESCROLL, 0, target - first);
+            rows.push(Row {
+                start: at + hidden + a,
+                end: at + hidden + b,
+                xs,
+                head: n == 0,
+                last: n + 1 == count,
+                todo: mark.is_some(),
+                done: mark.is_some_and(|m| m.done),
+                line: at,
+            });
         }
-        unsafe {
-            SetWindowPos(self.host, HWND_TOP, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE);
-            SetForegroundWindow(self.host);
-            SetFocus(self.edit);
+        at += line.len() + 1;
+    }
+    rows
+}
+
+// ---------------------------------------------------------------------------
+//  The text, the caret, and what the keys do
+// ---------------------------------------------------------------------------
+
+/// What the last change was, for undo: typing that carries straight on from
+/// more typing is one step, not one a letter.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Run {
+    None,
+    Typing,
+    Erasing,
+}
+
+struct State {
+    text: Vec<char>,
+    caret: usize,
+    anchor: usize,
+}
+
+pub struct Doc {
+    text: Vec<char>,
+    caret: usize,
+    /// The other end of the selection; the caret itself when there is none.
+    anchor: usize,
+    /// The caret is at the end of a wrapped row, not at the head of the next
+    /// -- the same place in the text, a different place on the paper.
+    eol: bool,
+    /// The x the Up and Down keys are steering for, while they are held to.
+    goal: Option<f32>,
+    undo: Vec<State>,
+    redo: Vec<State>,
+    run: Run,
+    /// A checkbox has just been typed: the space that follows `[ ]` out of
+    /// habit is already there.
+    swallow: bool,
+    /// Counts the changes to the text.
+    rev: u64,
+}
+
+impl Doc {
+    pub fn new() -> Doc {
+        Doc {
+            text: Vec::new(),
+            caret: 0,
+            anchor: 0,
+            eol: false,
+            goal: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            run: Run::None,
+            swallow: false,
+            rev: 0,
         }
-        if !reopening {
-            self.caret_to_pointer();
-        }
-        Status::Open
     }
 
-    /// The caret under the mouse pointer -- where the click that opened the
-    /// box landed -- or at the end if the pointer is not over the control.
-    fn caret_to_pointer(&self) {
-        let (mut p, mut r) = (POINT::default(), RECT::default());
-        unsafe {
-            GetCursorPos(&mut p);
-            ScreenToClient(self.edit, &mut p);
-            GetClientRect(self.edit, &mut r);
-        }
-        let inside = p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
-        let at = if inside {
-            let point = ((p.y as u16 as u32) << 16 | p.x as u16 as u32) as LPARAM;
-            let hit = self.send(EM_CHARFROMPOS, 0, point) as u32;
-            // Both halves are 16 bits, so past 64K characters the index wraps;
-            // the line's own start puts back what was lost.
-            let (low, line) = (hit & 0xFFFF, hit >> 16);
-            let start = self.send(EM_LINEINDEX, line as usize, 0) as u32;
-            start + (low.wrapping_sub(start) & 0xFFFF)
+    /// Start again from `text`: the file has been read.
+    pub fn load(&mut self, text: Vec<char>) {
+        self.text = text;
+        self.caret = self.caret.min(self.text.len());
+        self.anchor = self.caret;
+        self.undo.clear();
+        self.redo.clear();
+        self.run = Run::None;
+        self.swallow = false;
+        self.rev += 1;
+        self.settle();
+    }
+
+    pub fn text(&self) -> &[char] {
+        &self.text
+    }
+
+    pub fn rev(&self) -> u64 {
+        self.rev
+    }
+
+    pub fn caret(&self) -> usize {
+        self.caret
+    }
+
+    /// The selection, as start..end; empty when there is none.
+    pub fn range(&self) -> (usize, usize) {
+        (self.caret.min(self.anchor), self.caret.max(self.anchor))
+    }
+
+    pub fn selection(&self) -> Option<String> {
+        let (a, b) = self.range();
+        (a != b).then(|| self.text[a..b].iter().collect())
+    }
+
+    pub fn deselect(&mut self) {
+        self.anchor = self.caret;
+    }
+
+    // ---- finding places ---------------------------------------------------
+
+    fn line_start(&self, p: usize) -> usize {
+        self.text[..p].iter().rposition(|&c| c == '\n').map_or(0, |i| i + 1)
+    }
+
+    fn line_end(&self, p: usize) -> usize {
+        self.text[p..].iter().position(|&c| c == '\n').map_or(self.text.len(), |i| p + i)
+    }
+
+    /// Where the shown part of the line starting at `line` begins.
+    fn text_start(&self, line: usize) -> usize {
+        line + marker(&self.text[line..self.line_end(line)]).map_or(0, |m| m.hidden)
+    }
+
+    /// The nearest place to `p` a caret may stand: not inside a marker.
+    /// Coming from the right, that is the end of the line above.
+    fn snap(&self, p: usize, back: bool) -> usize {
+        let line = self.line_start(p);
+        let shown = self.text_start(line);
+        if p >= shown {
+            p
+        } else if back && line > 0 {
+            line - 1
         } else {
-            unsafe { GetWindowTextLengthW(self.edit) }.max(0) as u32
+            shown
+        }
+    }
+
+    fn word_start(&self, p: usize, floor: usize) -> usize {
+        let mut i = p;
+        while i > floor && blank(self.text[i - 1]) {
+            i -= 1;
+        }
+        while i > floor && !blank(self.text[i - 1]) {
+            i -= 1;
+        }
+        i
+    }
+
+    /// The start of the word after the one at `p`, as Ctrl-Right has it.
+    fn word_next(&self, p: usize, ceil: usize) -> usize {
+        let mut i = p;
+        while i < ceil && !blank(self.text[i]) {
+            i += 1;
+        }
+        while i < ceil && blank(self.text[i]) {
+            i += 1;
+        }
+        i
+    }
+
+    /// The row the caret is on and its x there.
+    pub fn locate(&self, rows: &[Row]) -> (usize, f32) {
+        if rows.is_empty() {
+            return (0, 0.0);
+        }
+        let mut r = rows.partition_point(|row| row.start <= self.caret).saturating_sub(1);
+        if self.eol && r > 0 && !rows[r].head && rows[r].start == self.caret {
+            r -= 1;
+        }
+        let row = &rows[r];
+        (r, row.xs[self.caret.saturating_sub(row.start).min(row.xs.len() - 1)])
+    }
+
+    /// The caret position on row `r` nearest to `x`, and whether that is the
+    /// end of a wrapped row.
+    pub fn hit(rows: &[Row], r: usize, x: f32) -> (usize, bool) {
+        let row = &rows[r];
+        let mut best = 0;
+        for (i, at) in row.xs.iter().enumerate() {
+            if (at - x).abs() < (row.xs[best] - x).abs() {
+                best = i;
+            }
+        }
+        let pos = row.start + best;
+        (pos, pos == row.end && !row.last && best > 0)
+    }
+
+    // ---- moving -----------------------------------------------------------
+
+    /// Put the caret at `p`, taking the selection along or dropping it.
+    fn go(&mut self, p: usize, extend: bool) {
+        self.caret = p;
+        if !extend {
+            self.anchor = p;
+        }
+        self.eol = false;
+        self.goal = None;
+        self.run = Run::None;
+        self.swallow = false;
+    }
+
+    /// A click at `pos`; with Shift, the selection reaches to it.
+    pub fn click(&mut self, pos: usize, eol: bool, extend: bool) {
+        self.go(self.snap(pos, false), extend);
+        self.eol = eol;
+    }
+
+    /// A double-click: the word there.
+    pub fn select_word(&mut self, pos: usize) {
+        let p = self.snap(pos, false);
+        let (floor, ceil) = (self.text_start(self.line_start(p)), self.line_end(p));
+        let in_word = |i: usize| i >= floor && i < ceil && !blank(self.text[i]);
+        let at = if in_word(p) {
+            p
+        } else if p > floor && in_word(p - 1) {
+            p - 1
+        } else {
+            return self.go(p, false);
         };
-        self.send(EM_SETSEL, at as usize, at as LPARAM);
+        let (mut a, mut b) = (at, at);
+        while a > floor && !blank(self.text[a - 1]) {
+            a -= 1;
+        }
+        while b < ceil && !blank(self.text[b]) {
+            b += 1;
+        }
+        self.go(b, false);
+        self.anchor = a;
     }
 
-    /// Write the box out.  The box stays modified until a write works, which
-    /// is what makes a failed one get tried again.
-    fn save(&mut self) -> Status {
-        if !self.is_modified() {
-            return Status::Unchanged;
-        }
-        let typed = self.text();
-        match self.file.as_mut().map(|f| f.save(&typed)) {
-            Some(Err(_)) => Status::WriteError,
-            Some(Ok(wrote)) => {
-                self.send(EM_SETMODIFY, 0, 0);
-                if wrote { Status::Saved } else { Status::Unchanged }
-            }
-            None => Status::Unchanged,
-        }
+    pub fn select_all(&mut self) {
+        self.go(self.text.len(), false);
+        self.anchor = self.snap(0, false);
     }
 
-    /// Typing has paused for the autosave delay: the box stays open.
-    pub fn autosave(&mut self) {
-        unsafe { KillTimer(self.host, AUTOSAVE_TIMER) };
-        if self.is_open() {
-            self.save();
+    pub fn left(&mut self, word: bool, extend: bool) {
+        let (a, b) = self.range();
+        if a != b && !extend {
+            return self.go(a, false);
         }
+        let p = self.caret;
+        let line = self.line_start(p);
+        let shown = self.text_start(line);
+        let to = if p <= shown {
+            if line == 0 { p } else { line - 1 }
+        } else if word {
+            self.word_start(p, shown)
+        } else {
+            p - 1
+        };
+        self.go(to, extend);
     }
 
-    /// Leaving the note: save and hide.  None if the box was not open.
-    pub fn leave(&mut self) -> Option<Status> {
-        if !self.is_open() {
-            return None;
+    pub fn right(&mut self, word: bool, extend: bool) {
+        let (a, b) = self.range();
+        if a != b && !extend {
+            return self.go(b, false);
         }
-        let status = self.save();
-        unsafe {
-            KillTimer(self.host, AUTOSAVE_TIMER);
-            ShowWindow(self.host, SW_HIDE);
-        }
-        Some(status)
+        let p = self.caret;
+        let end = self.line_end(p);
+        let to = if p >= end {
+            if end == self.text.len() { p } else { self.text_start(end + 1) }
+        } else if word {
+            self.word_next(p, end)
+        } else {
+            p + 1
+        };
+        self.go(to, extend);
     }
 
-    /// The end of the program: whatever the box holds is written as it goes.
-    pub fn destroy(&mut self) {
-        if self.host != 0 {
-            if self.is_open() {
-                self.save();
-            }
-            unsafe { DestroyWindow(self.host) };
-            self.host = 0;
-            self.edit = 0;
-            EDIT.store(0, Relaxed);
+    /// Up or down `by` rows, holding to the x the first of them left from.
+    pub fn vertical(&mut self, rows: &[Row], by: isize, extend: bool) {
+        if rows.is_empty() {
+            return;
         }
-        BRUSH.store(0, Relaxed);
-        unsafe {
-            DeleteObject(core::mem::take(&mut self.font));
-            DeleteObject(core::mem::take(&mut self.brush));
+        let (r, x) = self.locate(rows);
+        let goal = self.goal.unwrap_or(x);
+        let to = (r as isize + by).clamp(0, rows.len() as isize - 1) as usize;
+        if to != r {
+            let (pos, eol) = Doc::hit(rows, to, goal);
+            self.go(pos, extend);
+            self.eol = eol;
         }
+        self.goal = Some(goal);
     }
 
-    /// What the box does with a message by itself; None leaves it to the
-    /// caller, which is where the note hears about WM_LEAVE and the timer.
-    pub fn handle(wnd: HWND, msg: u32, wp: WPARAM, _lp: LPARAM) -> Option<LRESULT> {
-        unsafe {
-            match msg {
-                // Losing activation is leaving.  Gaining it, the keyboard goes
-                // to the text and not to the frame around it.
-                WM_ACTIVATE => {
-                    if lo_word(wp) as usize == WA_INACTIVE {
-                        PostMessageW(wnd, WM_LEAVE, 0, 0);
-                    } else if EDIT.load(Relaxed) != 0 {
-                        SetFocus(EDIT.load(Relaxed));
+    /// Home: the start of the row, or with `whole` of the note.
+    pub fn home(&mut self, rows: &[Row], whole: bool, extend: bool) {
+        let to = if whole || rows.is_empty() { self.snap(0, false) } else { rows[self.locate(rows).0].start };
+        self.go(to, extend);
+    }
+
+    /// End: the end of the row, or with `whole` of the note.
+    pub fn end(&mut self, rows: &[Row], whole: bool, extend: bool) {
+        if whole || rows.is_empty() {
+            return self.go(self.text.len(), extend);
+        }
+        let row = &rows[self.locate(rows).0];
+        self.go(row.end, extend);
+        self.eol = !row.last;
+    }
+
+    /// The selection follows the pointer to `pos`.
+    pub fn drag(&mut self, pos: usize, eol: bool) {
+        let anchor = self.anchor;
+        self.go(self.snap(pos, false), true);
+        self.anchor = anchor;
+        self.eol = eol;
+    }
+
+    // ---- changing ---------------------------------------------------------
+
+    /// Remember things as they are, before a change -- unless the change
+    /// carries on a run of the same kind.
+    fn save(&mut self, run: Run) {
+        if run != Run::None && run == self.run {
+            return;
+        }
+        self.undo.push(State { text: self.text.clone(), caret: self.caret, anchor: self.anchor });
+        if self.undo.len() > UNDO_MAX {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        self.run = run;
+    }
+
+    fn replace(&mut self, a: usize, b: usize, with: &[char]) {
+        self.text.splice(a..b, with.iter().copied());
+        self.caret = a + with.len();
+        self.anchor = self.caret;
+        self.rev += 1;
+    }
+
+    /// After a change: a line may have become an item, or stopped being one.
+    fn settle(&mut self) {
+        self.caret = self.snap(self.caret, false);
+        self.anchor = self.snap(self.anchor, false);
+        self.eol = false;
+        self.goal = None;
+    }
+
+    fn erase_selection(&mut self) -> bool {
+        let (a, b) = self.range();
+        if a == b {
+            return false;
+        }
+        self.save(Run::None);
+        self.replace(a, b, &[]);
+        self.settle();
+        true
+    }
+
+    /// One typed character, over the selection if there is one.
+    pub fn type_char(&mut self, c: char) {
+        if core::mem::take(&mut self.swallow) && c == ' ' && self.caret == self.anchor {
+            return;
+        }
+        // a blank starts a new step: undo goes back a word at a time
+        if blank(c) || self.caret != self.anchor {
+            self.run = Run::None;
+        }
+        self.save(Run::Typing);
+        let (a, b) = self.range();
+        self.replace(a, b, &[c]);
+
+        // "[ ]" finished at the head of a line: it is a checkbox from here on,
+        // and the caret goes to where its words will.
+        if c == ']' {
+            let line = self.line_start(self.caret);
+            if let Some(m) = marker(&self.text[line..self.line_end(line)]) {
+                if self.caret == line + m.mark + 2 {
+                    if self.text.get(self.caret) != Some(&' ') {
+                        self.text.insert(self.caret, ' ');
                     }
-                    Some(0)
+                    self.caret += 1;
+                    self.anchor = self.caret;
+                    self.swallow = true;
                 }
-                // Every keystroke restarts the timer, so it fires once typing
-                // has stopped for the whole delay.
-                WM_COMMAND if hi_word(wp) as usize == EN_CHANGE => {
-                    if AUTOSAVE_MS.load(Relaxed) > 0 {
-                        SetTimer(wnd, AUTOSAVE_TIMER, AUTOSAVE_MS.load(Relaxed), null());
+            }
+        }
+        self.settle();
+    }
+
+    /// Text put in whole -- a paste -- over the selection if there is one.
+    pub fn insert(&mut self, s: &str) {
+        let mut chars = Vec::with_capacity(s.len());
+        let mut rest = s.chars().peekable();
+        while let Some(c) = rest.next() {
+            match c {
+                '\r' => {
+                    if rest.peek() == Some(&'\n') {
+                        rest.next();
                     }
-                    Some(0)
+                    chars.push('\n');
                 }
-                WM_CTLCOLOREDIT => {
-                    SetTextColor(wp as HDC, INK.load(Relaxed));
-                    SetBkColor(wp as HDC, PAPER.load(Relaxed));
-                    Some(BRUSH.load(Relaxed))
-                }
-                WM_ERASEBKGND => Some(1), // the edit control covers every pixel
-                _ => None,
+                '\0' => {}
+                c => chars.push(c),
             }
         }
-    }
-
-    pub fn is_autosave_timer(wp: WPARAM) -> bool {
-        wp == AUTOSAVE_TIMER
-    }
-}
-
-/// The three keys a plain edit control gets wrong for a note.
-unsafe extern "system" fn keys(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    unsafe {
-        let previous = GetWindowLongPtrW(wnd, GWLP_USERDATA);
-        let send = |m: u32, w: WPARAM, l: LPARAM| SendMessageW(wnd, m, w, l);
-        match (msg, wp) {
-            (WM_KEYDOWN, VK_ESCAPE) => {
-                PostMessageW(parent_of(wnd), WM_LEAVE, 0, 0);
-                return 0;
-            }
-            (WM_CHAR, 0x1B) => return 0, // the character Escape types: no beep
-            (WM_CHAR, 0x01) => {
-                send(EM_SETSEL, 0, -1); // CTRL-A
-                return 0;
-            }
-            (WM_CHAR, 0x7F) => {
-                // CTRL-Backspace: the selection if there is one, else the
-                // word before the caret.  It would otherwise type a box glyph.
-                let (mut start, mut end) = (0u32, 0u32);
-                send(EM_GETSEL, &mut start as *mut u32 as WPARAM, &mut end as *mut u32 as LPARAM);
-                if start == end {
-                    let n = GetWindowTextLengthW(wnd).max(0);
-                    let mut buf = vec![0u16; n as usize + 1];
-                    let got = GetWindowTextW(wnd, buf.as_mut_ptr(), n + 1).max(0);
-                    buf.truncate(got as usize);
-                    send(EM_SETSEL, word_start(&buf, start as usize), start as LPARAM);
-                }
-                let nothing = [0u16];
-                send(EM_REPLACESEL, 1, nothing.as_ptr() as LPARAM);
-                return 0;
-            }
-            _ => {}
+        if chars.is_empty() && self.caret == self.anchor {
+            return;
         }
-        CallWindowProcW(previous, wnd, msg, wp, lp)
+        self.swallow = false;
+        self.save(Run::None);
+        let (a, b) = self.range();
+        self.replace(a, b, &chars);
+        self.settle();
     }
-}
 
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn GetParent(wnd: HWND) -> HWND;
-}
+    pub fn enter(&mut self) {
+        self.swallow = false;
+        self.save(Run::None);
+        let (a, b) = self.range();
+        self.replace(a, b, &[]);
+        let (line, end) = (self.line_start(self.caret), self.line_end(self.caret));
+        match marker(&self.text[line..end]) {
+            // An item with nothing in it: Enter ends the list, not adds to it.
+            Some(m) if line + m.hidden == end => self.replace(line, end, &[]),
+            Some(m) => {
+                let mut fresh: Vec<char> = self.text[line..line + m.mark - 1].to_vec();
+                fresh.extend(['[', ' ', ']', ' ']);
+                if self.caret == line + m.hidden {
+                    // at the head of an item: the new one goes above it, and
+                    // this one keeps its tick
+                    fresh.push('\n');
+                    let at = self.caret + fresh.len();
+                    self.replace(line, line, &fresh);
+                    self.caret = at;
+                    self.anchor = at;
+                } else {
+                    fresh.insert(0, '\n');
+                    self.replace(self.caret, self.caret, &fresh);
+                }
+            }
+            None => self.replace(self.caret, self.caret, &['\n']),
+        }
+        self.settle();
+    }
 
-fn parent_of(wnd: HWND) -> HWND {
-    unsafe { GetParent(wnd) }
+    /// Backspace; with `word`, back to the start of the word.
+    pub fn backspace(&mut self, word: bool) {
+        self.swallow = false;
+        if self.erase_selection() {
+            return;
+        }
+        let p = self.caret;
+        let line = self.line_start(p);
+        let shown = self.text_start(line);
+        let (from, run) = if p == shown && shown > line {
+            (line, Run::None) // the checkbox
+        } else if p == line {
+            if line == 0 {
+                return;
+            }
+            (line - 1, Run::None) // the line break
+        } else if word {
+            (self.word_start(p, shown), Run::None)
+        } else {
+            (p - 1, Run::Erasing)
+        };
+        self.save(run);
+        self.replace(from, p, &[]);
+        self.settle();
+    }
+
+    /// Delete; with `word`, up to the start of the next word.
+    pub fn delete(&mut self, word: bool) {
+        self.swallow = false;
+        if self.erase_selection() {
+            return;
+        }
+        let p = self.caret;
+        let end = self.line_end(p);
+        let (to, run) = if p == end {
+            if end == self.text.len() {
+                return;
+            }
+            // the line below joins this one, and leaves its checkbox behind
+            (self.text_start(end + 1), Run::None)
+        } else if word {
+            (self.word_next(p, end), Run::None)
+        } else {
+            (p + 1, Run::Erasing)
+        };
+        self.save(run);
+        self.replace(p, to, &[]);
+        self.settle();
+    }
+
+    /// Tick or untick the item whose line starts at `line`.
+    pub fn toggle(&mut self, line: usize) -> bool {
+        let Some(m) = marker(&self.text[line..self.line_end(line)]) else { return false };
+        self.save(Run::None);
+        self.text[line + m.mark] = if m.done { ' ' } else { 'x' };
+        self.rev += 1;
+        true
+    }
+
+    fn swap(&mut self, to: State) -> State {
+        let was = State { text: core::mem::replace(&mut self.text, to.text), caret: self.caret, anchor: self.anchor };
+        self.caret = to.caret;
+        self.anchor = to.anchor;
+        self.run = Run::None;
+        self.swallow = false;
+        self.eol = false;
+        self.goal = None;
+        self.rev += 1;
+        was
+    }
+
+    pub fn undo(&mut self) -> bool {
+        let Some(to) = self.undo.pop() else { return false };
+        let was = self.swap(to);
+        self.redo.push(was);
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(to) = self.redo.pop() else { return false };
+        let was = self.swap(to);
+        self.undo.push(was);
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn w(s: &str) -> Vec<u16> {
-        s.encode_utf16().collect()
+    fn chars(s: &str) -> Vec<char> {
+        s.chars().collect()
+    }
+
+    fn doc(s: &str) -> Doc {
+        let mut d = Doc::new();
+        d.load(chars(s));
+        d
+    }
+
+    fn text(d: &Doc) -> String {
+        d.text().iter().collect()
+    }
+
+    /// Every character 6 px wide.
+    fn six(line: &[char]) -> Vec<f32> {
+        vec![6.0; line.len()]
+    }
+
+    fn shown(text: &str, room: f32) -> Vec<String> {
+        let t = chars(text);
+        layout(&t, room, 24.0, &mut six).iter().map(|r| t[r.start..r.end].iter().collect()).collect()
     }
 
     #[test]
-    fn lf_file_round_trips() {
-        let file = b"[ ] milk\n[x] eggs\n";
-        let (text, format) = decode(file);
-        assert_eq!(text, w("[ ] milk\r\n[x] eggs\r\n"));
-        assert_eq!(encode(&text, format), file);
+    fn a_marker_is_brackets_at_the_head_of_a_line() {
+        assert_eq!(marker(&chars("[ ] milk")), Some(Marker { hidden: 4, mark: 1, done: false }));
+        assert_eq!(marker(&chars("  [x]eggs")), Some(Marker { hidden: 5, mark: 3, done: true }));
+        assert_eq!(marker(&chars("milk [ ]")), None);
+        assert_eq!(marker(&chars("[y] no")), None);
     }
 
     #[test]
-    fn crlf_and_bom_are_kept() {
-        let file = b"\xEF\xBB\xBFone\r\ntwo\r\n";
-        let (text, format) = decode(file);
-        assert_eq!(text, w("one\r\ntwo\r\n"));
-        assert_eq!(encode(&text, format), file);
+    fn words_wrap_whole_and_blanks_hang() {
+        // ten characters to a row
+        assert_eq!(shown("one two three four", 60.0), ["one two ", "three four"]);
+        assert_eq!(shown("", 60.0), [""]);
+        assert_eq!(shown("a\n\nb", 60.0), ["a", "", "b"]);
     }
 
     #[test]
-    fn a_final_line_break_is_added_once() {
-        let format = Format::default();
-        assert_eq!(encode(&w("a\r\nb"), format), b"a\nb\n");
-        assert_eq!(encode(&w("a\r\nb\r\n"), format), b"a\nb\n");
-        assert_eq!(encode(&w(""), format), b"");
+    fn a_word_too_long_for_any_row_fills_the_one_it_starts_on() {
+        assert_eq!(shown("see abcdefghijklmnop", 60.0), ["see abcdef", "ghijklmnop"]);
     }
 
     #[test]
-    fn a_1252_note_is_read_as_1252_and_written_as_utf8() {
-        let (text, format) = decode(b"caf\xE9 \x80\x96\n");
-        assert_eq!(text, w("caf\u{e9} \u{20ac}\u{2013}\r\n"));
-        assert_eq!(encode(&text, format), "caf\u{e9} \u{20ac}\u{2013}\n".as_bytes());
+    fn an_indent_is_repeated_and_an_item_hides_its_brackets() {
+        let t = chars("  one two three\n[x] milk");
+        let rows = layout(&t, 60.0, 24.0, &mut six);
+        assert_eq!(rows.len(), 3);
+        assert_eq!((rows[0].xs[0], rows[1].xs[0]), (0.0, 12.0));
+        assert!(rows[2].todo && rows[2].done && rows[2].head);
+        assert_eq!(t[rows[2].start..rows[2].end].iter().collect::<String>(), "milk");
+        assert_eq!(rows[2].line, 16);
     }
 
     #[test]
-    fn line_and_word_starts() {
-        let text = w("ab\r\ncd\r\nef");
-        assert_eq!(line_start(&text, 1), 0);
-        assert_eq!(line_start(&text, 2), 4);
-        assert_eq!(line_start(&text, 9), text.len());
-        let text = w("buy oat milk  ");
-        assert_eq!(word_start(&text, text.len()), 8);
-        let text = w("ab\r\n  cd");
-        assert_eq!(word_start(&text, 4), 2);
+    fn typing_brackets_makes_a_checkbox() {
+        let mut d = doc("");
+        for c in "[ ] milk".chars() {
+            d.type_char(c);
+        }
+        assert_eq!(text(&d), "[ ] milk");
+        let mut d = doc("");
+        for c in "[x]eggs".chars() {
+            d.type_char(c);
+        }
+        assert_eq!(text(&d), "[x] eggs");
+        assert!(d.undo());
+        assert_eq!(text(&d), "");
+    }
+
+    #[test]
+    fn enter_on_an_item_starts_another_and_on_an_empty_one_ends_the_list() {
+        let mut d = doc("[x] milk");
+        d.end(&[], true, false);
+        d.enter();
+        assert_eq!(text(&d), "[x] milk\n[ ] ");
+        assert_eq!(d.caret(), 13);
+        d.enter();
+        assert_eq!(text(&d), "[x] milk\n");
+        // at the head of an item the new one goes above
+        let mut d = doc("[x] milk");
+        d.enter();
+        assert_eq!(text(&d), "[ ] \n[x] milk");
+        assert_eq!(d.caret(), 9);
+    }
+
+    #[test]
+    fn backspace_at_the_head_of_an_item_takes_the_checkbox() {
+        let mut d = doc("one\n[ ] two");
+        d.click(8, false, false);
+        d.backspace(false);
+        assert_eq!(text(&d), "one\ntwo");
+        d.backspace(false);
+        assert_eq!(text(&d), "onetwo");
+        assert_eq!(d.caret(), 3);
+    }
+
+    #[test]
+    fn delete_at_the_end_of_a_line_joins_the_item_below_without_its_brackets() {
+        let mut d = doc("one\n[ ] two");
+        d.click(3, false, false);
+        d.delete(false);
+        assert_eq!(text(&d), "onetwo");
+    }
+
+    #[test]
+    fn the_caret_steps_over_a_marker() {
+        let mut d = doc("one\n[ ] two");
+        d.click(3, false, false);
+        d.right(false, false);
+        assert_eq!(d.caret(), 8);
+        d.left(false, false);
+        assert_eq!(d.caret(), 3);
+        // a click cannot land in it either
+        d.click(5, false, false);
+        assert_eq!(d.caret(), 8);
+    }
+
+    #[test]
+    fn up_and_down_hold_their_column() {
+        let t = "abcdefgh\nab\nabcdefgh";
+        let mut d = doc(t);
+        let rows = layout(d.text(), 600.0, 24.0, &mut six);
+        d.click(6, false, false);
+        d.vertical(&rows, 1, false);
+        assert_eq!(d.caret(), 11);
+        d.vertical(&rows, 1, false);
+        assert_eq!(d.caret(), 18);
+    }
+
+    #[test]
+    fn end_on_a_wrapped_row_stays_on_that_row() {
+        let mut d = doc("one two three four");
+        let rows = layout(d.text(), 60.0, 24.0, &mut six);
+        d.end(&rows, false, false);
+        assert_eq!(d.caret(), 8);
+        assert_eq!(d.locate(&rows).0, 0);
+        d.home(&rows, false, false);
+        assert_eq!(d.caret(), 0);
+    }
+
+    #[test]
+    fn a_double_click_takes_the_word_and_typing_replaces_it() {
+        let mut d = doc("buy oat milk");
+        d.select_word(5);
+        assert_eq!(d.selection().as_deref(), Some("oat"));
+        d.type_char('x');
+        assert_eq!(text(&d), "buy x milk");
+        assert!(d.undo());
+        assert_eq!(text(&d), "buy oat milk");
+        assert!(d.redo());
+        assert_eq!(text(&d), "buy x milk");
+    }
+
+    #[test]
+    fn a_paste_keeps_its_lines_whatever_ends_them() {
+        let mut d = doc("");
+        d.insert("a\r\nb\rc\n[ ] d");
+        assert_eq!(text(&d), "a\nb\nc\n[ ] d");
+        assert!(d.toggle(6));
+        assert_eq!(text(&d), "a\nb\nc\n[x] d");
     }
 }

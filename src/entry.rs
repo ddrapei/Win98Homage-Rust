@@ -5,17 +5,38 @@
 //!   Enter    take what was typed -- as does a click anywhere else
 //!   Escape   leave things as they were
 //!
-//! Built the way the note's box is (see `editor`): a borderless popup owned by
-//! the widget's window, because a layered window does not paint children.  It
-//! is a separate box rather than a second use of that one because the note's
-//! is the note file's keeper as much as it is a window, and none of that
-//! belongs to a line of text that is only ever handed back.
+//! It is a borderless popup owned by the widget's window rather than a child
+//! of it: a layered window does not paint children.  Owned, it stays above the
+//! widget, and losing activation is exactly "clicked elsewhere".
+//!
+//! The note does not use one of these.  A single line in a white field is
+//! what a Windows edit box looks like anyway; a sheet of paper with
+//! checkboxes in its margin is not, so the note draws its own typing (see
+//! `notes`).
 
 use core::ptr::{null, null_mut};
 use core::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering::Relaxed};
 
-use crate::editor::{colorref, Look};
 use crate::sys::*;
+
+/// Where the box sits over the widget and how it is painted.
+pub struct Look {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// left, top, right, bottom: where the text may not go
+    pub padding: [i32; 4],
+    pub paper: u32,
+    pub ink: u32,
+    pub face: String,
+    pub points: f64,
+}
+
+/// Win32 packs a colour as 0x00BBGGRR.
+fn colorref(argb: u32) -> u32 {
+    (argb >> 16 & 255) | (argb & 0xFF00) | (argb & 255) << 16
+}
 
 /// Posted to the box when the user is done with it, either way.
 pub const WM_LEAVE: u32 = WM_APP + 1;

@@ -15,7 +15,9 @@
 //!   widget       what the host asks of a widget
 //!   datetime     Date/Time Properties  (with usage: the on/unlocked journal)
 //!   resources    Resource Meter
-//!   notes        Sticky Note           (with editor: the box you type in)
+//!   notes        Sticky Note           (with editor: its text and what the
+//!                                       keys do to it; keys: the window that
+//!                                       holds the keyboard for it)
 //!   weather      Weather               (and the child that fetches it; entry:
 //!                                       the box the city is typed in)
 //!   rain         Rain Window           (the one that is animated)
@@ -36,6 +38,7 @@ mod datetime;
 mod dump;
 mod editor;
 mod entry;
+mod keys;
 mod notes;
 mod rain;
 mod resources;

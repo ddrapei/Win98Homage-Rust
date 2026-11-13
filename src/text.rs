@@ -265,6 +265,57 @@ impl Text {
         }
     }
 
+    /// How far each character of `s` moves the pen when the string is set on
+    /// one line in `font`, in pixels: one entry a character, in order.  They
+    /// are the layout's own figures, so text measured here breaks and takes a
+    /// caret exactly where `draw` puts its glyphs.  A character that shares a
+    /// glyph with the one before it -- a combining mark -- is 0 wide.
+    pub fn advances(&mut self, font: usize, s: &str, out: &mut Vec<f32>) {
+        /// DWRITE_CLUSTER_METRICS
+        #[repr(C)]
+        #[derive(Clone, Copy, Default)]
+        struct Cluster {
+            width: f32,
+            /// UTF-16 units
+            length: u16,
+            flags: u16,
+        }
+        out.clear();
+        self.wide.clear();
+        self.wide.extend(s.encode_utf16());
+        if self.wide.is_empty() {
+            return;
+        }
+        let mut clusters = vec![Cluster::default(); self.wide.len()];
+        let mut count = 0u32;
+        unsafe {
+            let format = self.prepare(font, 0, false);
+            let layout = self.layout(format, 100_000.0, 1000.0);
+            if !layout.is_null() {
+                let get: unsafe extern "system" fn(Com, *mut Cluster, u32, *mut u32) -> HRESULT = slot(layout, 62);
+                if get(layout, clusters.as_mut_ptr(), clusters.len() as u32, &mut count) < 0 {
+                    count = 0;
+                }
+                release(layout);
+            }
+        }
+        // A cluster's width goes to the unit it starts on.
+        let mut by_unit = vec![0f32; self.wide.len()];
+        let mut unit = 0;
+        for c in &clusters[..(count as usize).min(clusters.len())] {
+            if let Some(w) = by_unit.get_mut(unit) {
+                *w = c.width;
+            }
+            unit += c.length as usize;
+        }
+        let mut unit = 0;
+        for c in s.chars() {
+            // no layout to ask: the width of a digit, as good a guess as any
+            out.push(if count == 0 { 6.0 } else { by_unit[unit] });
+            unit += c.len_utf16();
+        }
+    }
+
     /// Draw a String meter; returns the rectangle the meter occupies.
     pub fn draw(&mut self, canvas: &mut Canvas, s: &Spec) -> Rect {
         self.wide.clear();

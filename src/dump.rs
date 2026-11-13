@@ -18,12 +18,19 @@
 //!   rain=2.5                           seconds into the shower (always the same one)
 //!   set.Notes.Created=30 Jul 2026      any settings.ini value
 //!   do.datetime=SetPage 1;Select 12    commands to run before drawing
+//!   type.notes=press 60 50;type milk;key Shift+Home
+//!                                      the note typed on, a step at a time:
+//!                                      press / double / shift / drag X Y at a
+//!                                      point of the window, type TEXT, and
+//!                                      key [Shift+][Ctrl+]NAME.  Nothing is
+//!                                      written to the note file by these.
 
 use std::path::{Path, PathBuf};
 
 use crate::canvas::Canvas;
 use crate::clock;
 use crate::datetime::DateTime;
+use crate::keys::Key;
 use crate::notes::Notes;
 use crate::rain::Rain;
 use crate::resources::Resources;
@@ -73,6 +80,59 @@ fn perform(widget: &mut dyn Widget, script: &str, ctx: &mut Ctx) {
             _ => (0, 0, 0),
         };
         widget.command(cmd, arg, x, y, ctx);
+    }
+}
+
+/// "press 60 50;type milk;key Shift+Home": the note typed on, through the same
+/// doors the window uses.
+fn type_on(notes: &mut Notes, script: &str) {
+    for step in script.split(';').map(str::trim_start).filter(|s| !s.is_empty()) {
+        let (verb, rest) = step.split_once(' ').unwrap_or((step, ""));
+        let mut nums = rest.split_whitespace().filter_map(|p| p.parse::<i32>().ok());
+        let (x, y) = (nums.next().unwrap_or(0), nums.next().unwrap_or(0));
+        match verb {
+            "press" => drop(notes.press(x, y, false, false)),
+            "shift" => drop(notes.press(x, y, false, true)),
+            "double" => {
+                notes.press(x, y, false, false);
+                notes.press(x, y, true, false);
+            }
+            "drag" => drop(notes.drag(x, y)),
+            "type" => rest.chars().for_each(|c| drop(notes.typed(c))),
+            "key" => {
+                let mut name = rest.trim();
+                let (mut shift, mut ctrl) = (false, false);
+                loop {
+                    if let Some(n) = name.strip_prefix("Shift+") {
+                        (shift, name) = (true, n);
+                    } else if let Some(n) = name.strip_prefix("Ctrl+") {
+                        (ctrl, name) = (true, n);
+                    } else {
+                        break;
+                    }
+                }
+                let key = match name {
+                    "Left" => Key::Left,
+                    "Right" => Key::Right,
+                    "Up" => Key::Up,
+                    "Down" => Key::Down,
+                    "Home" => Key::Home,
+                    "End" => Key::End,
+                    "PageUp" => Key::PageUp,
+                    "PageDown" => Key::PageDown,
+                    "Backspace" => Key::Backspace,
+                    "Delete" => Key::Delete,
+                    "Enter" => Key::Enter,
+                    "Tab" => Key::Tab,
+                    "A" => Key::SelectAll,
+                    "Z" => Key::Undo,
+                    "Y" => Key::Redo,
+                    _ => continue,
+                };
+                notes.key(key, shift, ctrl);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -126,6 +186,7 @@ pub fn run(args: &[String]) -> i32 {
     {
         let mut w = Notes::new(&mut ctx, Some(get("note_file").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("no-such-note.txt"))));
         perform(&mut w, get("do.notes").unwrap_or(""), &mut ctx);
+        type_on(&mut w, get("type.notes").unwrap_or(""));
         render(&w, &mut text, &dir.join("notes.bmp"));
     }
     {

@@ -498,8 +498,7 @@ fn dyn_resources(n: &str) -> bool {
 }
 
 fn dyn_notes(n: &str) -> bool {
-    matches!(n, "NoteBg" | "Words" | "ThumbY" | "ThumbH" | "UpInk" | "DownInk" | "Created")
-        || ["Row", "RowInk", "Box", "Tick", "Strike"].iter().any(|p| numbered(n, p))
+    matches!(n, "NoteBg" | "Words" | "ThumbY" | "ThumbH" | "UpInk" | "DownInk" | "RuleInk" | "Created")
 }
 
 fn dyn_weather(n: &str) -> bool {
@@ -679,7 +678,7 @@ fn compile_skin(def: &SkinDef, root: &Path, fonts: &mut Vec<(String, bool)>, out
     // The edit box is not a meter, but where it sits over the paper is
     // layout all the same.
     if let Some(input) = sections.iter().find(|s| s.name.eq_ignore_ascii_case("EditBox")) {
-        for key in ["x", "y", "w", "h", "autosave"] {
+        for key in ["x", "y", "w", "h"] {
             if let Some(n) = input.get(key).and_then(|v| eval(&ctx.resolve(v))) {
                 writeln!(out, "        (\"Input{}\", \"{n}\"),", key.to_ascii_uppercase()).unwrap();
             }

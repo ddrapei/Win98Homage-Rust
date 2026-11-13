@@ -2,7 +2,9 @@
 //!
 //! Each widget is a borderless layered window that never takes the keyboard
 //! and never shows in the taskbar or Alt-Tab -- a desktop widget, not an
-//! application window.  It is drawn into one shared 32-bit buffer and handed
+//! application window.  (The note is typed on all the same: an unseen window
+//! it owns takes the keyboard for it -- see `keys`.)  It is drawn into one
+//! shared 32-bit buffer and handed
 //! to the window manager with UpdateLayeredWindow; only the part that changed
 //! is redrawn and sent.
 //!
@@ -27,8 +29,8 @@ use std::path::PathBuf;
 use crate::canvas::{Canvas, Rect};
 use crate::clock;
 use crate::datetime::DateTime;
-use crate::editor::{self, Editor, Look};
-use crate::entry::{self, Entry};
+use crate::entry::{self, Entry, Look};
+use crate::keys::{self, Input, Key, Keys};
 use crate::notes::Notes;
 use crate::rain::Rain;
 use crate::resources::Resources;
@@ -37,7 +39,7 @@ use crate::skin::{self, Act, Ev, Hooks, Skin};
 use crate::sys::*;
 use crate::text::Text;
 use crate::weather::Weather;
-use crate::widget::{Ctx, Dirty, Outcome, Request, Widget};
+use crate::widget::{Ctx, Dirty, Outcome, Pressed, Request, Widget};
 
 const WIDGETS: usize = 5;
 const NOTES: usize = 2;
@@ -129,6 +131,8 @@ struct Press {
     cursor: POINT,
     window: POINT,
     dragging: bool,
+    /// The widget took the press for itself: it is not the window's to drag.
+    owned: bool,
     /// The press was the second of a double-click that did something: the
     /// release that follows it is not a click.
     spent: bool,
@@ -187,7 +191,8 @@ struct App {
     buffer: Buffer,
     widgets: Widgets,
     slots: [Slot; WIDGETS],
-    editor: Editor,
+    /// The window that holds the keyboard while the note is typed on.
+    keys: Keys,
     /// The box the weather's city is typed in.
     city: Entry,
     press: Option<Press>,
@@ -458,7 +463,7 @@ impl App {
     /// Take a widget away, window and state, so it costs nothing while shut.
     fn stop(&mut self, i: usize) {
         if i == NOTES {
-            self.editor.destroy();
+            self.keys.destroy();
         }
         if i == WEATHER {
             self.city.destroy();
@@ -547,11 +552,11 @@ impl App {
                 self.set_enabled(i, false);
                 Later::Nothing
             }
-            Request::Edit { line, down } => {
-                self.open_editor(line, down);
+            Request::TakeKeys => {
+                self.open_editor();
                 Later::Nothing
             }
-            Request::LeaveEdit => {
+            Request::DropKeys => {
                 self.leave_editor();
                 Later::Nothing
             }
@@ -582,7 +587,67 @@ impl App {
         Some(self.command(i, act, mx, my))
     }
 
-    // ---- the note's edit box -------------------------------------------------
+    // ---- the note's keyboard ---------------------------------------------------
+
+    /// The note is being typed on: give it the keyboard.
+    fn open_editor(&mut self) {
+        let wnd = self.slots[NOTES].hwnd;
+        if wnd == 0 || !self.keys.open(wnd, keys_proc) {
+            // no keyboard to give it: the note is as it was
+            self.leave_editor();
+        }
+    }
+
+    /// The typing is over, however it came to be: the keyboard goes back, and
+    /// the note writes itself out.
+    fn leave_editor(&mut self) {
+        if self.keys.close() {
+            self.trim_at = self.ticks + 5;
+        }
+        if let Some(notes) = self.widgets.notes.as_mut().filter(|n| n.is_editing()) {
+            let dirty = notes.blur();
+            self.paint(NOTES, dirty);
+        }
+    }
+
+    /// A key or a character for the note.  The clipboard's three are done
+    /// here, where the clipboard is.
+    fn note_input(&mut self, input: Input) {
+        let owner = self.keys.window();
+        let Some(notes) = self.widgets.notes.as_mut() else { return };
+        let outcome = match input {
+            Input::Char(c) => notes.typed(c),
+            Input::Key { key: Key::Copy, .. } => {
+                if let Some(text) = notes.copy() {
+                    keys::set_clipboard(owner, &text);
+                }
+                Outcome::none()
+            }
+            Input::Key { key: Key::Cut, .. } => {
+                let (text, outcome) = notes.cut();
+                if let Some(text) = text {
+                    keys::set_clipboard(owner, &text);
+                }
+                outcome
+            }
+            Input::Key { key: Key::Paste, .. } => match keys::clipboard(owner) {
+                Some(text) => notes.paste(&text),
+                None => Outcome::none(),
+            },
+            Input::Key { key, shift, ctrl } => notes.key(key, shift, ctrl),
+        };
+        self.apply(NOTES, outcome);
+    }
+
+    /// The keyboard's timer: the caret blinks, and typing that has paused is
+    /// saved.
+    fn note_pulse(&mut self) {
+        let Some(notes) = self.widgets.notes.as_mut() else { return };
+        let dirty = notes.pulse(Keys::pulse_ms(), Keys::blinks());
+        self.paint(NOTES, dirty);
+    }
+
+    // ---- the weather's city box ----------------------------------------------
 
     /// Where a skin's [EditBox] puts its box, and what it is painted with.
     fn look(skin: &Skin, paper: u32, ink: u32) -> Look {
@@ -600,36 +665,8 @@ impl App {
             ink,
             face: skin.var("Font").to_owned(),
             points: skin.num("FontSize", 8.0),
-            autosave_ms: skin.int("InputAUTOSAVE", 1000).max(0) as u32,
         }
     }
-
-    fn open_editor(&mut self, line: usize, down: usize) {
-        let Some(notes) = self.widgets.notes.as_ref() else { return };
-        let (paper, ink) = notes.colours();
-        let look = Self::look(notes.skin(), paper, ink);
-        let path = notes.path().clone();
-        let status = self.editor.open(self.slots[NOTES].hwnd, editor_proc, &look, &path, line, down);
-        if status != editor::Status::Open {
-            self.editor_closed(status);
-        }
-    }
-
-    fn leave_editor(&mut self) {
-        if let Some(status) = self.editor.leave() {
-            self.trim_at = self.ticks + 5;
-            self.editor_closed(status);
-        }
-    }
-
-    fn editor_closed(&mut self, status: editor::Status) {
-        if let Some(notes) = self.widgets.notes.as_mut() {
-            let dirty = notes.closed(status);
-            self.paint(NOTES, dirty);
-        }
-    }
-
-    // ---- the weather's city box ----------------------------------------------
 
     fn open_city(&mut self) {
         let Some(weather) = self.widgets.weather.as_ref() else { return };
@@ -674,7 +711,7 @@ impl App {
         }
         self.settings.save();
         self.check_desktop();
-        // Starting up, a menu, the edit box: each touches a good deal that is
+        // Starting up, a menu, typing: each touches a good deal that is
         // not needed again.  Hand those pages back once things have settled.
         if self.ticks == self.trim_at {
             unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX) };
@@ -766,20 +803,32 @@ impl App {
     // ---- the mouse ---------------------------------------------------------------
 
     fn mouse_down(&mut self, i: usize, wnd: HWND, x: i32, y: i32, double: bool) -> Later {
-        // Clicking anywhere that is not the edit box finishes the edit.
-        self.leave_editor();
+        // Clicking anywhere but on the sheet that is being typed on finishes
+        // the typing.
+        if !(i == NOTES && self.widgets.notes.as_ref().is_some_and(|n| n.on_sheet(x, y))) {
+            self.leave_editor();
+        }
         self.leave_city();
         let mut later = Later::Nothing;
+        // The widget may want the press for itself: text to put a caret in.
+        let shift = unsafe { GetKeyState(VK_SHIFT) } < 0;
+        let owned = match self.widgets.get_mut(i).map(|w| w.press(x, y, double, shift)) {
+            Some(Pressed::Taken(outcome)) => {
+                later = self.apply(i, outcome);
+                true
+            }
+            _ => false,
+        };
         // A double-click does what the meter under it says a double-click
         // does; where it says nothing, it is simply a second click.
-        let spent = double && self.fire(i, Ev::Dbl, x, y).map(|l| later = l).is_some();
+        let spent = !owned && double && self.fire(i, Ev::Dbl, x, y).map(|l| later = l).is_some();
         let (mut cursor, mut frame) = (POINT::default(), RECT::default());
         unsafe {
             GetCursorPos(&mut cursor);
             GetWindowRect(wnd, &mut frame);
             SetCapture(wnd);
         }
-        self.press = Some(Press { idx: i, cursor, window: POINT { x: frame.left, y: frame.top }, dragging: false, spent });
+        self.press = Some(Press { idx: i, cursor, window: POINT { x: frame.left, y: frame.top }, dragging: false, owned, spent });
         if self.position == Position::Normal {
             unsafe { SetWindowPos(wnd, HWND_TOP, 0, 0, 0, 0, ZPOS_FLAGS) };
         }
@@ -790,6 +839,11 @@ impl App {
         // A press whose release went somewhere else is over.
         if !button_down {
             self.press = None;
+        }
+        if self.press.as_ref().is_some_and(|p| p.idx == i && p.owned) {
+            let dirty = self.widgets.get_mut(i).map_or(Dirty::None, |w| w.drag(x, y));
+            self.paint(i, dirty);
+            return Later::Nothing;
         }
         if let Some(press) = self.press.as_mut().filter(|p| p.idx == i) {
             let mut cursor = POINT::default();
@@ -845,7 +899,7 @@ impl App {
             self.settings.save();
             return Later::Nothing;
         }
-        if press.spent {
+        if press.spent || press.owned {
             return Later::Nothing;
         }
         self.fire(i, Ev::Up, x, y).unwrap_or(Later::Nothing)
@@ -1067,7 +1121,7 @@ impl App {
     }
 
     fn shutdown(&mut self) {
-        self.editor.destroy();
+        self.keys.destroy();
         self.city.destroy();
         let (mut ctx, widgets) = self.ctx();
         for i in 0..WIDGETS {
@@ -1206,6 +1260,15 @@ unsafe extern "system" fn widget_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 }
                 return 0;
             }
+            // Over text the pointer is the one for text.
+            WM_SETCURSOR if lo_word(lp as usize) == HTCLIENT => {
+                let mut p = POINT::default();
+                GetCursorPos(&mut p);
+                ScreenToClient(wnd, &mut p);
+                let over_text = with_app(|app| app.widgets.get(i).is_some_and(|w| w.ibeam(p.x, p.y))).unwrap_or(false);
+                SetCursor(LoadCursorW(0, if over_text { IDC_IBEAM } else { IDC_ARROW } as PCWSTR));
+                return 1;
+            }
             WM_LBUTTONDOWN => with_app(|app| app.mouse_down(i, wnd, x_of(lp), y_of(lp), false)),
             WM_LBUTTONDBLCLK => with_app(|app| app.mouse_down(i, wnd, x_of(lp), y_of(lp), true)),
             WM_MOUSEMOVE => with_app(|app| app.mouse_move(i, wnd, x_of(lp), y_of(lp), wp & 1 != 0)),
@@ -1245,22 +1308,27 @@ unsafe extern "system" fn widget_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
     }
 }
 
-unsafe extern "system" fn editor_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    unsafe {
-        if let Some(result) = Editor::handle(wnd, msg, wp, lp) {
-            return result;
+unsafe extern "system" fn keys_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match keys::read(wnd, msg, wp) {
+        keys::Event::Input(input) => {
+            with_app(|app| app.note_input(input));
+            0
         }
-        match msg {
-            editor::WM_LEAVE => {
-                with_app(|app| app.leave_editor());
-                0
-            }
-            WM_TIMER if Editor::is_autosave_timer(wp) => {
-                with_app(|app| app.editor.autosave());
-                0
-            }
-            _ => DefWindowProcW(wnd, msg, wp, lp),
+        keys::Event::Pulse => {
+            with_app(|app| app.note_pulse());
+            0
         }
+        keys::Event::Leave => {
+            with_app(|app| app.leave_editor());
+            0
+        }
+        keys::Event::Wheel(delta) => {
+            let later = with_app(|app| app.mouse_wheel(NOTES, app.slots[NOTES].hwnd, x_of(lp), y_of(lp), delta));
+            run_later(later.unwrap_or(Later::Nothing));
+            0
+        }
+        keys::Event::Done(result) => result,
+        keys::Event::Other => unsafe { DefWindowProcW(wnd, msg, wp, lp) },
     }
 }
 
@@ -1415,7 +1483,7 @@ pub fn run() -> i32 {
             buffer: Buffer::new(w, h),
             widgets: Widgets { datetime: None, resources: None, notes: None, weather: None, rain: None },
             slots: core::array::from_fn(|_| slot()),
-            editor: Editor::new(),
+            keys: Keys::new(),
             city: Entry::new(),
             press: None,
             wheel: 0,

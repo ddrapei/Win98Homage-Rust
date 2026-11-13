@@ -33,11 +33,10 @@ pub enum Request {
     About,
     Close,
     Open(PathBuf),
-    /// Put the edit box over the note, showing this line of the file at the
-    /// top and this many wrapped rows into it.
-    Edit { line: usize, down: usize },
-    /// Finish the edit, as a click outside the box would.
-    LeaveEdit,
+    /// Give the note the keyboard: it is being typed on.
+    TakeKeys,
+    /// The note is done with the keyboard, as a click elsewhere would say.
+    DropKeys,
     /// Put the one-line box over the weather's city field.
     EditCity,
 }
@@ -60,6 +59,17 @@ impl Outcome {
     pub fn request(request: Request) -> Outcome {
         Outcome { dirty: Dirty::None, request }
     }
+}
+
+/// What a widget makes of the left button going down on it.
+pub enum Pressed {
+    /// Nothing of its own: dragging moves the window, and letting go fires
+    /// the action of the meter underneath.
+    No,
+    /// The press is the widget's.  The pointer's moves go to `drag` until the
+    /// button comes up, the window stays where it is, and no meter's action
+    /// fires.
+    Taken(Outcome),
 }
 
 /// The world a widget runs in.  Time is handed in rather than read, so the
@@ -97,6 +107,20 @@ pub trait Widget: Hooks {
     /// A mouse action from the skin.  `x`, `y` are relative to the meter that
     /// carried it.
     fn command(&mut self, cmd: &str, arg: i32, x: i32, y: i32, ctx: &mut Ctx) -> Outcome;
+    /// The left button has gone down at this point of the window; `double`
+    /// for the second press of a double-click, `shift` if Shift is held.
+    fn press(&mut self, _x: i32, _y: i32, _double: bool, _shift: bool) -> Pressed {
+        Pressed::No
+    }
+    /// The pointer has moved to this point of the window, with a press the
+    /// widget took still held.
+    fn drag(&mut self, _x: i32, _y: i32) -> Dirty {
+        Dirty::None
+    }
+    /// Whether the pointer is over text, and should look it.
+    fn ibeam(&self, _x: i32, _y: i32) -> bool {
+        false
+    }
     /// Its own entries for the right-click menu.
     fn menu(&self, _items: &mut Vec<MenuItem>) {}
     fn menu_command(&mut self, _id: u32, _ctx: &mut Ctx) -> Outcome {

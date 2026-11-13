@@ -207,6 +207,8 @@ Enabled=1
 NoteFile={note_file}
 ; 1 = canary paper, 2 = white
 Colour={colour}
+; 1 = ruled paper, 0 = plain
+Ruled={ruled}
 ; shown in the left status panel; blank stamps today's date on the next start
 Created={created}
 
@@ -230,6 +232,7 @@ ManualLocation={place}
         graph_to = dt.var("GraphTo"),
         note_file = notes.var("NoteFile"),
         colour = notes.var("Colour"),
+        ruled = notes.var("Ruled"),
         created = notes.var("Created"),
         unit = wx.var("TempUnit"),
         lat = wx.var("ManualLat"),

@@ -47,19 +47,29 @@ widgets as a whole.
 ## Using them
 
 They are desktop widgets, not windows: no taskbar button, not in Alt-Tab, and they never
-take the keyboard (except the note's edit box and the weather's city field, while you
-type in them).
+take the keyboard (except the note and the weather's city field, while you type in
+them).
 
 | | |
 |--|--|
-| drag anywhere | move a widget; it snaps to screen edges and to the others (hold Ctrl or Shift not to) |
+| drag anywhere | move a widget; it snaps to screen edges and to the others (hold Ctrl or Shift not to). The note's text is the exception: dragging there selects |
 | right-click | menu: the widget's own options, Position, Snap, Lock, Close, the list of widgets, Start with Windows, settings, Exit |
 | tray icon | the same menu — this is how a closed widget is brought back |
 | `X` | closes that widget (it stops costing anything); `?` says what it does |
 
 In the widgets themselves: tabs, month list, calendar selection, scroll to browse months,
-the 12/24-hour field, checkboxes, the scrollbar, the paper swatch,
-click-the-paper-to-edit with save-as-you-type and a `.bak`, and the weather's city field.
+the 12/24-hour field, checkboxes, the scrollbar, the paper swatch and the ruled-paper
+button, typing on the note with save-as-you-type and a `.bak`, and the weather's city
+field.
+
+**Typing on the note.** Click the text and type: the caret goes where you clicked, and
+the note looks the same as it did before you clicked — same line breaks, checkboxes still
+in the margin, done items still struck through. Drag or Shift+arrows to select,
+double-click for a word, Ctrl+C/X/V, Ctrl+Z/Y to undo and redo. Type `[ ]` at the start
+of a line to make a checkbox; Enter on a checkbox line starts another (on an empty one it
+ends the list), and Backspace at the start of one removes the checkbox. A click anywhere
+else, or Escape, finishes; the note is saved a second after you stop typing and again
+when you finish.
 
 **The weather's city.** Click the city field and type a place: `Lviv`, or `Paris, US` /
 `Portland, Maine` to say which one. Enter (or a click anywhere else) looks it up and pins
@@ -100,8 +110,9 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
   its pane only, from a timer that runs only while there is rain to show — not while it
   is paused or closed, nor while the workstation is locked. A frame takes about a fifth
   of a millisecond to draw.
-- The note is wrapped by a fixed table of character widths, so it wraps in the same place
-  on every machine.
+- The note is wrapped by the widths DirectWrite gives for the font it is drawn in, and
+  drawn by one piece of code whether or not it is being typed on, so nothing on the sheet
+  moves when you click in.
 - `?` opens a small About box.
 
 ## Layout of the source
@@ -114,7 +125,8 @@ canvas       the software canvas they are drawn on
 text         DirectWrite text, rasterised into the canvas
 datetime     Date/Time Properties   (usage: the on/unlocked journal)
 resources    Resource Meter
-notes        Sticky Note            (editor: the box you type in)
+notes        Sticky Note            (editor: its text and what the keys do to it;
+                                     keys: the window that holds the keyboard for it)
 weather      Weather                (and the child that fetches it; entry: the city box)
 rain         Rain Window            (the one that is animated)
 app          windows, mouse, menus, tray, the once-a-second tick, the frames in between

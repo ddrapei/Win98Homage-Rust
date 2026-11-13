@@ -1,63 +1,73 @@
-//! The Sticky Note: a text file wrapped onto twelve rows of paper, with
-//! checkboxes in the margin and a Win98 scrollbar.
+//! The Sticky Note: a text file on a sheet of paper, with checkboxes in the
+//! margin and a Win98 scrollbar, typed on where it lies.
 //!
-//! The file is the note.  A line that opens with `[ ]` or `[x]` is an item
-//! and gets a checkbox; clicking the box flips the marker and writes the file
-//! back.  A click on the text hands the whole sheet to the edit box (see
-//! `editor`), and the file is re-read when that closes.
+//! The file is the note.  A line that opens with `[ ]` or `[x]` is an item:
+//! its brackets are never shown, a checkbox in the margin stands for them, and
+//! a click on the box flips the marker.  A click on the text puts a caret
+//! there, and from then until something else is clicked the keyboard is the
+//! note's.
 //!
-//! Wrapping is done here, a row at a time, because a row is what a checkbox
-//! hangs off, what a strike-through crosses and what the scrollbar counts.
-//! The widths are the skin's own table of advance widths, kept exactly as it
-//! was -- so a note breaks where it always has -- and the rows are still
-//! clipped to the column, so a line the table measures short ends in an
-//! ellipsis rather than running into the scrollbar.
+//! There is one picture of the note, not one for reading and another for
+//! typing.  `editor` holds the text and wraps it into rows; this draws those
+//! rows -- checkbox, words, strike-through -- and, while the note has the
+//! keyboard, a selection and a caret on top.  Nothing is laid over the sheet
+//! and nothing on it moves when the typing starts or stops.
+//!
+//! The rows are measured with the font they are drawn in (`Text::advances`),
+//! so a line breaks where its words actually stop fitting, in any language.
+//!
+//! Saving is the note's own business: a second after the typing pauses, and
+//! again when the keyboard goes elsewhere.  The first write of each spell of
+//! typing copies the note as it was to `.bak`.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::canvas::Canvas;
+use crate::canvas::{Canvas, Rect};
 use crate::clock;
-use crate::editor::Status;
+use crate::editor::{self, Doc, Row, TAB};
+use crate::keys::Key;
 use crate::settings::write_whole;
-use crate::skin::{self, index_of, Hooks, Meter, Skin};
-use crate::text::Text;
-use crate::widget::{Ctx, Dirty, MenuItem, Outcome, Request, Widget};
+use crate::skin::{self, Hooks, Meter, Skin};
+use crate::text::{Spec, Text};
+use crate::widget::{Ctx, Dirty, MenuItem, Outcome, Pressed, Request, Widget};
 
 static SKIN: &Skin = &skin::notes::SKIN;
 const SECTION: &str = "Notes";
 
-/// Spaces a tab stands in for, before measuring.
-const TAB: usize = 4;
-/// Px held back from the column on every line, to cover the width table
-/// being a pixel out.
-const SLACK: i32 = 6;
+/// Px of the text column kept clear on the right, for the caret that stands
+/// after a row that fills it.
+const SLACK: i32 = 2;
 /// A line indented past this much of the column keeps its words and loses
 /// its indent.
-const MIN_ROOM: i32 = 24;
+const MIN_ROOM: f32 = 24.0;
 /// Px below a row's top where the line through a done item sits.
 const STRIKE_DY: i32 = 6;
 /// The thumb never gets shorter than the arrow buttons it runs between.
 const THUMB_MIN: i32 = 11;
-/// Rows a page-click leaves on screen.
+/// Rows a page-click, or Page Down, leaves on screen.
 const PAGE_KEEP: i32 = 1;
+/// Px a selected line break is shown as, at the end of its row.
+const BREAK_W: i32 = 4;
+/// The scrollbar's width: the sheet ends where it starts.
+const BAR_W: i32 = 11;
+/// Px to the left of the text column that still count as text: a click just
+/// short of the first letter is a click before it.
+const REACH: i32 = 2;
 const SWATCHES: usize = 2;
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
-/// Microsoft Sans Serif at 8 pt, in pixels, by eye: the skin's table.
-/// Anything not listed is the width of a digit.
-const DEFAULT_ADVANCE: i32 = 6;
-const ADVANCES: [(i32, &str); 9] = [
-    (2, "il|'!.,:;"),
-    (3, "fjrtI()[]{}/\\-`\""),
-    (4, "*^ "),
-    (5, "acegsvxyzJ"),
-    (6, "bdhknopqu0123456789?+=<>~_FL$#"),
-    (7, "ABEKPSVXYZ"),
-    (8, "CDGHNOQRTUw&"),
-    (9, "m%"),
-    (10, "MW@"),
-];
+// ---------------------------------------------------------------------------
+//  The note on disk
+// ---------------------------------------------------------------------------
+
+/// What the file looked like, so that it is written back the same way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Format {
+    bom: bool,
+    crlf: bool,
+}
 
 /// Windows-1252 0x80..0x9F, the one block where it is not Latin-1.
 const CP1252: [u16; 32] = [
@@ -66,160 +76,190 @@ const CP1252: [u16; 32] = [
     0x0153, 0x009D, 0x017E, 0x0178,
 ];
 
-/// White space, as C's isspace has it in the C locale.
-fn is_space(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0B' | '\x0C')
+fn from_1252(b: u8) -> char {
+    let cp = if (0x80..=0x9F).contains(&b) { CP1252[(b - 0x80) as usize] as u32 } else { b as u32 };
+    char::from_u32(cp).unwrap_or('\u{FFFD}')
 }
 
-fn width(s: &str) -> i32 {
-    s.chars().map(advance).sum()
-}
-
-fn advance(c: char) -> i32 {
-    ADVANCES.iter().find(|(_, set)| set.contains(c)).map_or(DEFAULT_ADVANCE, |(px, _)| *px)
-}
-
-/// Where to cut `s` so that its head fits in `room` px: the end of the last
-/// whole character that fits, and never less than the first character.
-fn fit(s: &str, room: i32) -> usize {
-    let (mut total, mut cut) = (0, 0);
-    for (at, c) in s.char_indices() {
-        total += advance(c);
-        if cut > 0 && total > room {
-            break;
-        }
-        cut = at + c.len_utf8();
-    }
-    cut
-}
-
-/// One logical line, greedily filled into as many rows as it takes.  Runs of
-/// spaces inside it close up, but its indent is kept and repeated on every
-/// row.  A word too wide for the column on its own is cut rather than allowed
-/// to overhang.
-fn wrap(text: &str, indent: &str, room: i32) -> Vec<String> {
-    let mut out = Vec::new();
-    let (indent, hang) = if room - width(indent) < MIN_ROOM { ("", 0) } else { (indent, width(indent)) };
-    let room = room - hang;
-
-    let mut line: Option<String> = None;
-    for word in text.split(is_space).filter(|w| !w.is_empty()) {
-        let mut current = match line.take() {
-            None => word.to_owned(),
-            Some(sofar) => {
-                let joined = format!("{sofar} {word}");
-                // A word no row will hold whole joins the line anyway, so the
-                // cut below fills this row out rather than leave it half empty.
-                if width(&joined) <= room || width(word) > room {
-                    joined
-                } else {
-                    out.push(format!("{indent}{sofar}"));
-                    word.to_owned()
-                }
+/// File bytes to the text that is typed on: characters, with `\n` between the
+/// lines whatever ended them in the file, and without the line break the file
+/// ends in.  A note that is not valid UTF-8 is from before the program was,
+/// and is read as Windows-1252.
+fn decode(bytes: &[u8]) -> (Vec<char>, Format) {
+    let (bom, body) = match bytes.strip_prefix(BOM) {
+        Some(rest) => (true, rest),
+        None => (false, bytes),
+    };
+    let crlf = body.windows(2).any(|w| w == b"\r\n");
+    let raw: Vec<char> = match core::str::from_utf8(body) {
+        Ok(s) => s.chars().collect(),
+        Err(_) => body.iter().map(|&b| from_1252(b)).collect(),
+    };
+    let mut text = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == '\r' {
+            text.push('\n');
+            if raw.get(i + 1) == Some(&'\n') {
+                i += 1;
             }
-        };
-        while width(&current) > room {
-            let cut = fit(&current, room);
-            if cut >= current.len() {
-                break; // one character wider than the column: it has the row to itself
-            }
-            out.push(format!("{indent}{}", &current[..cut]));
-            current = current[cut..].to_owned();
+        } else {
+            text.push(raw[i]);
         }
-        line = (!current.is_empty()).then_some(current);
+        i += 1;
     }
-    if let Some(rest) = line {
-        out.push(format!("{indent}{rest}"));
+    if text.last() == Some(&'\n') {
+        text.pop();
     }
-    if out.is_empty() {
-        out.push(String::new()); // a blank line still owns a row
+    (text, Format { bom, crlf })
+}
+
+/// The text back to file bytes: UTF-8, in the file's own line endings, ending
+/// in one line break when there is anything in it.
+fn encode(text: &[char], format: Format) -> Vec<u8> {
+    let eol = if format.crlf { "\r\n" } else { "\n" };
+    let mut s = String::with_capacity(text.len() + 2);
+    for &c in text {
+        if c == '\n' { s.push_str(eol) } else { s.push(c) }
+    }
+    if !text.is_empty() {
+        s.push_str(eol);
+    }
+    let mut out = if format.bom { BOM.to_vec() } else { Vec::new() };
+    out.extend_from_slice(s.as_bytes());
+    out
+}
+
+/// A missing file is not an error: it is a note nobody has started.
+fn read_optional(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The file's size and time: enough to tell whether it needs reading again.
+fn stamp_of(path: &Path) -> Option<(u64, SystemTime)> {
+    std::fs::metadata(path).ok().and_then(|m| Some((m.len(), m.modified().ok()?)))
+}
+
+/// The advance of each character of a line, a tab counting as `TAB` spaces --
+/// which is also how it is drawn.
+fn advances(measure: &mut Option<Text>, line: &[char]) -> Vec<f32> {
+    let Some(text) = measure else {
+        return line.iter().map(|&c| if c == '\t' { 6.0 * TAB as f32 } else { 6.0 }).collect();
+    };
+    let mut shown = String::with_capacity(line.len());
+    show(line, &mut shown);
+    let mut each = Vec::new();
+    text.advances(0, &shown, &mut each);
+    let mut out = Vec::with_capacity(line.len());
+    let mut i = 0;
+    for &c in line {
+        let n = if c == '\t' { TAB } else { 1 };
+        out.push(each[i..i + n].iter().sum());
+        i += n;
     }
     out
 }
 
-/// A logical line of the file.
-struct Item {
-    text: String,
-    indent: String,
-    todo: bool,
-    done: bool,
-    /// Which line of `raw` it came from; None for the two lines shown when
-    /// there is no file.
-    line: Option<usize>,
-    /// The byte between the brackets.
-    mark: usize,
+/// The characters as they are drawn.
+fn show(chars: &[char], out: &mut String) {
+    for &c in chars {
+        if c == '\t' {
+            out.extend(core::iter::repeat_n(' ', TAB));
+        } else {
+            out.push(c);
+        }
+    }
 }
 
-struct Row {
-    text: String,
-    item: usize,
-    /// The first row of its item: the only one that gets a checkbox.
-    head: bool,
+/// A fractional x as the pixel column it falls on.
+fn px(x: f32) -> i32 {
+    (x + 0.5).floor() as i32
 }
 
-/// What one of the twelve row slots shows.
-#[derive(Clone, Default, PartialEq)]
-struct Slot {
-    text: String,
-    faded: bool,
-    boxed: bool,
-    ticked: bool,
-    /// Width of the line struck through it, 0 for none.
-    strike: i32,
-}
-
-/// Everything on screen that changes: compared between ticks, so a note
-/// nobody is touching repaints nothing.
-#[derive(Clone, Default, PartialEq)]
-struct View {
-    slots: Vec<Slot>,
-    thumb_y: i32,
-    thumb_h: i32,
-    can_up: bool,
-    can_down: bool,
-    words: String,
-    paper: usize,
-}
+// ---------------------------------------------------------------------------
+//  The widget
+// ---------------------------------------------------------------------------
 
 pub struct Notes {
+    pad: i32,
     rows_shown: i32,
     pitch: i32,
     first_y: i32,
     text_x: i32,
     text_w: i32,
-    paper_x: i32,
-    paper_y: i32,
+    text_dy: i32,
+    /// The sheet -- the paper left of the scrollbar -- measured from the
+    /// frame's corner, as every figure here is.
+    paper: Rect,
+    trough_x: i32,
     trough_y: i32,
     trough_h: i32,
     ink: u32,
     faded: u32,
+    select_bg: u32,
+    select_ink: u32,
     papers: [u32; SWATCHES],
     palette: [u32; 5],
+    /// The font the rows are drawn in, as the host's `Text` numbers it.
+    font: usize,
+    autosave_ms: u32,
+    /// The stamps the sheet is printed with, a row at a time.
+    box_meter: Option<&'static Meter>,
+    tick_meter: Option<&'static Meter>,
+    rule_meter: Option<&'static Meter>,
+    /// The same font, to measure with.
+    measure: Option<Text>,
+    /// The advances of each line now on the sheet, by its text: typing
+    /// changes one line, and only that one is measured again.
+    widths: HashMap<String, Vec<f32>>,
 
     path: PathBuf,
     filename: String,
     /// The file as last seen: its size and time, to skip re-reading it.
     stamp: Option<(u64, SystemTime)>,
+    /// The file has been read, or found not to exist.
     loaded: bool,
-    /// The bytes last parsed; None is "no such file".
+    /// The bytes on disk; None is "no such file".
     source: Option<Vec<u8>>,
-    crlf: bool,
-    legacy: bool,
-    bom: bool,
-    raw: Vec<Vec<u8>>,
-    items: Vec<Item>,
+    format: Format,
+
+    doc: Doc,
     rows: Vec<Row>,
+    /// Which revision of the text `rows` was wrapped from.
+    laid: u64,
     /// Index in `rows` of the topmost visible row.
     top: usize,
+    words: usize,
+    /// The sheet has changed since `refresh` last looked.
+    stale: bool,
 
     colour: usize,
+    ruled: bool,
     created: String,
+    /// The note has the keyboard.
     editing: bool,
-    /// The edit box is holding typing it could not write.
+    caret_on: bool,
+    /// The text is not what is on disk.
     unsaved: bool,
+    /// The last attempt to write it did not work.
+    failed: bool,
+    /// The next write is the first of this spell of typing: the note as it
+    /// was goes to .bak first.
+    bak_due: bool,
+    /// Ms since the last change, while there is one to save.
+    idle_ms: u32,
     notice: Option<(&'static str, u32)>,
     ticks: u32,
-    view: View,
+
+    thumb_y: i32,
+    thumb_h: i32,
+    can_up: bool,
+    can_down: bool,
+    status: String,
 }
 
 impl Notes {
@@ -231,6 +271,7 @@ impl Notes {
             if p.is_absolute() { p } else { ctx.settings.dir().join(p) }
         });
         let colour = (ctx.settings.int(SECTION, "Colour", 1).clamp(1, SWATCHES as i32) - 1) as usize;
+        let ruled = ctx.settings.flag(SECTION, "Ruled", n("Ruled", 0) != 0);
 
         // The first run stamps the note with the day it was started and never
         // touches it again; any date already there is shown as it stands.
@@ -241,52 +282,72 @@ impl Notes {
             ctx.settings.set(SECTION, "Created", &created);
         }
 
+        let points = SKIN.num("FontSize", 8.0) as f32;
+        let (paper_x, paper_y) = (n("PaperX", 8), n("PaperY", 29));
+        let (trough_y, trough_h) = (n("TroughY", 40), n("TroughH", 136));
         let mut notes = Notes {
+            pad: n("Pad", 12),
             rows_shown: n("Rows", 12).max(1),
             pitch: n("RowPitch", 13),
             first_y: n("Row1Y", 30),
             text_x: n("TextX", 22),
             text_w: n("TextW", 146),
-            paper_x: n("PaperX", 8),
-            paper_y: n("PaperY", 29),
-            trough_y: n("TroughY", 40),
-            trough_h: n("TroughH", 136),
+            text_dy: n("TextDY", 0),
+            paper: Rect::xywh(paper_x, paper_y, n("PaperW", 163), n("PaperH", 158)),
+            trough_x: n("TroughX", 171),
+            trough_y,
+            trough_h,
             ink: SKIN.colour("Ink"),
             faded: SKIN.colour("Shadow"),
+            select_bg: SKIN.colour("SelectBg"),
+            select_ink: SKIN.colour("SelectInk"),
             papers: [SKIN.colour("Paper1"), SKIN.colour("Paper2")],
             palette: ["Face", "Hilite", "DkShadow", "Light", "Shadow"].map(|c| SKIN.colour(c)),
+            font: skin::FONTS.iter().position(|&(pt, bold)| pt == points && !bold).unwrap_or(0),
+            autosave_ms: n("AutoSave", 1000).max(0) as u32,
+            box_meter: SKIN.meter("MeterBox"),
+            tick_meter: SKIN.meter("MeterTick"),
+            rule_meter: SKIN.meter("MeterRule"),
+            measure: Text::new(SKIN.var("Font"), &[(points, false)]),
+            widths: HashMap::new(),
             filename: path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or(filename),
             path,
             stamp: None,
             loaded: false,
             source: None,
-            crlf: false,
-            legacy: false,
-            bom: false,
-            raw: Vec::new(),
-            items: Vec::new(),
+            format: Format::default(),
+            doc: Doc::new(),
             rows: Vec::new(),
+            laid: 0,
             top: 0,
+            words: 0,
+            stale: true,
             colour,
+            ruled,
             created,
             editing: false,
+            caret_on: false,
             unsaved: false,
+            failed: false,
+            bak_due: false,
+            idle_ms: 0,
             notice: None,
             ticks: 0,
-            view: View::default(),
+            thumb_y: trough_y,
+            thumb_h: trough_h,
+            can_up: false,
+            can_down: false,
+            status: String::new(),
         };
-        notes.reload();
-        notes.render();
+        if !notes.reload() {
+            notes.layout();
+        }
+        notes.refresh();
         notes
     }
 
-    pub fn path(&self) -> &PathBuf {
-        &self.path
-    }
-
-    /// The paper and ink the edit box is to be painted with.
-    pub fn colours(&self) -> (u32, u32) {
-        (self.papers[self.colour], self.ink)
+    pub fn is_editing(&self) -> bool {
+        self.editing
     }
 
     fn say(&mut self, text: &'static str) {
@@ -295,369 +356,531 @@ impl Notes {
 
     // ---- the note file --------------------------------------------------------
 
-    fn decode(&self, bytes: &[u8]) -> String {
-        if self.legacy {
-            bytes
-                .iter()
-                .map(|&b| {
-                    let cp = if (0x80..=0x9F).contains(&b) { CP1252[(b - 0x80) as usize] as u32 } else { b as u32 };
-                    char::from_u32(cp).unwrap_or('\u{FFFD}')
-                })
-                .collect()
-        } else {
-            String::from_utf8_lossy(bytes).into_owned()
-        }
-    }
-
-    /// Bytes in, logical lines out.  A leading [ ] or [x] makes an item, and
-    /// where the byte between the brackets sits is kept, so flipping it later
-    /// is one substitution.
-    fn parse(&mut self, text: Option<&[u8]>) {
-        self.raw.clear();
-        self.items.clear();
-        self.bom = false;
-        self.legacy = false;
-
-        let Some(text) = text else {
-            // No file: say so on the paper.  Two items with no line.
-            for line in [format!("{} is missing.", self.filename), String::from("Click a line to start one.")] {
-                self.items.push(Item { text: line, indent: String::new(), todo: false, done: false, line: None, mark: 0 });
-            }
-            return;
-        };
-
-        self.crlf = text.windows(2).any(|w| w == b"\r\n");
-        self.legacy = core::str::from_utf8(text).is_err();
-        self.bom = text.starts_with(BOM);
-        let body = if self.bom { &text[BOM.len()..] } else { text };
-        // Split, but not touched otherwise: an edit rewrites one of these and
-        // joins them up again.  A file that ends in a newline ends here in an
-        // empty line, which is what puts the newline back.
-        let breaks = body.iter().filter(|&&b| b == b'\n').count();
-        self.raw = body
-            .split(|&b| b == b'\n')
-            .enumerate()
-            .map(|(i, l)| if i < breaks && l.ends_with(b"\r") { l[..l.len() - 1].to_vec() } else { l.to_vec() })
-            .collect();
-
-        let expand = |s: &str| s.replace('\t', &" ".repeat(TAB));
-        for (i, raw) in self.raw.iter().enumerate() {
-            let lead = raw.iter().take_while(|&&b| b == b' ' || b == b'\t').count();
-            let marker = raw.get(lead..lead + 3).filter(|m| m[0] == b'[' && matches!(m[1], b' ' | b'x' | b'X') && m[2] == b']');
-            if let Some(m) = marker {
-                self.items.push(Item {
-                    text: expand(&self.decode(&raw[lead + 3..])).trim_matches(is_space).to_owned(),
-                    indent: String::new(), // the box sits out in the margin
-                    todo: true,
-                    done: m[1] != b' ',
-                    line: Some(i),
-                    mark: lead + 1,
-                });
-            } else {
-                let body = expand(&self.decode(raw));
-                let rest = body.trim_start_matches(' ');
-                let indent = body[..body.len() - rest.len()].to_owned();
-                self.items.push(Item { text: rest.trim_end_matches(' ').to_owned(), indent, todo: false, done: false, line: Some(i), mark: 0 });
-            }
-        }
-        // blank lines at the end of a file are not rows anyone wants to scroll to
-        while self.items.last().is_some_and(|i| !i.todo && i.text.is_empty()) {
-            self.items.pop();
-        }
-    }
-
-    /// Every item, wrapped, in one flat list: the row meters show a window
-    /// onto it.
-    fn layout(&mut self) {
-        self.rows.clear();
-        for (i, item) in self.items.iter().enumerate() {
-            for (j, piece) in wrap(&item.text, &item.indent, self.text_w - SLACK).into_iter().enumerate() {
-                self.rows.push(Row { text: piece, item: i, head: j == 0 });
-            }
-        }
-    }
-
-    /// Read the file, and re-parse it only if it is not the one already parsed.
+    /// Read the file, if it is not the one already on the sheet.  True if
+    /// the sheet changed.
     fn reload(&mut self) -> bool {
-        let stamp = std::fs::metadata(&self.path).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
+        let stamp = stamp_of(&self.path);
         if self.loaded && stamp.is_some() && stamp == self.stamp {
             return false;
         }
-        let text = std::fs::read(&self.path).ok();
+        // There but not to be read just now: leave the sheet as it is and
+        // look again later.  Taking it for empty would end in writing over it.
+        let Ok(bytes) = read_optional(&self.path) else { return false };
         self.stamp = stamp;
-        if self.loaded && text == self.source {
+        if self.loaded && bytes == self.source {
             return false;
         }
         self.loaded = true;
-        self.parse(text.as_deref());
-        self.source = text;
+        let (text, format) = bytes.as_deref().map(decode).unwrap_or_default();
+        self.format = format;
+        self.source = bytes;
+        self.doc.load(text);
         self.layout();
         true
     }
 
-    /// Write `raw` back out and re-derive everything from what was written:
-    /// what is on screen is then what is in the file, with no second copy of
-    /// the rules for keeping the two in step.
-    fn rewrite(&mut self) -> bool {
-        let eol: &[u8] = if self.crlf { b"\r\n" } else { b"\n" };
-        let mut text = if self.bom { BOM.to_vec() } else { Vec::new() };
-        text.extend_from_slice(&self.raw.join(eol));
-        // One newline at the end and no more.
-        if self.raw.last().is_some_and(|l| !l.is_empty()) {
-            text.extend_from_slice(eol);
+    /// Write the text out.  On a failure it stays unsaved, and the same call
+    /// can simply be made again.
+    fn save(&mut self) -> bool {
+        let ok = self.write();
+        self.failed = !ok;
+        if ok {
+            self.unsaved = false;
         }
-        if write_whole(&self.path, &text).is_err() {
+        ok
+    }
+
+    fn write(&mut self) -> bool {
+        if !self.loaded {
             return false;
         }
-        self.stamp = None;
-        self.parse(Some(&text));
-        self.source = Some(text);
-        self.layout();
+        let bytes = encode(self.doc.text(), self.format);
+        let same = match self.source.as_deref() {
+            Some(disk) => disk == bytes.as_slice(),
+            None => bytes.is_empty(),
+        };
+        if same {
+            return true;
+        }
+        // The note as it was before this spell of typing: once a spell, not
+        // once a save, or the backup would only ever be a second old.  It is
+        // read from the disk, so if something else wrote the note meanwhile
+        // that version is the one kept.
+        if self.bak_due {
+            match read_optional(&self.path) {
+                Ok(Some(old)) => {
+                    let mut bak = self.path.as_os_str().to_owned();
+                    bak.push(".bak");
+                    if std::fs::write(PathBuf::from(bak), old).is_err() {
+                        return false;
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => return false,
+            }
+            self.bak_due = false;
+        }
+        if write_whole(&self.path, &bytes).is_err() {
+            return false;
+        }
+        self.stamp = stamp_of(&self.path);
+        self.source = Some(bytes);
         true
     }
 
-    /// How many words the note runs to.  Counted off the items, which is what
-    /// makes a checkbox marker not a word.
-    fn words(&self) -> usize {
-        self.items.iter().map(|i| i.text.split(is_space).filter(|w| !w.is_empty()).count()).sum()
+    // ---- the sheet ------------------------------------------------------------
+
+    /// Wrap the text into rows, and count its words.
+    fn layout(&mut self) {
+        let mut known = core::mem::take(&mut self.widths);
+        let mut fresh: HashMap<String, Vec<f32>> = HashMap::new();
+        let measure = &mut self.measure;
+        let room = (self.text_w - SLACK) as f32;
+        self.rows = editor::layout(self.doc.text(), room, MIN_ROOM, &mut |line: &[char]| {
+            let key: String = line.iter().collect();
+            if let Some(adv) = fresh.get(&key) {
+                return adv.clone();
+            }
+            let adv = known.remove(&key).unwrap_or_else(|| advances(measure, line));
+            fresh.insert(key, adv.clone());
+            adv
+        });
+        self.widths = fresh;
+        self.laid = self.doc.rev();
+        // Counted off the shown part of each line, which is what makes a
+        // checkbox marker not a word.
+        self.words = self
+            .doc
+            .text()
+            .split(|&c| c == '\n')
+            .map(|line| {
+                let shown = &line[editor::marker(line).map_or(0, |m| m.hidden)..];
+                shown.split(|c| c.is_whitespace()).filter(|w| !w.is_empty()).count()
+            })
+            .sum();
+        self.stale = true;
     }
 
-    // ---- rendering ------------------------------------------------------------
-
-    /// The item whose checkbox is drawn against this row, if any.  render()
-    /// and the click that flips a box both ask here, so there is one rule.
-    fn box_on(&self, row: usize) -> Option<&Item> {
-        let row = self.rows.get(row).filter(|r| r.head)?;
-        self.items.get(row.item).filter(|i| i.todo)
-    }
-
-    /// The last value `top` may take.  The scrollable extent is one row longer
-    /// than the note: that blank row is the line clicked to add to the end.
+    /// The last value `top` may take.
     fn last_top(&self) -> usize {
-        (self.rows.len() + 1).saturating_sub(self.rows_shown as usize)
+        self.rows.len().saturating_sub(self.rows_shown as usize)
     }
 
-    /// The window of rows, the scrollbar that says where it is, and the word
-    /// count.  True if anything on screen changed.
-    fn render(&mut self) -> bool {
+    /// The scrollbar that says where the window of rows is, and the status
+    /// panel.  True if anything on screen changed.
+    fn refresh(&mut self) -> bool {
         let shown = self.rows_shown as usize;
-        let extent = self.rows.len() + 1;
+        let extent = self.rows.len();
         let last = self.last_top();
-        self.top = self.top.min(last);
-
-        let mut view = View { paper: self.colour, ..View::default() };
-        for slot in 0..shown {
-            let index = self.top + slot;
-            let row = self.rows.get(index);
-            let item = row.and_then(|r| self.items.get(r.item));
-            // The margin goes blank for the duration of an edit: the box holds
-            // the file's own lines, which do not line up with the wrapped rows
-            // the checkboxes were placed against.
-            let boxed = if self.editing { None } else { self.box_on(index) };
-            let done = item.is_some_and(|i| i.done);
-            let text = row.map_or("", |r| r.text.as_str());
-            view.slots.push(Slot {
-                text: text.to_owned(),
-                faded: done,
-                boxed: boxed.is_some(),
-                ticked: boxed.is_some_and(|b| b.done),
-                strike: if done && !text.is_empty() { width(text).min(self.text_w) } else { 0 },
-            });
-        }
+        let top = self.top.min(last);
 
         // The thumb is as much of the trough as is on screen, where it is.
         // With nothing to scroll it fills the trough and both arrows go grey.
-        view.thumb_y = self.trough_y;
-        view.thumb_h = self.trough_h;
+        let (mut thumb_y, mut thumb_h) = (self.trough_y, self.trough_h);
         if extent > shown {
-            view.thumb_h = ((self.trough_h as f64 * shown as f64 / extent as f64 + 0.5).floor() as i32).max(THUMB_MIN);
-            view.thumb_y = self.trough_y
-                + ((self.trough_h - view.thumb_h) as f64 * self.top as f64 / (extent - shown) as f64 + 0.5).floor() as i32;
+            thumb_h = ((self.trough_h as f64 * shown as f64 / extent as f64 + 0.5).floor() as i32).max(THUMB_MIN);
+            thumb_y = self.trough_y
+                + ((self.trough_h - thumb_h) as f64 * top as f64 / (extent - shown) as f64 + 0.5).floor() as i32;
         }
-        view.can_up = self.top > 0;
-        view.can_down = self.top < last;
 
         // The right panel counts the words; something that went wrong
-        // interrupts it, long enough to be read.
-        view.words = if self.source.is_none() {
-            String::from("no file")
-        } else if let Some((text, left)) = self.notice.filter(|n| n.1 > 0) {
-            self.notice = Some((text, left - 1));
+        // interrupts it, and stays for as long as it is still wrong.
+        let status = if self.failed {
+            String::from("not saved")
+        } else if let Some((text, _)) = self.notice {
             text.to_owned()
+        } else if self.source.is_none() && !self.unsaved {
+            String::from("no file")
         } else {
-            match self.words() {
+            match self.words {
                 0 => String::from("empty"),
                 1 => String::from("1 word"),
                 n => format!("{n} words"),
             }
         };
 
-        let changed = view != self.view;
-        self.view = view;
+        let changed = core::mem::take(&mut self.stale)
+            || (top, thumb_y, thumb_h, top > 0, top < last) != (self.top, self.thumb_y, self.thumb_h, self.can_up, self.can_down)
+            || status != self.status;
+        self.top = top;
+        self.thumb_y = thumb_y;
+        self.thumb_h = thumb_h;
+        self.can_up = top > 0;
+        self.can_down = top < last;
+        self.status = status;
         changed
     }
 
-    fn rendered(&mut self) -> Outcome {
-        if self.render() { Outcome::all() } else { Outcome::none() }
+    /// Scroll just far enough that the caret's row is on the sheet.
+    fn show_caret(&mut self) {
+        let (r, _) = self.doc.locate(&self.rows);
+        let shown = self.rows_shown as usize;
+        if r < self.top {
+            self.top = r;
+        } else if r >= self.top + shown {
+            self.top = r + 1 - shown;
+        }
+    }
+
+    /// After anything the keyboard or the pointer did: wrap again if the text
+    /// changed, keep the caret in sight, and draw.
+    fn edited(&mut self) -> Outcome {
+        if self.doc.rev() != self.laid {
+            self.layout();
+            self.unsaved = true;
+            self.idle_ms = 0;
+        }
+        self.caret_on = true;
+        self.show_caret();
+        self.stale = true;
+        self.refresh();
+        Outcome::all()
+    }
+
+    /// Whether a point of the frame is on the text, rather than in the margin
+    /// or off the sheet.
+    fn on_text(&self, fx: i32, fy: i32) -> bool {
+        self.paper.contains(fx, fy) && fx >= self.text_x - REACH
+    }
+
+    /// Whether a point of the window is on the sheet or its scrollbar: the
+    /// part of the note that can be clicked without the typing being over.
+    pub fn on_sheet(&self, x: i32, y: i32) -> bool {
+        Rect::new(self.paper.x0, self.paper.y0, self.trough_x + BAR_W, self.paper.y1).contains(x - self.pad, y - self.pad)
+    }
+
+    /// The row slot a y of the frame falls in.  The paper stands a pixel
+    /// proud of the rows at the top and the foot: those two slivers belong to
+    /// the row they touch.
+    fn slot_at(&self, fy: i32) -> usize {
+        (fy - self.first_y).div_euclid(self.pitch).clamp(0, self.rows_shown - 1) as usize
+    }
+
+    /// The place in the text under a point of the frame.
+    fn place_at(&self, fx: i32, fy: i32) -> (usize, bool) {
+        let r = self.top + self.slot_at(fy);
+        if r >= self.rows.len() {
+            return (self.doc.text().len(), false);
+        }
+        Doc::hit(&self.rows, r, (fx - self.text_x) as f32)
+    }
+
+    /// Where the caret is drawn, as a rectangle of the frame; None while it
+    /// is scrolled out of sight.
+    fn caret_box(&self) -> Option<Rect> {
+        let (r, x) = self.doc.locate(&self.rows);
+        let slot = r.checked_sub(self.top).filter(|&s| s < self.rows_shown as usize)? as i32;
+        // a caret after blanks that run past the column waits at its edge
+        let cx = self.text_x + px(x).min(self.text_w - 1);
+        Some(Rect::xywh(cx, self.first_y + slot * self.pitch, 1, self.pitch))
+    }
+
+    // ---- the keyboard -----------------------------------------------------------
+
+    /// One typed character.
+    pub fn typed(&mut self, c: char) -> Outcome {
+        if !self.editing {
+            return Outcome::none();
+        }
+        self.doc.type_char(c);
+        self.edited()
+    }
+
+    pub fn key(&mut self, key: Key, shift: bool, ctrl: bool) -> Outcome {
+        if !self.editing {
+            return Outcome::none();
+        }
+        let page = (self.rows_shown - PAGE_KEEP).max(1) as isize;
+        match key {
+            Key::Left => self.doc.left(ctrl, shift),
+            Key::Right => self.doc.right(ctrl, shift),
+            Key::Up => self.doc.vertical(&self.rows, -1, shift),
+            Key::Down => self.doc.vertical(&self.rows, 1, shift),
+            Key::PageUp => self.doc.vertical(&self.rows, -page, shift),
+            Key::PageDown => self.doc.vertical(&self.rows, page, shift),
+            Key::Home => self.doc.home(&self.rows, ctrl, shift),
+            Key::End => self.doc.end(&self.rows, ctrl, shift),
+            Key::Backspace => self.doc.backspace(ctrl),
+            Key::Delete => self.doc.delete(ctrl),
+            Key::Enter => self.doc.enter(),
+            Key::Tab => self.doc.type_char('\t'),
+            Key::SelectAll => self.doc.select_all(),
+            Key::Undo => {
+                self.doc.undo();
+            }
+            Key::Redo => {
+                self.doc.redo();
+            }
+            Key::Escape => return Outcome::request(Request::DropKeys),
+            // the host's: it is the one that can reach the clipboard
+            Key::Copy | Key::Cut | Key::Paste => return Outcome::none(),
+        }
+        self.edited()
+    }
+
+    /// What is selected, for the clipboard.
+    pub fn copy(&self) -> Option<String> {
+        self.doc.selection().filter(|_| self.editing)
+    }
+
+    /// What is selected, taken out of the note.
+    pub fn cut(&mut self) -> (Option<String>, Outcome) {
+        let Some(taken) = self.copy() else { return (None, Outcome::none()) };
+        self.doc.backspace(false);
+        (Some(taken), self.edited())
+    }
+
+    pub fn paste(&mut self, text: &str) -> Outcome {
+        if !self.editing {
+            return Outcome::none();
+        }
+        self.doc.insert(text);
+        self.edited()
+    }
+
+    /// The keyboard's timer, `ms` after the last: the caret blinks, if it is
+    /// one that does, and typing that has paused long enough is written.
+    pub fn pulse(&mut self, ms: u32, blink: bool) -> Dirty {
+        if !self.editing {
+            return Dirty::None;
+        }
+        let mut dirty = Dirty::None;
+        if self.unsaved && self.autosave_ms > 0 {
+            self.idle_ms = self.idle_ms.saturating_add(ms);
+            if self.idle_ms >= self.autosave_ms {
+                self.idle_ms = 0;
+                self.save();
+                if self.refresh() {
+                    dirty = Dirty::All;
+                }
+            }
+        }
+        let on = !blink || !self.caret_on;
+        if on != self.caret_on {
+            self.caret_on = on;
+            if let Some(c) = self.caret_box() {
+                dirty = dirty.and(Dirty::Part(Rect::new(c.x0 + self.pad, c.y0 + self.pad, c.x1 + self.pad, c.y1 + self.pad)));
+            }
+        }
+        dirty
+    }
+
+    /// The keyboard has gone elsewhere: write the note, and take the caret
+    /// and the selection off the sheet.
+    pub fn blur(&mut self) -> Dirty {
+        if !self.editing {
+            return Dirty::None;
+        }
+        self.editing = false;
+        self.doc.deselect();
+        if self.unsaved {
+            self.save();
+        }
+        self.bak_due = false;
+        self.refresh();
+        Dirty::All
     }
 
     // ---- commands -------------------------------------------------------------
 
-    /// The arrows and the wheel: a row at a time.
+    /// The arrows and the wheel: a row at a time.  The caret stays where it
+    /// is in the text, on the sheet or off it.
     fn scroll(&mut self, by: i32) -> Outcome {
-        if self.editing {
-            return Outcome::none();
-        }
         let top = (self.top as i64 + by as i64).clamp(0, self.last_top() as i64) as usize;
         if top == self.top {
             return Outcome::none();
         }
         self.top = top;
-        self.rendered()
+        self.stale = true;
+        self.refresh();
+        Outcome::all()
     }
 
     /// A click in the trough: page towards it, or sit still if it landed on
     /// the thumb.  `y` is relative to the trough, so it becomes a frame
     /// coordinate before it is compared with the thumb.
     fn page(&mut self, y: i32) -> Outcome {
-        if self.editing {
-            return Outcome::request(Request::LeaveEdit);
-        }
         let y = y + self.trough_y;
-        if y >= self.view.thumb_y && y < self.view.thumb_y + self.view.thumb_h {
+        if y >= self.thumb_y && y < self.thumb_y + self.thumb_h {
             return Outcome::none();
         }
         let page = (self.rows_shown - PAGE_KEEP).max(1);
-        self.scroll(if y < self.view.thumb_y { -page } else { page })
+        self.scroll(if y < self.thumb_y { -page } else { page })
     }
 
-    /// Flip the checkbox on one of the visible rows.  The file is where the
-    /// state lives, so it is written first: if the write fails nothing moves
-    /// and the panel says why.
-    fn toggle(&mut self, slot: usize) {
-        let Some((line, mark, done)) = self.box_on(self.top + slot).and_then(|i| Some((i.line?, i.mark, i.done))) else {
-            return;
-        };
-        let before = self.raw[line].clone();
-        self.raw[line][mark] = if done { b' ' } else { b'x' };
-        if !self.rewrite() {
-            self.raw[line] = before;
-            self.say("read-only");
-        }
-    }
-
-    /// Every click on the paper, as a point relative to the paper.  Left of
-    /// the text column is the margin, where the checkboxes are; anywhere else
-    /// opens the note for editing.
+    /// A click on the paper that was not a press on the text, as a point
+    /// relative to the paper: the margin, where the checkboxes are.  A tick
+    /// is written at once, typing or not.
     fn click(&mut self, x: i32, y: i32) -> Outcome {
-        if self.editing {
-            return Outcome::request(Request::LeaveEdit);
+        let (fx, fy) = (x + self.paper.x0, y + self.paper.y0);
+        if self.on_text(fx, fy) || !self.loaded {
+            return Outcome::none();
         }
-        let (fx, fy) = (x + self.paper_x, y + self.paper_y);
-        // The paper stands a pixel proud of the rows at the top and the foot:
-        // those two slivers belong to the row they touch.
-        let slot = ((fy - self.first_y).div_euclid(self.pitch)).clamp(0, self.rows_shown - 1) as usize;
-
-        if fx < self.text_x {
-            if self.unsaved {
-                self.say("not saved");
-            } else {
-                self.toggle(slot);
-            }
-            return self.rendered();
-        }
-
-        // Hand the whole sheet to the edit box, telling it which line of the
-        // file is at the top of the view and how many wrapped rows into it.
-        self.editing = true;
-        self.render();
-        let (mut line, mut down) = (1, 0);
-        if let Some(row) = self.rows.get(self.top) {
-            line = self.items[row.item].line.map_or(1, |l| l + 1);
-            while down < self.top && self.rows[self.top - down - 1].item == row.item {
-                down += 1;
-            }
-        }
-        Outcome { dirty: Dirty::All, request: Request::Edit { line, down } }
-    }
-
-    /// The box has closed, and has already written the file -- or it never
-    /// opened, and this is why.  Read the file back, put the checkboxes back
-    /// in the margin, and say so if something went wrong.
-    pub fn closed(&mut self, status: Status) -> Dirty {
-        self.editing = false;
-        match status {
-            // The box keeps the typing it could not save and shows it again
-            // next time; the checkboxes wait until a close says it is saved.
-            Status::WriteError => {
-                self.unsaved = true;
-                self.say("not saved");
-            }
-            Status::Saved | Status::Unchanged => self.unsaved = false,
-            Status::ReadError => self.say("cannot read"),
-            Status::NoWindow => self.say("no editor"),
-            Status::Open => {}
-        }
-        self.stamp = None;
-        self.reload();
-        self.render();
-        Dirty::All
+        let Some(line) = self.rows.get(self.top + self.slot_at(fy)).filter(|r| r.head && r.todo).map(|r| r.line) else {
+            return Outcome::none();
+        };
+        self.doc.toggle(line);
+        self.layout();
+        self.unsaved = true;
+        self.idle_ms = 0;
+        self.save();
+        self.refresh();
+        Outcome::all()
     }
 
     fn next_paper(&mut self, ctx: &mut Ctx) -> Outcome {
-        if self.editing {
-            return Outcome::request(Request::LeaveEdit);
-        }
         self.colour = (self.colour + 1) % SWATCHES;
         ctx.settings.set_int(SECTION, "Colour", self.colour as i32 + 1);
-        self.rendered()
+        Outcome::all()
+    }
+
+    fn toggle_rule(&mut self, ctx: &mut Ctx) -> Outcome {
+        self.ruled = !self.ruled;
+        ctx.settings.set_int(SECTION, "Ruled", self.ruled as i32);
+        Outcome::all()
+    }
+
+    // ---- drawing --------------------------------------------------------------
+
+    /// The sheet: for each row its rule, its checkbox, its words and the line
+    /// through them, then whatever of it is selected, and the caret last.
+    /// The same for a note that is being typed on and one that is not, bar
+    /// those last two.
+    fn draw_sheet(&self, ox: i32, oy: i32, canvas: &mut Canvas, text: &mut Text) {
+        let outer = canvas.clip;
+        let sheet = Rect::new(ox + self.paper.x0, oy + self.paper.y0, ox + self.paper.x1, oy + self.paper.y1);
+        let clip = outer.intersect(&sheet);
+        if clip.is_empty() {
+            return;
+        }
+        canvas.clip = clip;
+
+        let left = ox + self.text_x;
+        let (sel_a, sel_b) = if self.editing { self.doc.range() } else { (0, 0) };
+        // No file yet: the paper says so, until it is clicked.
+        let missing = self.source.is_none() && !self.editing && self.doc.text().is_empty();
+        let mut line = String::new();
+        let mut scratch = String::new();
+
+        for slot in 0..self.rows_shown {
+            let down = slot * self.pitch;
+            let ry = oy + self.first_y + down;
+            if !Rect::new(sheet.x0, ry, sheet.x1, ry + self.pitch).intersects(&clip) {
+                continue;
+            }
+            if let Some(m) = self.rule_meter.filter(|_| self.ruled) {
+                skin::draw_meter(m, m.x, m.y + down, self, canvas, text, &mut scratch);
+            }
+            if missing {
+                line.clear();
+                match slot {
+                    0 => {
+                        line.push_str(&self.filename);
+                        line.push_str(" is missing.");
+                    }
+                    1 => line.push_str("Click here to start one."),
+                    _ => continue,
+                }
+                self.draw_row(canvas, text, &line, left, ry, self.faded);
+                continue;
+            }
+            let Some(row) = self.rows.get(self.top + slot as usize) else { continue };
+
+            if row.head && row.todo {
+                if let Some(m) = self.box_meter {
+                    skin::draw_meter(m, m.x, m.y + down, self, canvas, text, &mut scratch);
+                }
+                if let Some(m) = self.tick_meter.filter(|_| row.done) {
+                    skin::draw_meter(m, m.x, m.y + down, self, canvas, text, &mut scratch);
+                }
+            }
+
+            let chars = &self.doc.text()[row.start..row.end];
+            line.clear();
+            show(chars, &mut line);
+            let x0 = left + px(row.xs[0]);
+            // the line through a done item is as wide as its words
+            let inked = chars.len() - chars.iter().rev().take_while(|&&c| editor::blank(c)).count();
+            let strike = if row.done { left + px(row.xs[inked]) - x0 } else { 0 };
+            let colour = if row.done { self.faded } else { self.ink };
+            self.draw_row(canvas, text, &line, x0, ry, colour);
+            canvas.fill(x0, ry + STRIKE_DY, strike, 1, colour);
+
+            // What is selected of it, drawn again light on dark.  A selected
+            // line break shows as a few px past the end of its row.
+            let broken = row.last && sel_a <= row.end && sel_b > row.end;
+            let (lo, hi) = (sel_a.clamp(row.start, row.end), sel_b.clamp(row.start, row.end));
+            if hi > lo || broken {
+                let a = left + px(row.xs[lo - row.start]);
+                let b = left + px(row.xs[hi - row.start]) + if broken { BREAK_W } else { 0 };
+                let band = Rect::new(a, ry, b, ry + self.pitch).intersect(&clip);
+                canvas.fill(band.x0, band.y0, band.x1 - band.x0, band.y1 - band.y0, self.select_bg);
+                canvas.clip = band;
+                self.draw_row(canvas, text, &line, x0, ry, self.select_ink);
+                canvas.fill(x0, ry + STRIKE_DY, strike, 1, self.select_ink);
+                canvas.clip = clip;
+            }
+        }
+
+        if self.editing && self.caret_on {
+            if let Some(c) = self.caret_box() {
+                // at the head of a selection it stands on the dark
+                let colour = if sel_a != sel_b && self.doc.caret() == sel_a { self.select_ink } else { self.ink };
+                canvas.fill(ox + c.x0, oy + c.y0, 1, self.pitch, colour);
+            }
+        }
+        canvas.clip = outer;
+    }
+
+    /// One row's words, from (x, y), in one colour.
+    fn draw_row(&self, canvas: &mut Canvas, text: &mut Text, string: &str, x: i32, y: i32, colour: u32) {
+        if string.is_empty() {
+            return;
+        }
+        text.draw(canvas, &Spec {
+            text: string,
+            font: self.font,
+            colour,
+            x,
+            y: y + self.text_dy,
+            align: 0,
+            // wide enough never to matter: the canvas's clip is what ends a row
+            w: 4000,
+            h: self.pitch,
+            clip: false,
+            solid: None,
+            pad: [0; 4],
+        });
     }
 }
 
 impl Hooks for Notes {
-    fn num(&self, var: &str) -> f64 {
-        // Hidden=#BoxN#: 1 takes the checkbox away
-        match index_of(var, "Box").and_then(|n| self.view.slots.get(n.wrapping_sub(1))) {
-            Some(slot) if slot.boxed => 0.0,
-            _ => 1.0,
-        }
-    }
-
     fn text(&self, var: &str, out: &mut String) {
-        if let Some(slot) = index_of(var, "Row").and_then(|n| self.view.slots.get(n.wrapping_sub(1))) {
-            out.push_str(&slot.text);
-            return;
-        }
         out.push_str(match var {
-            "Words" => &self.view.words,
+            "Words" => &self.status,
             "Created" => &self.created,
             _ => "",
         });
     }
 
     fn colour(&self, var: &str) -> u32 {
-        let slot = |prefix: &str| index_of(var, prefix).and_then(|n| self.view.slots.get(n.wrapping_sub(1)));
-        if let Some(s) = slot("RowInk") {
-            return if s.faded { self.faded } else { self.ink };
-        }
-        if let Some(s) = slot("Tick") {
-            return if s.ticked { self.ink } else { 0 };
-        }
         match var {
-            "NoteBg" => self.papers[self.view.paper],
-            "UpInk" => if self.view.can_up { self.ink } else { self.faded },
-            "DownInk" => if self.view.can_down { self.ink } else { self.faded },
+            "NoteBg" => self.papers[self.colour],
+            "UpInk" => if self.can_up { self.ink } else { self.faded },
+            "DownInk" => if self.can_down { self.ink } else { self.faded },
+            // the lines on the rule button: dark while the paper has them
+            "RuleInk" => if self.ruled { self.ink } else { self.faded },
             _ => 0,
         }
     }
 
-    fn custom(&self, meter: &Meter, x: i32, y: i32, canvas: &mut Canvas, _text: &mut Text) {
+    fn custom(&self, meter: &Meter, x: i32, y: i32, canvas: &mut Canvas, text: &mut Text) {
         match meter.name {
             // The moving part of the scrollbar: an outset drawn round the two
-            // numbers render() worked out, as [MeterThumb] spells it.
+            // numbers refresh() worked out, as [MeterThumb] spells it.
             "MeterThumb" => {
                 let [face, hilite, dk_shadow, light, shadow] = self.palette;
-                let (ty, th) = (y + self.view.thumb_y, self.view.thumb_h);
+                let (ty, th) = (y + self.thumb_y, self.thumb_h);
                 canvas.fill(x, ty, 11, th, face);
                 canvas.fill(x, ty, 11, 1, hilite);
                 canvas.fill(x, ty, 1, th, hilite);
@@ -668,13 +891,7 @@ impl Hooks for Notes {
                 canvas.fill(x + 1, ty + th - 2, 9, 1, shadow);
                 canvas.fill(x + 9, ty + 1, 1, th - 2, shadow);
             }
-            // One line per done row, as wide as the text it crosses.
-            "MeterStrikes" => {
-                for (i, slot) in self.view.slots.iter().enumerate().filter(|(_, s)| s.strike > 0) {
-                    let row_y = self.first_y + i as i32 * self.pitch;
-                    canvas.fill(x + self.text_x, y + row_y + STRIKE_DY, slot.strike, 1, self.faded);
-                }
-            }
+            "MeterSheet" => self.draw_sheet(x, y, canvas, text),
             _ => {}
         }
     }
@@ -687,25 +904,36 @@ impl Widget for Notes {
 
     fn about(&self) -> &'static str {
         "Win98 Sticky Note\n\n\
-         Click the paper\tedit the whole note in place\n\
+         Click the text\ttype there; drag to select\n\
          Click elsewhere\tsave and finish (so does Escape)\n\
          Click a checkbox\ttick or untick it\n\
-         [ ] or [x]\t\tat the start of a line makes it an item\n\
+         [ ] or [x]\t\ttyped at the start of a line makes a checkbox\n\
+         Enter\t\ton a checkbox line starts another\n\
+         Backspace\tat the start of one takes the checkbox away\n\
+         Ctrl+Z, Ctrl+Y\tundo, redo\n\
          Swatch button\tswap canary and white paper\n\
+         Lines button\truled or plain paper\n\
          Double-click icon\topen the note in a text editor\n\n\
-         The note is a plain text file; the copy from before the latest edit \
-         is kept beside it as .bak."
+         The note is a plain text file, saved as you type; the copy from \
+         before the latest edit is kept beside it as .bak."
     }
 
-    /// Every other second, as the skin did: one look at the file, and a
-    /// repaint only if what it holds has changed.
+    /// The file is looked at every other second, and what is drawn changes
+    /// only if what it holds has.  A note with typing it could not write
+    /// tries again instead: until that works, the typing wins.
     fn tick(&mut self, _ctx: &mut Ctx) -> Dirty {
         self.ticks += 1;
-        if self.ticks % 2 != 0 {
-            return Dirty::None;
+        if let Some((text, left)) = self.notice {
+            self.notice = (left > 1).then_some((text, left - 1));
         }
-        self.reload();
-        if self.render() { Dirty::All } else { Dirty::None }
+        if self.ticks % 2 == 0 {
+            if !self.unsaved {
+                self.reload();
+            } else if !self.editing {
+                self.save();
+            }
+        }
+        if self.refresh() { Dirty::All } else { Dirty::None }
     }
 
     fn command(&mut self, cmd: &str, arg: i32, x: i32, y: i32, ctx: &mut Ctx) -> Outcome {
@@ -714,6 +942,7 @@ impl Widget for Notes {
             "Page" => self.page(y),
             "Click" => self.click(x, y),
             "NextPaper" => self.next_paper(ctx),
+            "ToggleRule" => self.toggle_rule(ctx),
             "OpenFile" => Outcome::request(Request::Open(self.path.clone())),
             "About" => Outcome::request(Request::About),
             "Close" => Outcome::request(Request::Close),
@@ -721,9 +950,67 @@ impl Widget for Notes {
         }
     }
 
+    /// A press on the text puts the caret there and asks for the keyboard;
+    /// held, it selects.  Anywhere else is the host's: the margin and the
+    /// scrollbar answer when the button comes up, and the rest drags the
+    /// window.
+    fn press(&mut self, x: i32, y: i32, double: bool, shift: bool) -> Pressed {
+        let (fx, fy) = (x - self.pad, y - self.pad);
+        if !self.on_text(fx, fy) {
+            return Pressed::No;
+        }
+        let mut request = Request::None;
+        if !self.editing {
+            // the note may have been changed elsewhere since it was last read
+            if !self.unsaved {
+                self.reload();
+            }
+            if !self.loaded {
+                self.say("cannot read");
+                self.refresh();
+                return Pressed::Taken(Outcome::all());
+            }
+            self.bak_due = true;
+            request = Request::TakeKeys;
+        }
+        let (pos, eol) = self.place_at(fx, fy);
+        if double {
+            self.doc.select_word(pos);
+        } else {
+            self.doc.click(pos, eol, shift && self.editing);
+        }
+        self.editing = true;
+        Pressed::Taken(Outcome { request, ..self.edited() })
+    }
+
+    /// The selection follows the pointer, and the sheet follows it off the
+    /// top or the foot.
+    fn drag(&mut self, x: i32, y: i32) -> Dirty {
+        if !self.editing {
+            return Dirty::None;
+        }
+        let (fx, fy) = (x - self.pad, y - self.pad);
+        if fy < self.paper.y0 {
+            self.top = self.top.saturating_sub(1);
+        } else if fy >= self.paper.y1 {
+            self.top = (self.top + 1).min(self.last_top());
+        }
+        let (pos, eol) = self.place_at(fx, fy);
+        self.doc.drag(pos, eol);
+        self.caret_on = true;
+        self.stale = true;
+        self.refresh();
+        Dirty::All
+    }
+
+    fn ibeam(&self, x: i32, y: i32) -> bool {
+        self.on_text(x - self.pad, y - self.pad)
+    }
+
     fn menu(&self, items: &mut Vec<MenuItem>) {
         items.push(MenuItem { id: 1, label: "Open the note in a text editor", checked: false });
         items.push(MenuItem { id: 2, label: "Canary paper", checked: self.colour == 0 });
+        items.push(MenuItem { id: 4, label: "Ruled paper", checked: self.ruled });
         items.push(MenuItem { id: 3, label: "About Sticky Note", checked: false });
     }
 
@@ -732,7 +1019,15 @@ impl Widget for Notes {
             1 => Outcome::request(Request::Open(self.path.clone())),
             2 => self.next_paper(ctx),
             3 => Outcome::request(Request::About),
+            4 => self.toggle_rule(ctx),
             _ => Outcome::none(),
+        }
+    }
+
+    /// Whatever has not reached the file goes there now.
+    fn shutdown(&mut self, _ctx: &mut Ctx) {
+        if self.unsaved {
+            self.save();
         }
     }
 }
@@ -740,18 +1035,124 @@ impl Widget for Notes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::Settings;
 
-    #[test]
-    fn wraps_where_the_skin_did() {
-        let rows = wrap("Finish the quarterly report before Friday and send it to the whole team", "", 140);
-        assert_eq!(rows, ["Finish the quarterly report", "before Friday and send it to", "the whole team"]);
-        assert_eq!(wrap("", "", 140), [""]);
+    fn chars(s: &str) -> Vec<char> {
+        s.chars().collect()
     }
 
     #[test]
-    fn a_long_word_is_cut_not_overhung() {
-        let rows = wrap("Supercalifragilisticexpialidocious_and_more_text", "", 140);
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| width(r) <= 140));
+    fn lf_file_round_trips() {
+        let file = b"[ ] milk\n[x] eggs\n";
+        let (text, format) = decode(file);
+        assert_eq!(text, chars("[ ] milk\n[x] eggs"));
+        assert_eq!(encode(&text, format), file);
+    }
+
+    #[test]
+    fn crlf_and_bom_are_kept() {
+        let file = b"\xEF\xBB\xBFone\r\ntwo\r\n";
+        let (text, format) = decode(file);
+        assert_eq!(text, chars("one\ntwo"));
+        assert_eq!(encode(&text, format), file);
+    }
+
+    #[test]
+    fn blank_lines_at_the_end_survive_and_one_line_break_is_added() {
+        let (text, format) = decode(b"a\n\n\n");
+        assert_eq!(text, chars("a\n\n"));
+        assert_eq!(encode(&text, format), b"a\n\n\n");
+        assert_eq!(encode(&chars("a\nb"), Format::default()), b"a\nb\n");
+        assert_eq!(encode(&[], Format::default()), b"");
+    }
+
+    #[test]
+    fn a_1252_note_is_read_as_1252_and_written_as_utf8() {
+        let (text, format) = decode(b"caf\xE9 \x80\x96\n");
+        assert_eq!(text, chars("caf\u{e9} \u{20ac}\u{2013}"));
+        assert_eq!(encode(&text, format), "caf\u{e9} \u{20ac}\u{2013}\n".as_bytes());
+    }
+
+    /// A note in a folder of its own, and the window point at the start of
+    /// one of its rows.
+    fn note(name: &str, file: Option<&str>) -> (Notes, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("win98-note-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Notes.txt");
+        if let Some(text) = file {
+            std::fs::write(&path, text).unwrap();
+        }
+        let mut settings = Settings::in_memory();
+        let mut ctx = Ctx { now: 0, settings: &mut settings, locked: false, signed_in: None };
+        (Notes::new(&mut ctx, Some(path.clone())), path)
+    }
+
+    fn at(n: &Notes, row: i32, dx: i32) -> (i32, i32) {
+        (n.pad + n.text_x + dx, n.pad + n.first_y + row * n.pitch + 4)
+    }
+
+    #[test]
+    fn typing_on_the_sheet_ends_up_in_the_file() {
+        let (mut n, path) = note("typing", Some("[ ] milk\r\nplain\r\n"));
+        assert_eq!(n.rows.len(), 2);
+        assert!(n.rows[0].todo && !n.rows[0].done);
+
+        // a click past the end of the first row, then a second item under it
+        let (x, y) = at(&n, 0, 120);
+        assert!(matches!(n.press(x, y, false, false), Pressed::Taken(Outcome { request: Request::TakeKeys, .. })));
+        n.key(Key::Enter, false, false);
+        for c in "eggs".chars() {
+            n.typed(c);
+        }
+        assert!(n.unsaved);
+        n.blur();
+        assert!(!n.unsaved && !n.is_editing());
+        assert_eq!(std::fs::read(&path).unwrap(), b"[ ] milk\r\n[ ] eggs\r\nplain\r\n");
+        // the note as it was is beside it
+        let mut bak = path.clone().into_os_string();
+        bak.push(".bak");
+        assert_eq!(std::fs::read(PathBuf::from(bak)).unwrap(), b"[ ] milk\r\nplain\r\n");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_click_in_the_margin_ticks_the_box_and_writes_it() {
+        let (mut n, path) = note("tick", Some("[ ] milk\n"));
+        // relative to the paper, as [MeterPaper] hands it over
+        let outcome = n.click(4, n.first_y - n.paper.y0 + 4);
+        assert_eq!(outcome.dirty, Dirty::All);
+        assert!(n.rows[0].done);
+        assert_eq!(std::fs::read(&path).unwrap(), b"[x] milk\n");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_missing_file_is_started_by_typing() {
+        let (mut n, path) = note("missing", None);
+        assert_eq!(n.status, "no file");
+        let (x, y) = at(&n, 3, 10);
+        n.press(x, y, false, false);
+        n.typed('a');
+        assert!(!path.exists());
+        // the pause that lets it save itself
+        n.pulse(n.autosave_ms, false);
+        assert_eq!(std::fs::read(&path).unwrap(), b"a\n");
+        assert_eq!(n.status, "1 word");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn rows_break_where_the_font_says() {
+        let (n, path) = note("wrap", Some("Finish the quarterly report before Friday and send it to the whole team\n"));
+        let room = (n.text_w - SLACK) as f32;
+        assert!(n.rows.len() >= 3);
+        for row in &n.rows {
+            // nothing but trailing blanks may run past the column
+            let chars = &n.doc.text()[row.start..row.end];
+            let inked = chars.len() - chars.iter().rev().take_while(|&&c| editor::blank(c)).count();
+            assert!(row.xs[inked] <= room, "{:?} is {} px", chars.iter().collect::<String>(), row.xs[inked]);
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
