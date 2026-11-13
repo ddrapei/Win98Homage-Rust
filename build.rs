@@ -14,7 +14,6 @@
 //! bars, the scrollbar thumb) is emitted as `Kind::Custom` and drawn by hand.
 //!
 //! The weather icons are decoded here as well, into premultiplied BGRA, so the
-//! program carries no image decoder.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -749,6 +748,65 @@ fn compile_icons(root: &Path, out_dir: &Path, out: &mut String) {
     writeln!(out, "];").unwrap();
 }
 
+fn compile_exe_icon(root: &Path, out_dir: &Path) {
+    const RT_ICON: u16 = 3;
+    const RT_GROUP_ICON: u16 = 14;
+
+    let path = root.join("Icons").join("gears_tweakui_b.ico");
+    println!("cargo:rerun-if-changed={}", path.display());
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        println!("cargo:warning=not the MSVC linker: the .exe is built without its icon");
+        return;
+    }
+    let ico = fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let word = |at: usize| u16::from_le_bytes([ico[at], ico[at + 1]]);
+    let long = |at: usize| u32::from_le_bytes([ico[at], ico[at + 1], ico[at + 2], ico[at + 3]]) as usize;
+    // ICONDIR: reserved, type (1 = icon), count; then 16 bytes an image, the
+    // last eight of them its length and where in the file it starts.
+    assert!(ico.len() >= 6 && word(0) == 0 && word(2) == 1, "{} is not an .ico", path.display());
+    let count = word(4) as usize;
+    assert!(count > 0 && ico.len() >= 6 + 16 * count, "{} has no images", path.display());
+
+    /// One resource: a 32-byte header that names it by type and number, then
+    /// the data, padded to a multiple of four.
+    fn resource(res: &mut Vec<u8>, kind: u16, id: u16, data: &[u8]) {
+        res.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        res.extend_from_slice(&32u32.to_le_bytes());
+        for n in [0xFFFF, kind, 0xFFFF, id] {
+            res.extend_from_slice(&n.to_le_bytes());
+        }
+        res.extend_from_slice(&0u32.to_le_bytes()); // data version
+        res.extend_from_slice(&0x1030u16.to_le_bytes()); // moveable, pure, discardable
+        res.extend_from_slice(&0x0409u16.to_le_bytes()); // English (US), as rc.exe would say
+        res.extend_from_slice(&[0; 8]); // version, characteristics
+        res.extend_from_slice(data);
+        while res.len() % 4 != 0 {
+            res.push(0);
+        }
+    }
+
+    // every .res opens with an empty resource
+    let mut res = vec![0, 0, 0, 0, 32, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0xFF, 0xFF, 0, 0];
+    res.extend_from_slice(&[0; 16]);
+    // The group is the .ico's directory with each image's place in the file
+    // swapped for its resource number.
+    let mut group = ico[..6].to_vec();
+    for i in 0..count {
+        let entry = 6 + 16 * i;
+        let (len, at) = (long(entry + 8), long(entry + 12));
+        let image = ico.get(at..at + len).unwrap_or_else(|| panic!("{}: image {i} runs off the end", path.display()));
+        let id = i as u16 + 1;
+        resource(&mut res, RT_ICON, id, image);
+        group.extend_from_slice(&ico[entry..entry + 12]);
+        group.extend_from_slice(&id.to_le_bytes());
+    }
+    resource(&mut res, RT_GROUP_ICON, 1, &group);
+
+    let file = out_dir.join("icon.res");
+    fs::write(&file, res).unwrap();
+    println!("cargo:rustc-link-arg-bins={}", file.display());
+}
+
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest.join("skins");
@@ -767,6 +825,7 @@ fn main() {
     }
     writeln!(out, "];\n").unwrap();
     compile_icons(&root, &out_dir, &mut out);
+    compile_exe_icon(&root, &out_dir);
 
     fs::write(out_dir.join("skins.rs"), out).unwrap();
 }

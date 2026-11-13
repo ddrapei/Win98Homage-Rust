@@ -18,7 +18,6 @@ Measured with the first four widgets showing, before Rain Window was added.
 cargo build --release        ->  target\release\win98-widgets.exe
 ```
 
-Any Rust toolchain will do (the GNU one needs no Visual Studio). There are no run-time
 crates; the only build-time one is `png`, used to decode the weather icons.
 
 Run the .exe. Nothing is installed: it can live anywhere. Only one copy runs at a time.
