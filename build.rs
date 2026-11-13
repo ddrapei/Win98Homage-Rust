@@ -747,16 +747,150 @@ fn compile_icons(root: &Path, out_dir: &Path, out: &mut String) {
     writeln!(out, "];").unwrap();
 }
 
+/// English (US), as rc.exe would say.
+const RES_LANG: u16 = 0x0409;
+
+/// The resources as a .res file, which is what the MSVC linker takes.
+fn res_file(items: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
+    // every .res opens with an empty resource
+    let mut res = vec![0, 0, 0, 0, 32, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0xFF, 0xFF, 0, 0];
+    res.extend_from_slice(&[0; 16]);
+    // One resource: a 32-byte header that names it by type and number, then
+    // the data, padded to a multiple of four.
+    for (kind, id, data) in items {
+        res.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        res.extend_from_slice(&32u32.to_le_bytes());
+        for n in [0xFFFF, *kind, 0xFFFF, *id] {
+            res.extend_from_slice(&n.to_le_bytes());
+        }
+        res.extend_from_slice(&0u32.to_le_bytes()); // data version
+        res.extend_from_slice(&0x1030u16.to_le_bytes()); // moveable, pure, discardable
+        res.extend_from_slice(&RES_LANG.to_le_bytes());
+        res.extend_from_slice(&[0; 8]); // version, characteristics
+        res.extend_from_slice(data);
+        while res.len() % 4 != 0 {
+            res.push(0);
+        }
+    }
+    res
+}
+
+/// The resources as an object file with one `.rsrc` section, which is what
+/// the GNU linker takes: the tree the loader walks (type, then number, then
+/// language), the data it points at, and a relocation for each pointer.
+/// `items` must be in (type, number) order.
+fn rsrc_object(machine: u16, rva_reloc: u16, items: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
+    const SUBDIR: usize = 0x8000_0000;
+    fn word(out: &mut Vec<u8>, v: u16) {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    fn long(out: &mut Vec<u8>, v: usize) {
+        out.extend_from_slice(&(v as u32).to_le_bytes());
+    }
+    /// A directory's header; its `ids` entries of eight bytes follow it.
+    fn dir(out: &mut Vec<u8>, ids: usize) {
+        out.extend_from_slice(&[0; 14]); // characteristics, time, version, no named entries
+        word(out, ids as u16);
+    }
+
+    assert!(items.windows(2).all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1)), "resources out of order");
+    let mut kinds: Vec<(u16, usize)> = Vec::new();
+    for (kind, ..) in items {
+        match kinds.last_mut() {
+            Some((k, count)) if k == kind => *count += 1,
+            _ => kinds.push((*kind, 1)),
+        }
+    }
+    // Where each layer starts: after the root come a directory for each type,
+    // a directory for each resource (its one language), a data entry for
+    // each resource, and then the data.
+    let kind_dirs = 16 + 8 * kinds.len();
+    let lang_dirs = kind_dirs + kinds.iter().map(|&(_, count)| 16 + 8 * count).sum::<usize>();
+    let entries = lang_dirs + 24 * items.len();
+    let mut data_at = entries + 16 * items.len();
+
+    let mut sec = Vec::new();
+    dir(&mut sec, kinds.len());
+    let mut at = kind_dirs;
+    for &(kind, count) in &kinds {
+        long(&mut sec, kind as usize);
+        long(&mut sec, SUBDIR | at);
+        at += 16 + 8 * count;
+    }
+    let mut i = 0;
+    for &(_, count) in &kinds {
+        dir(&mut sec, count);
+        for _ in 0..count {
+            long(&mut sec, items[i].1 as usize);
+            long(&mut sec, SUBDIR | (lang_dirs + 24 * i));
+            i += 1;
+        }
+    }
+    for i in 0..items.len() {
+        dir(&mut sec, 1);
+        long(&mut sec, RES_LANG as usize);
+        long(&mut sec, entries + 16 * i);
+    }
+    let mut relocs = Vec::new();
+    for (_, _, data) in items {
+        relocs.push(sec.len());
+        long(&mut sec, data_at); // from the section's start; the linker adds where that is
+        long(&mut sec, data.len());
+        long(&mut sec, 0); // code page
+        long(&mut sec, 0);
+        data_at += data.len().next_multiple_of(4);
+    }
+    for (_, _, data) in items {
+        sec.extend_from_slice(data);
+        while sec.len() % 4 != 0 {
+            sec.push(0);
+        }
+    }
+
+    let relocs_at = 20 + 40 + sec.len();
+    let symbols_at = relocs_at + 10 * relocs.len();
+    let mut obj = Vec::new();
+    // the file header
+    word(&mut obj, machine);
+    word(&mut obj, 1); // sections
+    long(&mut obj, 0); // time
+    long(&mut obj, symbols_at);
+    long(&mut obj, 1); // symbols
+    word(&mut obj, 0); // no optional header
+    word(&mut obj, 0);
+    // the section's header
+    obj.extend_from_slice(b".rsrc\0\0\0");
+    long(&mut obj, 0);
+    long(&mut obj, 0);
+    long(&mut obj, sec.len());
+    long(&mut obj, 20 + 40);
+    long(&mut obj, relocs_at);
+    long(&mut obj, 0);
+    word(&mut obj, relocs.len() as u16);
+    word(&mut obj, 0);
+    long(&mut obj, 0x4030_0040); // initialised data, read-only, aligned to four
+    obj.extend_from_slice(&sec);
+    for at in relocs {
+        long(&mut obj, at);
+        long(&mut obj, 0); // against the symbol below
+        word(&mut obj, rva_reloc);
+    }
+    // the one symbol: the section itself
+    obj.extend_from_slice(b".rsrc\0\0\0");
+    long(&mut obj, 0);
+    word(&mut obj, 1); // section 1
+    word(&mut obj, 0);
+    obj.extend_from_slice(&[3, 0]); // static, no auxiliary records
+    long(&mut obj, 4); // an empty string table
+    obj
+}
+
 fn compile_exe_icon(root: &Path, out_dir: &Path) {
     const RT_ICON: u16 = 3;
     const RT_GROUP_ICON: u16 = 14;
 
     let path = root.join("Icons").join("gears_tweakui_b.ico");
     println!("cargo:rerun-if-changed={}", path.display());
-    if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
-        println!("cargo:warning=not the MSVC linker: the .exe is built without its icon");
-        return;
-    }
     let ico = fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     let word = |at: usize| u16::from_le_bytes([ico[at], ico[at + 1]]);
     let long = |at: usize| u32::from_le_bytes([ico[at], ico[at + 1], ico[at + 2], ico[at + 3]]) as usize;
@@ -766,43 +900,40 @@ fn compile_exe_icon(root: &Path, out_dir: &Path) {
     let count = word(4) as usize;
     assert!(count > 0 && ico.len() >= 6 + 16 * count, "{} has no images", path.display());
 
-    /// One resource: a 32-byte header that names it by type and number, then
-    /// the data, padded to a multiple of four.
-    fn resource(res: &mut Vec<u8>, kind: u16, id: u16, data: &[u8]) {
-        res.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        res.extend_from_slice(&32u32.to_le_bytes());
-        for n in [0xFFFF, kind, 0xFFFF, id] {
-            res.extend_from_slice(&n.to_le_bytes());
-        }
-        res.extend_from_slice(&0u32.to_le_bytes()); // data version
-        res.extend_from_slice(&0x1030u16.to_le_bytes()); // moveable, pure, discardable
-        res.extend_from_slice(&0x0409u16.to_le_bytes()); // English (US), as rc.exe would say
-        res.extend_from_slice(&[0; 8]); // version, characteristics
-        res.extend_from_slice(data);
-        while res.len() % 4 != 0 {
-            res.push(0);
-        }
-    }
-
-    // every .res opens with an empty resource
-    let mut res = vec![0, 0, 0, 0, 32, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0xFF, 0xFF, 0, 0];
-    res.extend_from_slice(&[0; 16]);
     // The group is the .ico's directory with each image's place in the file
     // swapped for its resource number.
+    let mut items: Vec<(u16, u16, Vec<u8>)> = Vec::new();
     let mut group = ico[..6].to_vec();
     for i in 0..count {
         let entry = 6 + 16 * i;
         let (len, at) = (long(entry + 8), long(entry + 12));
         let image = ico.get(at..at + len).unwrap_or_else(|| panic!("{}: image {i} runs off the end", path.display()));
         let id = i as u16 + 1;
-        resource(&mut res, RT_ICON, id, image);
+        items.push((RT_ICON, id, image.to_vec()));
         group.extend_from_slice(&ico[entry..entry + 12]);
         group.extend_from_slice(&id.to_le_bytes());
     }
-    resource(&mut res, RT_GROUP_ICON, 1, &group);
+    items.push((RT_GROUP_ICON, 1, group));
 
-    let file = out_dir.join("icon.res");
-    fs::write(&file, res).unwrap();
+    // The MSVC linker converts a .res itself; the GNU one wants an object
+    // file, with the relocation that means "address, less the image base".
+    let (name, bytes) = if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        ("icon.res", res_file(&items))
+    } else {
+        let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+        let (machine, rva_reloc) = match arch.as_str() {
+            "x86_64" => (0x8664, 3),
+            "x86" => (0x014C, 7),
+            "aarch64" => (0xAA64, 2),
+            _ => {
+                println!("cargo:warning=no resource object for {arch}: the .exe is built without its icon");
+                return;
+            }
+        };
+        ("icon.o", rsrc_object(machine, rva_reloc, &items))
+    };
+    let file = out_dir.join(name);
+    fs::write(&file, bytes).unwrap();
     println!("cargo:rustc-link-arg-bins={}", file.display());
 }
 
