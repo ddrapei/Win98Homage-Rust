@@ -3,7 +3,8 @@
 //!
 //! Date/Time Properties, Resource Meter, Sticky Note, Weather and Rain Window,
 //! drawn from the .ini files in `skins/` -- with no Direct2D and no script
-//! engine underneath.
+//! engine underneath.  One of each, and as many more Sticky Notes as are
+//! asked for.
 //!
 //! # Where things are
 //!

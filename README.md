@@ -1,7 +1,8 @@
 # Win98 Widgets
 
 Five Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
-Weather and Rain Window — as one small Rust program.
+Weather and Rain Window — as one small Rust program. There is one of each, and as many
+more Sticky Notes as you ask for.
 
 | | |
 |--------------------------|---------|
@@ -38,7 +39,7 @@ Text is laid out by DirectWrite and rasterised with aliased glyphs. Shapes are f
 small software canvas.
 
 `--dump <dir> [--state <file>]` draws each widget off-screen, in a state given by the
-file, and writes it out as a BMP — for comparing before and after a change (see
+file (which can ask for more than one note), and writes it out as a BMP — for comparing before and after a change (see
 `src/dump.rs`).
 
 The program is deliberately not DPI aware, so on a scaled display Windows stretches the
@@ -53,8 +54,8 @@ them).
 | | |
 |--|--|
 | drag anywhere | move a widget; it snaps to screen edges and to the others (hold Ctrl or Shift not to). The note's text is the exception: dragging there selects |
-| right-click | menu: the widget's own options, Position, Snap, Lock, Close, the list of widgets, Start with Windows, settings, Exit |
-| tray icon | the same menu — this is how a closed widget is brought back |
+| right-click | menu: the widget's own options, New note (on a note), Position, Snap, Lock, Close, the list of widgets, Start with Windows, settings, Exit |
+| tray icon | the same menu — this is how a closed widget is brought back, and Widgets → New Sticky Note is another way to a new note |
 | `X` | closes that widget (it stops costing anything); `?` says what it does |
 
 In the widgets themselves: tabs, month list, calendar selection, scroll to browse months,
@@ -70,6 +71,15 @@ of a line to make a checkbox; Enter on a checkbox line starts another (on an emp
 ends the list), and Backspace at the start of one removes the checkbox. A click anywhere
 else, or Escape, finishes; the note is saved a second after you stop typing and again
 when you finish.
+
+**More than one note.** Right-click a note → *New note* (or the tray icon → Widgets →
+*New Sticky Note*) puts another note beside it, in the nearest place where there is room.
+Each note has its own text, its own paper and ruling and its own place; none has a title
+— the bar is the icon and the buttons. `X` closes a note like any other widget — it keeps
+its text and comes back from the Widgets list, where the notes after the first are
+*Sticky Note 2*, *Sticky Note 3*. Right-click → *Delete this note* removes one for good: its text file goes to the
+Recycle Bin, after a question if there is anything written on it. The first note is the
+one that is always there: it can be closed but not deleted.
 
 **The weather's city.** Click the city field and type a place: `Lviv`, or `Paris, US` /
 `Portland, Maine` to say which one. Enter (or a click anywhere else) looks it up and pins
@@ -91,6 +101,7 @@ every window; *Normal*; *Always on top*.
 |--|--|
 | `%APPDATA%\Win98Widgets\settings.ini` | positions, which widgets are shown, and each widget's knobs |
 | `%APPDATA%\Win98Widgets\Notes.txt` | the note (`NoteFile=` in settings.ini to keep it elsewhere) |
+| `%APPDATA%\Win98Widgets\Notes2.txt`, `Notes3.txt`, … | the notes after the first, each with a `[Notes2]`, `[Notes3]`, … section of its own in settings.ini |
 | `%LOCALAPPDATA%\Win98DateTime\Usage.log`, or `%LOCALAPPDATA%\Win98DateTime.log` | the usage log |
 | `%LOCALAPPDATA%\Win98Widgets\weather.txt` | the last forecast |
 
@@ -126,10 +137,12 @@ text         DirectWrite text, rasterised into the canvas
 datetime     Date/Time Properties   (usage: the on/unlocked journal)
 resources    Resource Meter
 notes        Sticky Note            (editor: its text and what the keys do to it;
-                                     keys: the window that holds the keyboard for it)
+                                     keys: the window that holds the keyboard for it);
+                                    also which sections of settings.ini are notes
 weather      Weather                (and the child that fetches it; entry: the city box)
 rain         Rain Window            (the one that is animated)
-app          windows, mouse, menus, tray, the once-a-second tick, the frames in between
+app          windows (one per widget, and per note), mouse, menus, tray, the
+             once-a-second tick, the frames in between
 settings     settings.ini
 clock        time and time zones
 sys          the Win32 declarations all of it uses

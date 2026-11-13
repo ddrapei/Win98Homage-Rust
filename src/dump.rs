@@ -14,6 +14,10 @@
 //!   panel_at=2026-11-11 17:30:00       when the usage panel was last redrawn
 //!   cpu=0.44   ram=0.95                the Resource Meter's two readings
 //!   note_file=C:\path\Notes.txt
+//!   note_file.2=C:\path\Other.txt      one more note, the one [Notes2] would
+//!                                      be (and .3, .4, ...): drawn to
+//!                                      notes2.bmp, with set.Notes2.*,
+//!                                      do.notes2 and type.notes2 for it
 //!   weather=9.3,3,0,10.1,4.9,Place     temp, code, is_day, max, min, city
 //!   rain=2.5                           seconds into the shower (always the same one)
 //!   set.Notes.Created=30 Jul 2026      any settings.ini value
@@ -34,7 +38,7 @@ use crate::canvas::Canvas;
 use crate::clock;
 use crate::datetime::DateTime;
 use crate::keys::Key;
-use crate::notes::Notes;
+use crate::notes::{self, Notes};
 use crate::rain::Rain;
 use crate::resources::Resources;
 use crate::settings::Settings;
@@ -187,11 +191,16 @@ pub fn run(args: &[String]) -> i32 {
         w.tick(&mut ctx);
         render(&w, &mut text, &dir.join("resources.bmp"));
     }
-    {
-        let mut w = Notes::new(&mut ctx, Some(get("note_file").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("no-such-note.txt"))));
-        perform(&mut w, get("do.notes").unwrap_or(""), &mut ctx);
-        type_on(&mut w, get("type.notes").unwrap_or(""));
-        render(&w, &mut text, &dir.join("notes.bmp"));
+    // the first note, then every other the state names a file for
+    let first = (1, get("note_file").unwrap_or("no-such-note.txt"));
+    let others = state.iter().filter_map(|(k, v)| Some((k.strip_prefix("note_file.")?.parse::<u32>().ok().filter(|&n| n > 1)?, v.as_str())));
+    for (n, file) in core::iter::once(first).chain(others) {
+        let tag = if n > 1 { format!("notes{n}") } else { String::from("notes") };
+        let section = if n > 1 { format!("{}{n}", notes::FIRST) } else { String::from(notes::FIRST) };
+        let mut w = Notes::new(&mut ctx, &section, Some(PathBuf::from(file)));
+        perform(&mut w, get(&format!("do.{tag}")).unwrap_or(""), &mut ctx);
+        type_on(&mut w, get(&format!("type.{tag}")).unwrap_or(""));
+        render(&w, &mut text, &dir.join(format!("{tag}.bmp")));
     }
     {
         let mut w = Weather::new(&ctx);

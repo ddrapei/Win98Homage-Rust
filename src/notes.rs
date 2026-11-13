@@ -19,6 +19,13 @@
 //! Saving is the note's own business: a second after the typing pauses, and
 //! again when the keyboard goes elsewhere.  The first write of each spell of
 //! typing copies the note as it was to `.bak`.
+//!
+//! There can be any number of notes.  Each is a section of settings.ini and
+//! the file that section names -- `[Notes]` and Notes.txt for the first,
+//! `[Notes2]` and Notes2.txt for the next -- so a `Notes` is made for a
+//! section, and what is typed on one, and the paper it is typed on, are that
+//! one's alone.  The host makes the windows; which sections are notes, and
+//! starting and forgetting one, are here.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,13 +35,15 @@ use crate::canvas::{Canvas, Rect};
 use crate::clock;
 use crate::editor::{self, Doc, Row, TAB};
 use crate::keys::Key;
-use crate::settings::write_whole;
+use crate::settings::{Settings, write_whole};
 use crate::skin::{self, Hooks, Meter, Skin};
 use crate::text::{Spec, Text};
 use crate::widget::{Ctx, Dirty, MenuItem, Outcome, Pressed, Request, Widget};
 
 static SKIN: &Skin = &skin::notes::SKIN;
-const SECTION: &str = "Notes";
+/// The first note's section in settings.ini.  Every other note has one named
+/// after it with its number on the end, from 2 up: `[Notes2]`, `[Notes3]`.
+pub const FIRST: &str = "Notes";
 
 /// Px of the text column kept clear on the right, for the caret that stands
 /// after a row that fills it.
@@ -139,6 +148,111 @@ fn read_optional(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     }
 }
 
+/// Where the note as it was before the latest spell of typing is kept.
+fn bak_of(path: &Path) -> PathBuf {
+    let mut bak = path.as_os_str().to_owned();
+    bak.push(".bak");
+    PathBuf::from(bak)
+}
+
+// ---------------------------------------------------------------------------
+//  More than one note
+// ---------------------------------------------------------------------------
+//
+// A note is a section of settings.ini -- where it sits, its paper, the name
+// of its file -- and that file.  There are as many notes as there are such
+// sections, and nothing of one is shared with another.
+
+/// Which note a section is: 1 for `[Notes]`, n for `[Notes<n>]`, and None for
+/// a section that is not a note's.
+fn number(section: &str) -> Option<u32> {
+    let rest = section.get(FIRST.len()..).filter(|_| section[..FIRST.len()].eq_ignore_ascii_case(FIRST))?;
+    if rest.is_empty() {
+        return Some(1);
+    }
+    rest.parse().ok().filter(|n: &u32| *n >= 2 && n.to_string() == rest)
+}
+
+/// The file a note is kept in unless settings.ini names another: the first
+/// note's, with the note's number put after its name.
+fn default_file(n: u32) -> String {
+    let first = SKIN.var("NoteFile");
+    match first.rsplit_once('.') {
+        _ if n < 2 => first.to_owned(),
+        Some((stem, ext)) => format!("{stem}{n}.{ext}"),
+        None => format!("{first}{n}"),
+    }
+}
+
+/// Where a note's text is kept: the name as settings.ini has it, and the file
+/// that names -- beside settings.ini, unless the name says where itself.
+fn place(settings: &Settings, section: &str) -> (String, PathBuf) {
+    let name = settings.text(section, "NoteFile", &default_file(number(section).unwrap_or(1)));
+    let path = PathBuf::from(&name);
+    let path = if path.is_absolute() { path } else { settings.dir().join(path) };
+    (name, path)
+}
+
+pub fn file(settings: &Settings, section: &str) -> PathBuf {
+    place(settings, section).1
+}
+
+/// What a note is called in the menus: the first is the Sticky Note, and the
+/// others have their numbers.
+pub fn name(section: &str) -> String {
+    match number(section) {
+        Some(n) if n > 1 => format!("Sticky Note {n}"),
+        _ => String::from("Sticky Note"),
+    }
+}
+
+/// The sections of the notes after the first, in the order of their numbers.
+pub fn others(settings: &Settings) -> Vec<String> {
+    let mut found: Vec<(u32, &str)> =
+        settings.sections().filter_map(|s| Some((number(s).filter(|&n| n > 1)?, s))).collect();
+    found.sort();
+    found.dedup_by_key(|f| f.0);
+    found.into_iter().map(|(_, s)| s.to_owned()).collect()
+}
+
+/// Start another note: a section of its own, and an empty file of its own
+/// for it to name.  Returns the section.
+pub fn create(settings: &mut Settings) -> String {
+    let dir = settings.dir();
+    let taken: Vec<u32> = settings.sections().filter_map(number).collect();
+    // A number nothing has: not a note there is, and not a file left behind
+    // by one there was -- the new note would open with that one's text on it.
+    let n = (2..).find(|n| !taken.contains(n) && !dir.join(default_file(*n)).exists()).unwrap_or(u32::MAX);
+    let (section, name) = (format!("{FIRST}{n}"), default_file(n));
+    // An empty file rather than none: a sheet to type on, not one that says
+    // its file is missing.  If it cannot be made the note says that instead.
+    let _ = std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(&name));
+    settings.set(&section, "NoteFile", &name);
+    section
+}
+
+/// Whether there is nothing on a note: no file, or only blank space in it.
+/// A file that cannot be read is not known to be empty.
+pub fn is_blank(path: &Path) -> bool {
+    match read_optional(path) {
+        Ok(Some(bytes)) => decode(&bytes).0.iter().all(|c| c.is_whitespace()),
+        Ok(None) => true,
+        Err(_) => false,
+    }
+}
+
+/// Take a note out of settings.ini.  What is returned is what it leaves on
+/// disk, for the caller to dispose of: its text and the copy from before the
+/// last edit -- unless another note is kept in the same file.
+pub fn forget(settings: &mut Settings, section: &str) -> Vec<PathBuf> {
+    let path = file(settings, section);
+    settings.remove_section(section);
+    if settings.sections().any(|s| number(s).is_some() && file(settings, s) == path) {
+        return Vec::new();
+    }
+    [bak_of(&path), path].into_iter().filter(|p| p.is_file()).collect()
+}
+
 /// The file's size and time: enough to tell whether it needs reading again.
 fn stamp_of(path: &Path) -> Option<(u64, SystemTime)> {
     std::fs::metadata(path).ok().and_then(|m| Some((m.len(), m.modified().ok()?)))
@@ -217,6 +331,8 @@ pub struct Notes {
     /// changes one line, and only that one is measured again.
     widths: HashMap<String, Vec<f32>>,
 
+    /// The section of settings.ini that is this note's, and no other's.
+    section: String,
     path: PathBuf,
     filename: String,
     /// The file as last seen: its size and time, to skip re-reading it.
@@ -263,23 +379,22 @@ pub struct Notes {
 }
 
 impl Notes {
-    pub fn new(ctx: &mut Ctx, file: Option<PathBuf>) -> Notes {
+    /// The note that `section` of settings.ini describes, on the file that
+    /// names -- or on `file`, for a note that is only being looked at.
+    pub fn new(ctx: &mut Ctx, section: &str, file: Option<PathBuf>) -> Notes {
         let n = |name: &str, default: i32| SKIN.int(name, default);
-        let filename = ctx.settings.text(SECTION, "NoteFile", SKIN.var("NoteFile"));
-        let path = file.unwrap_or_else(|| {
-            let p = PathBuf::from(&filename);
-            if p.is_absolute() { p } else { ctx.settings.dir().join(p) }
-        });
-        let colour = (ctx.settings.int(SECTION, "Colour", 1).clamp(1, SWATCHES as i32) - 1) as usize;
-        let ruled = ctx.settings.flag(SECTION, "Ruled", n("Ruled", 0) != 0);
+        let (filename, kept) = place(ctx.settings, section);
+        let path = file.unwrap_or(kept);
+        let colour = (ctx.settings.int(section, "Colour", 1).clamp(1, SWATCHES as i32) - 1) as usize;
+        let ruled = ctx.settings.flag(section, "Ruled", n("Ruled", 0) != 0);
 
         // The first run stamps the note with the day it was started and never
         // touches it again; any date already there is shown as it stands.
-        let mut created = ctx.settings.text(SECTION, "Created", "");
+        let mut created = ctx.settings.text(section, "Created", "");
         if created.trim().is_empty() {
             let t = clock::local(ctx.now);
             created = format!("{} {} {}", t.day, &clock::MONTHS[t.month as usize - 1][..3], t.year);
-            ctx.settings.set(SECTION, "Created", &created);
+            ctx.settings.set(section, "Created", &created);
         }
 
         let points = SKIN.num("FontSize", 8.0) as f32;
@@ -310,6 +425,7 @@ impl Notes {
             rule_meter: SKIN.meter("MeterRule"),
             measure: Text::new(SKIN.var("Font"), &[(points, false)]),
             widths: HashMap::new(),
+            section: section.to_owned(),
             filename: path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or(filename),
             path,
             stamp: None,
@@ -405,9 +521,7 @@ impl Notes {
         if self.bak_due {
             match read_optional(&self.path) {
                 Ok(Some(old)) => {
-                    let mut bak = self.path.as_os_str().to_owned();
-                    bak.push(".bak");
-                    if std::fs::write(PathBuf::from(bak), old).is_err() {
+                    if std::fs::write(bak_of(&self.path), old).is_err() {
                         return false;
                     }
                 }
@@ -620,13 +734,13 @@ impl Notes {
 
     fn next_paper(&mut self, ctx: &mut Ctx) -> Outcome {
         self.colour = (self.colour + 1) % SWATCHES;
-        ctx.settings.set_int(SECTION, "Colour", self.colour as i32 + 1);
+        ctx.settings.set_int(&self.section, "Colour", self.colour as i32 + 1);
         Outcome::all()
     }
 
     fn toggle_rule(&mut self, ctx: &mut Ctx) -> Outcome {
         self.ruled = !self.ruled;
-        ctx.settings.set_int(SECTION, "Ruled", self.ruled as i32);
+        ctx.settings.set_int(&self.section, "Ruled", self.ruled as i32);
         Outcome::all()
     }
 
@@ -803,8 +917,9 @@ impl Widget for Notes {
          Ctrl+Z, Ctrl+Y\tundo, redo\n\
          Swatch button\tswap canary and white paper\n\
          Lines button\truled or plain paper\n\
-         Double-click icon\topen the note in a text editor\n\n\
-         The note is a plain text file, saved as you type; the copy from \
+         Double-click icon\topen the note in a text editor\n\
+         Right-click\t\tNew note: another, with a text of its own\n\n\
+         Each note is a plain text file, saved as you type; the copy from \
          before the latest edit is kept beside it as .bak."
     }
 
@@ -1036,7 +1151,6 @@ impl Widget for Notes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::Settings;
 
     fn chars(s: &str) -> Vec<char> {
         s.chars().collect()
@@ -1074,19 +1188,25 @@ mod tests {
         assert_eq!(encode(&text, format), "caf\u{e9} \u{20ac}\u{2013}\n".as_bytes());
     }
 
-    /// A note in a folder of its own, and the window point at the start of
-    /// one of its rows.
-    fn note(name: &str, file: Option<&str>) -> (Notes, PathBuf) {
+    /// An empty folder that is this test's alone.
+    fn folder(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("win98-note-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A note in a folder of its own, and the window point at the start of
+    /// one of its rows.
+    fn note(name: &str, file: Option<&str>) -> (Notes, PathBuf) {
+        let dir = folder(name);
         let path = dir.join("Notes.txt");
         if let Some(text) = file {
             std::fs::write(&path, text).unwrap();
         }
         let mut settings = Settings::in_memory();
         let mut ctx = Ctx { now: 0, settings: &mut settings, locked: false, signed_in: None };
-        (Notes::new(&mut ctx, Some(path.clone())), path)
+        (Notes::new(&mut ctx, FIRST, Some(path.clone())), path)
     }
 
     fn at(n: &Notes, row: i32, dx: i32) -> (i32, i32) {
@@ -1156,5 +1276,74 @@ mod tests {
             assert!(row.xs[inked] <= room, "{:?} is {} px", chars.iter().collect::<String>(), row.xs[inked]);
         }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn only_a_notes_section_is_a_note() {
+        assert_eq!(number("Notes"), Some(1));
+        assert_eq!(number("notes12"), Some(12));
+        for other in ["Notes1", "Notes02", "Notes2x", "Notes 2", "Note", "Weather", ""] {
+            assert_eq!(number(other), None, "{other:?}");
+        }
+        assert_eq!((name("Notes"), name("Notes3")), (String::from("Sticky Note"), String::from("Sticky Note 3")));
+    }
+
+    #[test]
+    fn another_note_has_a_text_and_a_paper_of_its_own() {
+        let dir = folder("two");
+        std::fs::write(dir.join("Notes.txt"), "first\n").unwrap();
+        let mut settings = Settings::in_memory_at(&dir);
+        let second = create(&mut settings);
+        assert_eq!(second, "Notes2");
+        assert_eq!(std::fs::read(dir.join("Notes2.txt")).unwrap(), b"");
+        assert_eq!(create(&mut settings), "Notes3");
+        assert_eq!(others(&settings), ["Notes2", "Notes3"]);
+        {
+            let mut ctx = Ctx { now: 0, settings: &mut settings, locked: false, signed_in: None };
+            let mut a = Notes::new(&mut ctx, FIRST, None);
+            let mut b = Notes::new(&mut ctx, &second, None);
+            // a new note is an empty sheet, not a file gone missing
+            assert_eq!(b.status, "empty");
+
+            let (x, y) = at(&b, 0, 10);
+            b.press(x, y, false, false);
+            "second".chars().for_each(|c| drop(b.typed(c)));
+            b.blur(&mut ctx);
+            b.next_paper(&mut ctx);
+            // long enough for the first to have looked at its file again
+            a.tick(&mut ctx);
+            a.tick(&mut ctx);
+            assert_eq!(a.doc.text(), chars("first"));
+            assert_eq!(b.doc.text(), chars("second"));
+        }
+        assert_eq!(std::fs::read(dir.join("Notes.txt")).unwrap(), b"first\n");
+        assert_eq!(std::fs::read(dir.join("Notes2.txt")).unwrap(), b"second\n");
+        assert_eq!((settings.int("Notes", "Colour", 0), settings.int("Notes2", "Colour", 0)), (1, 2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_forgotten_note_hands_over_its_files_and_frees_its_number() {
+        let dir = folder("forget");
+        let mut settings = Settings::in_memory_at(&dir);
+        let (second, third) = (create(&mut settings), create(&mut settings));
+        let (text, bak) = (dir.join("Notes2.txt"), dir.join("Notes2.txt.bak"));
+        std::fs::write(&text, "\u{feff}milk\n").unwrap();
+        std::fs::write(&bak, "").unwrap();
+        assert!(!is_blank(&file(&settings, &second)));
+        assert!(is_blank(&file(&settings, &third)));
+        assert!(is_blank(&dir.join("no-such-note.txt")));
+
+        assert_eq!(forget(&mut settings, &second), [bak.clone(), text.clone()]);
+        assert_eq!(others(&settings), ["Notes3"]);
+        // while its file is still there, the next note is not given it
+        assert_eq!(create(&mut settings), "Notes4");
+        std::fs::remove_file(&text).unwrap();
+        assert_eq!(create(&mut settings), "Notes2");
+
+        // two notes told to share a file: forgetting one leaves the other its text
+        settings.set("Notes4", "NoteFile", "Notes2.txt");
+        assert_eq!(forget(&mut settings, "Notes4"), Vec::<PathBuf>::new());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

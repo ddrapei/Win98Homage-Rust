@@ -1,4 +1,11 @@
-//! The host: one small process, one thread, five layered windows.
+//! The host: one small process, one thread, a layered window for each widget.
+//!
+//! There is one of each of the five, and as many more Sticky Notes as have
+//! been asked for: a note after the first is a window like any other, made
+//! from the same skin, with a section of settings.ini and a text file of its
+//! own (see `notes`).  The windows are numbered -- the five first, then the
+//! other notes -- and a number is never handed on: a deleted note's stays
+//! its own, unused, until the program ends.
 //!
 //! Each widget is a borderless layered window that never takes the keyboard
 //! and never shows in the taskbar or Alt-Tab -- a desktop widget, not an
@@ -24,13 +31,14 @@
 use core::ffi::c_void;
 use core::ptr::{null, null_mut};
 use core::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering::Relaxed};
+use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use crate::canvas::{Canvas, Rect};
 use crate::clock;
 use crate::datetime::DateTime;
 use crate::keys::{self, Input, Key, Keys};
-use crate::notes::Notes;
+use crate::notes::{self, Notes};
 use crate::rain::Rain;
 use crate::resources::Resources;
 use crate::settings::Settings;
@@ -40,10 +48,41 @@ use crate::text::Text;
 use crate::weather::Weather;
 use crate::widget::{Ctx, Dirty, Outcome, Pressed, Request, Widget};
 
-const WIDGETS: usize = 5;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    DateTime,
+    Resources,
+    Notes,
+    Weather,
+    Rain,
+}
+
+impl Kind {
+    fn skin(self) -> &'static Skin {
+        match self {
+            Kind::DateTime => &skin::datetime::SKIN,
+            Kind::Resources => &skin::resources::SKIN,
+            Kind::Notes => &skin::notes::SKIN,
+            Kind::Weather => &skin::weather::SKIN,
+            Kind::Rain => &skin::rain::SKIN,
+        }
+    }
+}
+
+/// The widgets there is always one of, in the order their windows are
+/// numbered: what each is, its section of settings.ini, and what the menus
+/// call it.  The notes after the first follow these.
+const FIXED: [(Kind, &str, &str); 5] = [
+    (Kind::DateTime, "DateTime", "Date/Time"),
+    (Kind::Resources, "Resources", "Resource Meter"),
+    (Kind::Notes, notes::FIRST, "Sticky Note"),
+    (Kind::Weather, "Weather", "Weather"),
+    (Kind::Rain, "Rain", "Rain Window"),
+];
+const DATETIME: usize = 0;
+const NOTE: usize = 2;
+const WEATHER: usize = 3;
 const RAIN: usize = 4;
-const SECTIONS: [&str; WIDGETS] = ["DateTime", "Resources", "Notes", "Weather", "Rain"];
-const TITLES: [&str; WIDGETS] = ["Date/Time", "Resource Meter", "Sticky Note", "Weather", "Rain Window"];
 
 const WIDGET_CLASS: &str = "Win98Widget";
 const MAIN_CLASS: &str = "Win98WidgetsMain";
@@ -60,6 +99,13 @@ const WM_TRAY: u32 = WM_APP + 2;
 static TRAY_ICO: &[u8] = include_bytes!("../skins/Icons/gears_tweakui_b.ico");
 /// Skins snap to each other and to the screen edge from this far away.
 const SNAP: i32 = 10;
+/// Px between the frames of two widgets laid out one above the other.
+const APART: i32 = 10;
+/// How many notes' widths, or heights, from a note room for a new one is
+/// looked for.
+const ROOM_STEPS: i32 = 8;
+/// With no room anywhere, a new note sits this far down and right of the old.
+const CASCADE: i32 = 24;
 /// Our own z-order changes do not ask the window for permission.
 const ZPOS_FLAGS: u32 = SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING;
 
@@ -70,12 +116,17 @@ const CMD_TOPMOST: usize = 12;
 const CMD_SNAP: usize = 20;
 const CMD_LOCK: usize = 21;
 const CMD_CLOSE: usize = 30;
-const CMD_TOGGLE: usize = 40;
+const CMD_NEW_NOTE: usize = 40;
+const CMD_DELETE_NOTE: usize = 41;
 const CMD_AUTOSTART: usize = 50;
 const CMD_SETTINGS: usize = 51;
 const CMD_RELOAD: usize = 52;
 const CMD_EXIT: usize = 60;
+/// From here up to CMD_TOGGLE: the widget's own entries.
 const CMD_WIDGET: usize = 100;
+/// From here up: show or close a window, by its number.  Last, because there
+/// is no saying how many notes there will be.
+const CMD_TOGGLE: usize = 1000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Position {
@@ -109,10 +160,21 @@ enum Later {
     Menu(Option<usize>),
     About(usize),
     Open(PathBuf),
+    /// Delete the note with this section -- not its number: other notes may
+    /// come and go while the question is on the screen.  With it, the title
+    /// and the text of the question, for a note that has something on it.
+    Delete(String, Option<(String, String)>),
     Quit,
 }
 
 struct Slot {
+    kind: Kind,
+    /// Its section of settings.ini, and what the menus call it.
+    section: String,
+    title: String,
+    /// A note that has been deleted.  Nothing is left of it but its number,
+    /// which no other window is given.
+    deleted: bool,
     hwnd: HWND,
     x: i32,
     y: i32,
@@ -120,6 +182,12 @@ struct Slot {
     hover: Option<usize>,
     tracking: bool,
     seen: skin::Seen,
+}
+
+impl Slot {
+    fn new(kind: Kind, section: &str, title: String) -> Slot {
+        Slot { kind, section: section.to_owned(), title, deleted: false, hwnd: 0, x: 0, y: 0, hover: None, tracking: false, seen: Vec::new() }
+    }
 }
 
 /// A press that has not been released yet.
@@ -142,43 +210,20 @@ struct Buffer {
     w: i32,
 }
 
-struct Widgets {
-    datetime: Option<DateTime>,
-    resources: Option<Resources>,
-    notes: Option<Notes>,
-    weather: Option<Weather>,
-    rain: Option<Rain>,
-}
+/// The widgets that are running, each under its slot's number; None for one
+/// that is closed.  Always as long as the list of slots.
+struct Widgets(Vec<Option<Box<dyn Widget>>>);
 
 impl Widgets {
     fn get(&self, i: usize) -> Option<&dyn Widget> {
-        match i {
-            0 => self.datetime.as_ref().map(|w| w as &dyn Widget),
-            1 => self.resources.as_ref().map(|w| w as &dyn Widget),
-            2 => self.notes.as_ref().map(|w| w as &dyn Widget),
-            3 => self.weather.as_ref().map(|w| w as &dyn Widget),
-            _ => self.rain.as_ref().map(|w| w as &dyn Widget),
-        }
+        self.0.get(i)?.as_deref()
     }
 
     fn get_mut(&mut self, i: usize) -> Option<&mut dyn Widget> {
-        match i {
-            0 => self.datetime.as_mut().map(|w| w as &mut dyn Widget),
-            1 => self.resources.as_mut().map(|w| w as &mut dyn Widget),
-            2 => self.notes.as_mut().map(|w| w as &mut dyn Widget),
-            3 => self.weather.as_mut().map(|w| w as &mut dyn Widget),
-            _ => self.rain.as_mut().map(|w| w as &mut dyn Widget),
+        match self.0.get_mut(i) {
+            Some(Some(w)) => Some(w.as_mut()),
+            _ => None,
         }
-    }
-}
-
-fn skin_of(i: usize) -> &'static Skin {
-    match i {
-        0 => &skin::datetime::SKIN,
-        1 => &skin::resources::SKIN,
-        2 => &skin::notes::SKIN,
-        3 => &skin::weather::SKIN,
-        _ => &skin::rain::SKIN,
     }
 }
 
@@ -187,7 +232,7 @@ struct App {
     text: Text,
     buffer: Buffer,
     widgets: Widgets,
-    slots: [Slot; WIDGETS],
+    slots: Vec<Slot>,
     /// The window that holds the keyboard while a widget is typed on, and
     /// which widget that is.
     keys: Keys,
@@ -412,6 +457,38 @@ impl Buffer {
 }
 
 impl App {
+    /// The App as settings.ini describes it, with no widget started yet.
+    fn new(settings: Settings, text: Text, locked: bool, signed_in: Option<i64>) -> App {
+        // one buffer, as large as the largest skin: every window is drawn in it
+        let (w, h) = FIXED.iter().fold((0, 0), |(w, h), f| (w.max(f.0.skin().w), h.max(f.0.skin().h)));
+        let mut app = App {
+            settings,
+            text,
+            buffer: Buffer::new(w, h),
+            // both filled in by read_slots, from settings.ini
+            widgets: Widgets(Vec::new()),
+            slots: Vec::new(),
+            keys: Keys::new(),
+            typing: None,
+            press: None,
+            wheel: 0,
+            position: Position::Desktop,
+            snap: true,
+            locked_in_place: false,
+            locked,
+            signed_in,
+            show_desktop: false,
+            tray: 0,
+            ticks: 0,
+            trim_at: 5,
+            frame_ms: 0,
+            frame_at: 0,
+        };
+        app.read_general();
+        app.read_slots();
+        app
+    }
+
     fn ctx(&mut self) -> (Ctx<'_>, &mut Widgets) {
         (
             Ctx { now: clock::now(), settings: &mut self.settings, locked: self.locked, signed_in: self.signed_in },
@@ -421,30 +498,30 @@ impl App {
 
     /// Bring a widget to life: its state, then its window.
     fn start(&mut self, i: usize) {
-        if self.slots[i].hwnd != 0 {
+        if self.slots[i].hwnd != 0 || self.slots[i].deleted {
             return;
         }
+        let (kind, section) = (self.slots[i].kind, self.slots[i].section.clone());
         {
             let (mut ctx, widgets) = self.ctx();
-            match i {
-                0 => widgets.datetime = Some(DateTime::new(&ctx, None)),
-                1 => widgets.resources = Some(Resources::new()),
-                2 => widgets.notes = Some(Notes::new(&mut ctx, None)),
-                3 => widgets.weather = Some(Weather::new(&ctx)),
-                _ => widgets.rain = Some(Rain::new(&ctx)),
-            }
-            if let Some(w) = widgets.get_mut(i) {
-                w.tick(&mut ctx);
-            }
+            let mut widget: Box<dyn Widget> = match kind {
+                Kind::DateTime => Box::new(DateTime::new(&ctx, None)),
+                Kind::Resources => Box::new(Resources::new()),
+                Kind::Notes => Box::new(Notes::new(&mut ctx, &section, None)),
+                Kind::Weather => Box::new(Weather::new(&ctx)),
+                Kind::Rain => Box::new(Rain::new(&ctx)),
+            };
+            widget.tick(&mut ctx);
+            widgets.0[i] = Some(widget);
         }
-        let skin = skin_of(i);
+        let skin = kind.skin();
         let (x, y) = clamp_to_screen(self.slots[i].x, self.slots[i].y, skin.w, skin.h);
         self.slots[i].x = x;
         self.slots[i].y = y;
         unsafe {
             let wnd = CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                wide(WIDGET_CLASS).as_ptr(), wide(TITLES[i]).as_ptr(), WS_POPUP,
+                wide(WIDGET_CLASS).as_ptr(), wide(&self.slots[i].title).as_ptr(), WS_POPUP,
                 x, y, skin.w, skin.h, 0, 0, GetModuleHandleW(null()), null_mut(),
             );
             SetWindowLongPtrW(wnd, GWLP_USERDATA, i as isize);
@@ -470,15 +547,8 @@ impl App {
         }
         {
             let (mut ctx, widgets) = self.ctx();
-            if let Some(w) = widgets.get_mut(i) {
+            if let Some(mut w) = widgets.0[i].take() {
                 w.shutdown(&mut ctx);
-            }
-            match i {
-                0 => widgets.datetime = None,
-                1 => widgets.resources = None,
-                2 => widgets.notes = None,
-                3 => widgets.weather = None,
-                _ => widgets.rain = None,
             }
         }
         let wnd = core::mem::take(&mut self.slots[i].hwnd);
@@ -492,9 +562,91 @@ impl App {
     }
 
     fn set_enabled(&mut self, i: usize, on: bool) {
-        self.settings.set_int(SECTIONS[i], "Enabled", on as i32);
+        // a deleted note has no section to write to, and is not to be given one
+        if self.slots[i].deleted {
+            return;
+        }
+        self.settings.set_int(&self.slots[i].section, "Enabled", on as i32);
         if on { self.start(i) } else { self.stop(i) }
         self.settings.save();
+    }
+
+    /// Every widget settings.ini does not say is closed.
+    fn start_enabled(&mut self) {
+        for i in 0..self.slots.len() {
+            if self.settings.flag(&self.slots[i].section, "Enabled", true) {
+                self.start(i);
+            }
+        }
+    }
+
+    /// Where a window sits, written down for the next run.
+    fn keep_place(&mut self, i: usize) {
+        let slot = &self.slots[i];
+        if !slot.deleted {
+            self.settings.set_int(&slot.section, "X", slot.x);
+            self.settings.set_int(&slot.section, "Y", slot.y);
+        }
+    }
+
+    // ---- more notes ------------------------------------------------------------
+
+    /// Somewhere to put a window the size of slot `b`'s, next to it: the
+    /// nearest place to its left, its right, below or above it where the new
+    /// frame is on the same screen and on top of no widget that is showing.
+    /// (On the desktop a new window goes underneath the others: one that
+    /// overlapped would be made and not seen.)  Side by side the frames
+    /// touch, and one above the other they are APART, as when first laid out.
+    fn room_beside(&self, b: usize) -> (i32, i32) {
+        // frames, not windows: a window has `Pad` of nothing round its frame
+        let frame = |kind: Kind, x: i32, y: i32| {
+            let (skin, pad) = (kind.skin(), kind.skin().int("Pad", 12));
+            Rect::new(x + pad, y + pad, x + skin.w - pad, y + skin.h - pad)
+        };
+        let base = &self.slots[b];
+        let skin = base.kind.skin();
+        let own = frame(base.kind, base.x, base.y);
+        let work = work_area(&RECT { left: own.x0, top: own.y0, right: own.x1, bottom: own.y1 });
+        let free = |&(x, y): &(i32, i32)| {
+            let f = frame(base.kind, x, y);
+            f.x0 >= work.left && f.y0 >= work.top && f.x1 <= work.right && f.y1 <= work.bottom
+                && !self.slots.iter().any(|s| s.hwnd != 0 && frame(s.kind, s.x, s.y).intersects(&f))
+        };
+        let (dx, dy) = (own.x1 - own.x0, own.y1 - own.y0 + APART);
+        (1..=ROOM_STEPS)
+            .flat_map(|k| [(-k, 0), (k, 0), (0, k), (0, -k)])
+            .map(|(i, j)| (base.x + i * dx, base.y + j * dy))
+            .find(free)
+            .unwrap_or_else(|| clamp_to_screen(base.x + CASCADE, base.y + CASCADE, skin.w, skin.h))
+    }
+
+    /// Another note: a window beside the note it was asked for on -- or, asked
+    /// for anywhere else, beside the last note there is -- with a section of
+    /// settings.ini and an empty file of its own.
+    fn new_note(&mut self, from: Option<usize>) {
+        let is_note = |s: &Slot| s.kind == Kind::Notes && !s.deleted;
+        let beside = from.filter(|&i| is_note(&self.slots[i])).or_else(|| self.slots.iter().rposition(is_note)).unwrap_or(NOTE);
+        let (x, y) = self.room_beside(beside);
+        let section = notes::create(&mut self.settings);
+        let title = notes::name(&section);
+        self.slots.push(Slot { x, y, ..Slot::new(Kind::Notes, &section, title) });
+        self.widgets.0.push(None);
+        let i = self.slots.len() - 1;
+        self.keep_place(i);
+        self.set_enabled(i, true);
+    }
+
+    /// Delete a note after the first: its window, and its section of
+    /// settings.ini.  What it leaves on disk is handed back, to be disposed
+    /// of once the App has been let go of.
+    fn delete_note(&mut self, section: &str) -> Vec<PathBuf> {
+        let found = self.slots.iter().position(|s| !s.deleted && s.section == section);
+        let Some(i) = found.filter(|&i| i >= FIXED.len()) else { return Vec::new() };
+        self.stop(i);
+        self.slots[i].deleted = true;
+        let files = notes::forget(&mut self.settings, section);
+        self.settings.save();
+        files
     }
 
     /// Redraw what changed and hand it to the window manager.
@@ -658,7 +810,7 @@ impl App {
 
     fn tick(&mut self) {
         self.ticks += 1;
-        for i in 0..WIDGETS {
+        for i in 0..self.slots.len() {
             let dirty = {
                 let (mut ctx, widgets) = self.ctx();
                 match widgets.get_mut(i) {
@@ -689,7 +841,7 @@ impl App {
     /// locked and nothing would be drawn anyway.  Called whenever either may
     /// have changed -- a widget started or stopped, a command, the lock.
     fn pace(&mut self) {
-        let asked = (0..WIDGETS).filter_map(|i| self.widgets.get(i)).map(|w| w.frame_ms()).filter(|&ms| ms > 0).min();
+        let asked = self.widgets.0.iter().flatten().map(|w| w.frame_ms()).filter(|&ms| ms > 0).min();
         let want = if self.locked { 0 } else { asked.unwrap_or(0) };
         if want == self.frame_ms {
             return;
@@ -713,7 +865,7 @@ impl App {
         let now = Self::now_ms();
         let elapsed = (now - self.frame_at).clamp(0, 1000) as u32;
         self.frame_at = now;
-        for i in 0..WIDGETS {
+        for i in 0..self.slots.len() {
             let dirty = match self.widgets.get_mut(i) {
                 Some(w) if w.frame_ms() > 0 => w.frame(elapsed),
                 _ => continue,
@@ -723,7 +875,7 @@ impl App {
     }
 
     fn repaint_all(&mut self) {
-        for i in 0..WIDGETS {
+        for i in 0..self.slots.len() {
             self.paint(i, Dirty::All);
         }
     }
@@ -839,7 +991,7 @@ impl App {
             return;
         }
         self.slots[i].hover = over;
-        let meters = skin_of(i).meters;
+        let meters = self.slots[i].kind.skin().meters;
         for (meter, ev) in [(was, Ev::Leave), (over, Ev::Over)] {
             if let Some(act) = meter.and_then(|m| meters[m].acts.iter().find(|a| a.ev == ev)) {
                 self.command(i, act, 0, 0);
@@ -852,8 +1004,7 @@ impl App {
         unsafe { ReleaseCapture() };
         let Some(press) = press.filter(|p| p.idx == i) else { return Later::Nothing };
         if press.dragging {
-            self.settings.set_int(SECTIONS[i], "X", self.slots[i].x);
-            self.settings.set_int(SECTIONS[i], "Y", self.slots[i].y);
+            self.keep_place(i);
             self.settings.save();
             return Later::Nothing;
         }
@@ -882,7 +1033,7 @@ impl App {
     /// widgets and of the screen when it comes within SNAP of them, unless
     /// Ctrl or Shift is held.
     fn snapped(&self, i: usize, mut x: i32, mut y: i32) -> (i32, i32) {
-        let skin = skin_of(i);
+        let skin = self.slots[i].kind.skin();
         let (w, h) = (skin.w, skin.h);
         let held = |key: i32| unsafe { GetKeyState(key) } < 0;
         if self.snap && !held(VK_CONTROL) && !held(VK_SHIFT) {
@@ -891,7 +1042,7 @@ impl App {
                 if j == i || other.hwnd == 0 {
                     continue;
                 }
-                let (ox, oy, ow, oh) = (other.x, other.y, skin_of(j).w, skin_of(j).h);
+                let (ox, oy, ow, oh) = (other.x, other.y, other.kind.skin().w, other.kind.skin().h);
                 if y < oy + oh && y + h > oy {
                     if near(x, ox) { x = ox }
                     if near(x, ox + ow) { x = ox + ow }
@@ -916,12 +1067,11 @@ impl App {
 
     /// After the screens change: nothing may be left where it cannot be seen.
     fn keep_on_screen(&mut self) {
-        for i in 0..WIDGETS {
-            let slot = &mut self.slots[i];
+        for slot in &mut self.slots {
             if slot.hwnd == 0 {
                 continue;
             }
-            let skin = skin_of(i);
+            let skin = slot.kind.skin();
             let (x, y) = clamp_to_screen(slot.x, slot.y, skin.w, skin.h);
             if (x, y) != (slot.x, slot.y) {
                 slot.x = x;
@@ -949,6 +1099,15 @@ impl App {
             if !own.is_empty() {
                 m.push((0, String::new(), false));
             }
+            // A note can have others beside it.  The first is closed, like the
+            // other four widgets; the ones after it can also be deleted.
+            if self.slots[i].kind == Kind::Notes {
+                m.push((CMD_NEW_NOTE, String::from("New note"), false));
+                if i >= FIXED.len() {
+                    m.push((CMD_DELETE_NOTE, String::from("Delete this note"), false));
+                }
+                m.push((0, String::new(), false));
+            }
         }
         m.push((SUB, String::from("Position"), false));
         m.push((CMD_DESKTOP, String::from("On desktop"), self.position == Position::Desktop));
@@ -958,13 +1117,20 @@ impl App {
         m.push((CMD_SNAP, String::from("Snap to edges"), self.snap));
         m.push((CMD_LOCK, String::from("Lock position"), self.locked_in_place));
         if let Some(i) = i {
-            m.push((CMD_CLOSE, format!("Close {}", TITLES[i]), false));
+            m.push((CMD_CLOSE, format!("Close {}", self.slots[i].title), false));
         }
         m.push((0, String::new(), false));
         m.push((SUB, String::from("Widgets"), false));
-        for (j, title) in TITLES.iter().enumerate() {
-            m.push((CMD_TOGGLE + j, (*title).to_owned(), self.slots[j].hwnd != 0));
+        // The notes together where the first of them is, in the order of
+        // their numbers -- which, their names being alike but for the number,
+        // is shortest name first.
+        let mut more: Vec<usize> = (FIXED.len()..self.slots.len()).filter(|&j| !self.slots[j].deleted).collect();
+        more.sort_by_key(|&j| (self.slots[j].title.len(), &self.slots[j].title));
+        for j in (0..=NOTE).chain(more).chain(NOTE + 1..FIXED.len()) {
+            m.push((CMD_TOGGLE + j, self.slots[j].title.clone(), self.slots[j].hwnd != 0));
         }
+        m.push((0, String::new(), false));
+        m.push((CMD_NEW_NOTE, String::from("New Sticky Note"), false));
         m.push((SUB, String::new(), false));
         m.push((CMD_AUTOSTART, String::from("Start with Windows"), autostart_enabled()));
         m.push((CMD_SETTINGS, String::from("Open settings file"), false));
@@ -1000,9 +1166,24 @@ impl App {
             }
             CMD_RELOAD => self.reload(),
             CMD_EXIT => return Later::Quit,
-            c if (CMD_TOGGLE..CMD_TOGGLE + WIDGETS).contains(&c) => {
+            CMD_NEW_NOTE => self.new_note(i),
+            CMD_DELETE_NOTE => {
+                let Some(slot) = i.filter(|&i| i >= FIXED.len()).map(|i| &self.slots[i]) else { return Later::Nothing };
+                // Asked about first, unless there is nothing on it to lose.
+                // (The right click that opened the menu ended any typing, so
+                // what is in the file is what is on the sheet.)
+                let file = notes::file(&self.settings, &slot.section);
+                let ask = (!notes::is_blank(&file)).then(|| {
+                    let text = format!("Delete this note?\n\nIts text, {}, goes to the Recycle Bin.", file.display());
+                    (format!("Delete {}", slot.title), text)
+                });
+                return Later::Delete(slot.section.clone(), ask);
+            }
+            c if c >= CMD_TOGGLE => {
                 let j = c - CMD_TOGGLE;
-                self.set_enabled(j, self.slots[j].hwnd == 0);
+                if j < self.slots.len() {
+                    self.set_enabled(j, self.slots[j].hwnd == 0);
+                }
             }
             c if c >= CMD_WIDGET => {
                 let Some(i) = i else { return Later::Nothing };
@@ -1023,17 +1204,13 @@ impl App {
 
     /// Read settings.ini again and start over from it.
     fn reload(&mut self) {
-        for i in 0..WIDGETS {
+        for i in 0..self.slots.len() {
             self.stop(i);
         }
         self.settings = Settings::load();
         self.read_general();
         self.read_slots();
-        for i in 0..WIDGETS {
-            if self.settings.flag(SECTIONS[i], "Enabled", true) {
-                self.start(i);
-            }
-        }
+        self.start_enabled();
         self.settings.save();
     }
 
@@ -1048,32 +1225,51 @@ impl App {
         self.locked_in_place = self.settings.flag("General", "LockPosition", false);
     }
 
-    /// Where each widget sits: where it was left, or -- the first time -- in
-    /// a column down the right-hand side of the screen, frames ten pixels
-    /// apart, the note and the weather side by side at the foot and the rain
-    /// to the left of the note, frame against frame.
+    /// Which windows there are -- the five, and a note for every other
+    /// section of settings.ini that is a note's -- and where each sits: where
+    /// it was left, or -- the first time -- in a column down the right-hand
+    /// side of the screen, frames ten pixels apart, the note and the weather
+    /// side by side at the foot and the rain to the left of the note, frame
+    /// against frame.  Called with every window shut: at the start, and when
+    /// settings.ini is read again.
     fn read_slots(&mut self) {
+        self.slots = FIXED.iter().map(|&(kind, section, title)| Slot::new(kind, section, title.to_owned())).collect();
+        for section in notes::others(&self.settings) {
+            let title = notes::name(&section);
+            self.slots.push(Slot::new(Kind::Notes, &section, title));
+        }
+        self.widgets.0.clear();
+        self.widgets.0.resize_with(self.slots.len(), || None);
+
         let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
-        let size = |i: usize| (skin_of(i).w, skin_of(i).h);
-        let pad = skin_of(0).int("Pad", 12);
-        let overlap = 2 * pad - 10;
-        let x0 = work.right - size(0).0 - 4;
+        let size = |i: usize| (FIXED[i].0.skin().w, FIXED[i].0.skin().h);
+        let pad = FIXED[DATETIME].0.skin().int("Pad", 12);
+        let overlap = 2 * pad - APART;
+        let x0 = work.right - size(DATETIME).0 - 4;
         let y0 = work.top + 4;
-        let y1 = y0 + size(0).1 - overlap;
+        let y1 = y0 + size(DATETIME).1 - overlap;
         let y2 = y1 + size(1).1 - overlap;
         let defaults = [
             (x0, y0),
             (x0, y1),
             (x0, y2),
-            (x0 + size(0).0 - size(3).0, y2),
+            (x0 + size(DATETIME).0 - size(WEATHER).0, y2),
             (x0 - size(RAIN).0 + 2 * pad, y2),
         ];
-        for i in 0..WIDGETS {
-            self.slots[i].x = self.settings.int(SECTIONS[i], "X", defaults[i].0);
-            self.slots[i].y = self.settings.int(SECTIONS[i], "Y", defaults[i].1);
-            if self.settings.get(SECTIONS[i], "X").is_none() {
-                self.settings.set_int(SECTIONS[i], "X", self.slots[i].x);
-                self.settings.set_int(SECTIONS[i], "Y", self.slots[i].y);
+        for i in 0..self.slots.len() {
+            // A note after the first was put somewhere when it was made.  One
+            // written into settings.ini by hand, with no place given, steps
+            // down from the first.
+            let (x, y) = defaults.get(i).copied().unwrap_or_else(|| {
+                let step = CASCADE * (i + 1 - FIXED.len()) as i32;
+                (defaults[NOTE].0 + step, defaults[NOTE].1 + step)
+            });
+            let section = &self.slots[i].section;
+            let placed = self.settings.get(section, "X").is_some();
+            let (x, y) = (self.settings.int(section, "X", x), self.settings.int(section, "Y", y));
+            (self.slots[i].x, self.slots[i].y) = (x, y);
+            if !placed {
+                self.keep_place(i);
             }
         }
     }
@@ -1082,10 +1278,8 @@ impl App {
         self.typing = None;
         self.keys.destroy();
         let (mut ctx, widgets) = self.ctx();
-        for i in 0..WIDGETS {
-            if let Some(w) = widgets.get_mut(i) {
-                w.shutdown(&mut ctx);
-            }
+        for w in widgets.0.iter_mut().flatten() {
+            w.shutdown(&mut ctx);
         }
         self.settings.save();
     }
@@ -1137,10 +1331,22 @@ fn run_later(mut later: Later) {
             Later::Nothing => return,
             Later::Menu(i) => show_menu(i),
             Later::About(i) => {
-                let text = format!("{}\n\nWin98 Widgets {}", skin_about(i), env!("CARGO_PKG_VERSION"));
+                let Some((title, about)) = with_app(|app| Some((app.slots.get(i)?.title.clone(), app.widgets.get(i)?.about()))).flatten() else {
+                    return;
+                };
+                let text = format!("{about}\n\nWin98 Widgets {}", env!("CARGO_PKG_VERSION"));
                 with_sharp_dpi(|| unsafe {
-                    MessageBoxW(0, wide(&text).as_ptr(), wide(&format!("About {}", TITLES[i])).as_ptr(), MB_OK | MB_ICONINFORMATION)
+                    MessageBoxW(0, wide(&text).as_ptr(), wide(&format!("About {title}")).as_ptr(), MB_OK | MB_ICONINFORMATION)
                 });
+                Later::Nothing
+            }
+            Later::Delete(section, ask) => {
+                let sure = ask.is_none_or(|(title, text)| {
+                    with_sharp_dpi(|| unsafe { MessageBoxW(0, wide(&text).as_ptr(), wide(&title).as_ptr(), MB_YESNO | MB_ICONQUESTION) }) == IDYES
+                });
+                if sure {
+                    recycle(&with_app(|app| app.delete_note(&section)).unwrap_or_default());
+                }
                 Later::Nothing
             }
             Later::Open(path) => {
@@ -1157,8 +1363,31 @@ fn run_later(mut later: Later) {
     }
 }
 
-fn skin_about(i: usize) -> String {
-    with_app(|app| app.widgets.get(i).map(|w| w.about().to_owned())).flatten().unwrap_or_default()
+/// Send files to the Recycle Bin, without a word: one that will not go is
+/// left where it is.  Only a full path is handed over -- the shell does not
+/// recycle a file named any other way, it deletes it.
+fn recycle(files: &[PathBuf]) {
+    // one path after another, each ending in a NUL, and a NUL to end the list
+    let mut from: Vec<u16> = Vec::new();
+    for file in files.iter().filter(|f| f.is_absolute()) {
+        from.extend(file.as_os_str().encode_wide());
+        from.push(0);
+    }
+    if from.is_empty() {
+        return;
+    }
+    from.push(0);
+    let mut op = SHFILEOPSTRUCTW {
+        hwnd: 0,
+        wFunc: FO_DELETE,
+        pFrom: from.as_ptr(),
+        pTo: null(),
+        fFlags: FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI,
+        fAnyOperationsAborted: 0,
+        hNameMappings: null_mut(),
+        lpszProgressTitle: null(),
+    };
+    unsafe { SHFileOperationW(&mut op) };
 }
 
 fn show_menu(i: Option<usize>) -> Later {
@@ -1246,8 +1475,7 @@ unsafe extern "system" fn widget_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             WM_CAPTURECHANGED => with_app(|app| {
                 if lp != wnd && app.press.as_ref().is_some_and(|p| p.idx == i && p.dragging) {
                     app.press = None;
-                    app.settings.set_int(SECTIONS[i], "X", app.slots[i].x);
-                    app.settings.set_int(SECTIONS[i], "Y", app.slots[i].y);
+                    app.keep_place(i);
                     app.settings.save();
                 }
                 Later::Nothing
@@ -1329,7 +1557,7 @@ unsafe extern "system" fn main_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     // going to sleep: leave the log as it stands on disk
                     PBT_APMSUSPEND => {
                         let (mut ctx, widgets) = app.ctx();
-                        if let Some(w) = widgets.datetime.as_mut() {
+                        if let Some(w) = widgets.get_mut(DATETIME) {
                             w.shutdown(&mut ctx);
                         }
                     }
@@ -1355,7 +1583,7 @@ unsafe extern "system" fn main_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 with_app(|app| {
                     app.shutdown();
                     app.tray(NIM_DELETE);
-                    for i in 0..WIDGETS {
+                    for i in 0..app.slots.len() {
                         app.stop(i);
                     }
                 });
@@ -1407,7 +1635,6 @@ pub fn run() -> i32 {
             MessageBoxW(0, wide("DirectWrite is not available.").as_ptr(), wide(MAIN_TITLE).as_ptr(), MB_OK);
             return 1;
         };
-        let (w, h) = (0..WIDGETS).fold((0, 0), |(w, h), i| (w.max(skin_of(i).w), h.max(skin_of(i).h)));
 
         register(WIDGET_CLASS, widget_proc, CS_DBLCLKS);
         register(MAIN_CLASS, main_proc, 0);
@@ -1419,40 +1646,12 @@ pub fn run() -> i32 {
         SetWindowPos(main, HWND_BOTTOM, 0, 0, 0, 0, ZPOS_FLAGS);
 
         let (locked, signed_in) = session_state();
-        let slot = || Slot { hwnd: 0, x: 0, y: 0, hover: None, tracking: false, seen: Vec::new() };
-        let mut app = App {
-            settings: Settings::load(),
-            text,
-            buffer: Buffer::new(w, h),
-            widgets: Widgets { datetime: None, resources: None, notes: None, weather: None, rain: None },
-            slots: core::array::from_fn(|_| slot()),
-            keys: Keys::new(),
-            typing: None,
-            press: None,
-            wheel: 0,
-            position: Position::Desktop,
-            snap: true,
-            locked_in_place: false,
-            locked,
-            signed_in,
-            show_desktop: false,
-            tray: 0,
-            ticks: 0,
-            trim_at: 5,
-            frame_ms: 0,
-            frame_at: 0,
-        };
-        app.read_general();
-        app.read_slots();
+        let mut app = App::new(Settings::load(), text, locked, signed_in);
         app.tray = App::make_icon();
         *(&raw mut APP) = Some(app);
 
         with_app(|app| {
-            for i in 0..WIDGETS {
-                if app.settings.flag(SECTIONS[i], "Enabled", true) {
-                    app.start(i);
-                }
-            }
+            app.start_enabled();
             app.settings.save();
             app.tray(NIM_ADD);
         });
@@ -1488,6 +1687,96 @@ impl Drop for Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An App whose settings.ini, and whose notes, are in a folder that is
+    /// the test's own.  No window class is registered here, so no window is
+    /// ever made: a widget that is started runs without one.
+    fn app(name: &str) -> (App, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("win98-app-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = Text::new(skin::datetime::SKIN.var("Font"), skin::FONTS).unwrap();
+        (App::new(Settings::in_memory_at(&dir), text, false, None), dir)
+    }
+
+    /// What the Widgets submenu lists, top to bottom.
+    fn listed(app: &App) -> Vec<String> {
+        app.menu(None).into_iter().filter(|m| (CMD_TOGGLE..usize::MAX).contains(&m.0)).map(|m| m.1).collect()
+    }
+
+    fn offers(app: &App, i: usize, label: &str) -> bool {
+        app.menu(Some(i)).iter().any(|m| m.1 == label)
+    }
+
+    /// As if slot `i` had a window, showing at (x, y).
+    fn show(app: &mut App, i: usize, x: i32, y: i32) {
+        (app.slots[i].hwnd, app.slots[i].x, app.slots[i].y) = (1, x, y);
+    }
+
+    #[test]
+    fn notes_are_made_and_deleted() {
+        let (mut app, dir) = app("notes");
+        assert_eq!(app.slots.len(), FIXED.len());
+        app.new_note(Some(NOTE));
+        app.new_note(None);
+        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note", "Sticky Note 2", "Sticky Note 3", "Weather", "Rain Window"]);
+        // each is running, on a file of its own, and will be there next time
+        let (second, third) = (FIXED.len(), FIXED.len() + 1);
+        assert!(app.widgets.get(second).is_some() && app.widgets.get(third).is_some());
+        assert!(dir.join("Notes2.txt").is_file() && dir.join("Notes3.txt").is_file());
+        assert_eq!(app.settings.get("Notes3", "Enabled"), Some("1"));
+        assert!(app.settings.get("Notes3", "X").is_some());
+
+        // any note offers another; only one after the first can be deleted
+        assert!(offers(&app, NOTE, "New note") && !offers(&app, NOTE, "Delete this note"));
+        assert!(offers(&app, third, "New note") && offers(&app, third, "Delete this note"));
+        assert!(!offers(&app, WEATHER, "New note"));
+        assert!(matches!(app.menu_command(Some(NOTE), CMD_DELETE_NOTE), Later::Nothing));
+        assert!(app.delete_note(notes::FIRST).is_empty() && !app.slots[NOTE].deleted);
+
+        // an empty one goes without a question, and leaves its file to be binned
+        let Later::Delete(section, None) = app.menu_command(Some(second), CMD_DELETE_NOTE) else { panic!("asked about an empty note") };
+        assert_eq!(app.delete_note(&section), [dir.join("Notes2.txt")]);
+        assert!(app.slots[second].deleted && app.widgets.get(second).is_none());
+        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note", "Sticky Note 3", "Weather", "Rain Window"]);
+        // nothing brings it back, and nothing writes its section again
+        app.set_enabled(second, true);
+        app.keep_place(second);
+        assert!(app.widgets.get(second).is_none() && !app.settings.sections().any(|s| s == "Notes2"));
+
+        // one with something on it is asked about first
+        std::fs::write(dir.join("Notes3.txt"), "milk\n").unwrap();
+        assert!(matches!(app.menu_command(Some(third), CMD_DELETE_NOTE), Later::Delete(_, Some(_))));
+
+        // the next run finds the notes that are left, and only those
+        for i in 0..app.slots.len() {
+            app.stop(i);
+        }
+        app.read_slots();
+        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note", "Sticky Note 3", "Weather", "Rain Window"]);
+        assert_eq!(app.slots.len(), app.widgets.0.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_note_goes_where_there_is_room() {
+        let (mut app, dir) = app("room");
+        // the first note in the middle of the screen, as if it were showing
+        let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
+        let skin = Kind::Notes.skin();
+        let (x, y) = ((work.left + work.right - skin.w) / 2, (work.top + work.bottom - skin.h) / 2);
+        show(&mut app, NOTE, x, y);
+        // to its left, frame against frame
+        let step = skin.w - 2 * skin.int("Pad", 12);
+        assert_eq!(app.room_beside(NOTE), (x - step, y));
+        // the rain is there: to its right, then
+        show(&mut app, RAIN, x - step, y);
+        assert_eq!(app.room_beside(NOTE), (x + step, y));
+        // a widget that only reaches into that place is as much in the way
+        show(&mut app, WEATHER, x + step + 40, y - 40);
+        assert_ne!(app.room_beside(NOTE), (x + step, y));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_tray_icon_loads_from_the_ico() {

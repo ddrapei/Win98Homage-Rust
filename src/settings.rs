@@ -49,6 +49,11 @@ pub fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     })
 }
 
+/// The name in a `[Section]` line; None for any other line.
+fn header(line: &str) -> Option<&str> {
+    line.trim().strip_prefix('[')?.strip_suffix(']')
+}
+
 impl Settings {
     pub fn load() -> Settings {
         let dir = settings_dir();
@@ -67,6 +72,13 @@ impl Settings {
     /// For the test harness: defaults, never written anywhere.
     pub fn in_memory() -> Settings {
         Settings { path: PathBuf::new(), lines: default_file().lines().map(str::to_owned).collect(), dirty: false }
+    }
+
+    /// The same, as if it were kept in `dir`: for what is looked for beside
+    /// the file -- and where `save` then writes it.
+    #[cfg(test)]
+    pub fn in_memory_at(dir: &Path) -> Settings {
+        Settings { path: dir.join("settings.ini"), ..Settings::in_memory() }
     }
 
     pub fn path(&self) -> &Path {
@@ -151,6 +163,26 @@ impl Settings {
         self.set(section, key, &value.to_string());
     }
 
+    /// The name of every section, in the order the file has them.
+    pub fn sections(&self) -> impl Iterator<Item = &str> {
+        self.lines.iter().filter_map(|l| header(l))
+    }
+
+    /// Take a section out of the file: its header and every line down to the
+    /// next one.
+    pub fn remove_section(&mut self, section: &str) {
+        let named = |l: &String| header(l).is_some_and(|n| n.eq_ignore_ascii_case(section));
+        while let Some(h) = self.lines.iter().position(named) {
+            let end = self.lines[h + 1..].iter().position(|l| header(l).is_some()).map_or(self.lines.len(), |n| h + 1 + n);
+            self.lines.drain(h..end);
+            // it was the last: the blank line that set it apart goes with it
+            while h == self.lines.len() && self.lines.last().is_some_and(|l| l.trim().is_empty()) {
+                self.lines.pop();
+            }
+            self.dirty = true;
+        }
+    }
+
     /// Write the file out if anything changed.  Best effort: the program
     /// carries on with what it has in memory if the folder is read-only.
     pub fn save(&mut self) {
@@ -202,6 +234,8 @@ GraphTo={graph_to}
 Enabled=1
 
 [Notes]
+; The first note.  Every other one (right-click a note, New note) has a section
+; like this of its own -- [Notes2], [Notes3], ... -- and a file of its own.
 Enabled=1
 ; the note itself; a bare name is kept beside this file
 NoteFile={note_file}
@@ -239,4 +273,34 @@ ManualLocation={place}
         lon = wx.var("ManualLon"),
         place = wx.var("ManualLocation"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn of(text: &str) -> Settings {
+        Settings { path: PathBuf::new(), lines: text.lines().map(str::to_owned).collect(), dirty: false }
+    }
+
+    #[test]
+    fn a_section_is_removed_with_its_lines_and_nothing_else() {
+        let mut s = of("[A]\nx=1\n\n[Notes2]\n; a comment\nNoteFile=Notes2.txt\n\n[B]\ny=2");
+        s.remove_section("notes2");
+        assert_eq!(s.lines, ["[A]", "x=1", "", "[B]", "y=2"]);
+        assert_eq!(s.sections().collect::<Vec<_>>(), ["A", "B"]);
+
+        // the last one in the file leaves no blank line behind
+        s.remove_section("B");
+        assert_eq!(s.lines, ["[A]", "x=1"]);
+        assert!(s.dirty);
+    }
+
+    #[test]
+    fn removing_a_section_that_is_not_there_changes_nothing() {
+        let mut s = of("[A]\nx=1\n");
+        s.remove_section("Notes2");
+        assert_eq!(s.lines, ["[A]", "x=1"]);
+        assert!(!s.dirty);
+    }
 }

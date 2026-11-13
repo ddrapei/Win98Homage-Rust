@@ -172,6 +172,21 @@ pub struct NOTIFYICONDATAW {
     pub hBalloonIcon: HICON,
 }
 
+/// shellapi.h packs its structures to a byte on 32-bit Windows, and only there.
+#[repr(C)]
+#[cfg_attr(target_pointer_width = "32", repr(packed))]
+pub struct SHFILEOPSTRUCTW {
+    pub hwnd: HWND,
+    pub wFunc: u32,
+    /// One path after another, each ending in a NUL, and one more NUL at the end.
+    pub pFrom: PCWSTR,
+    pub pTo: PCWSTR,
+    pub fFlags: u16,
+    pub fAnyOperationsAborted: BOOL,
+    pub hNameMappings: *mut c_void,
+    pub lpszProgressTitle: PCWSTR,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct SYSTEMTIME {
@@ -383,6 +398,16 @@ pub const TPM_NONOTIFY: u32 = 0x0080;
 
 pub const MB_OK: u32 = 0;
 pub const MB_ICONINFORMATION: u32 = 0x40;
+pub const MB_YESNO: u32 = 4;
+pub const MB_ICONQUESTION: u32 = 0x20;
+pub const IDYES: i32 = 6;
+
+pub const FO_DELETE: u32 = 3;
+pub const FOF_SILENT: u16 = 0x0004;
+pub const FOF_NOCONFIRMATION: u16 = 0x0010;
+/// To the Recycle Bin, rather than gone.
+pub const FOF_ALLOWUNDO: u16 = 0x0040;
+pub const FOF_NOERRORUI: u16 = 0x0400;
 
 pub const NIM_ADD: u32 = 0;
 pub const NIM_MODIFY: u32 = 1;
@@ -534,6 +559,7 @@ unsafe extern "system" {
 unsafe extern "system" {
     pub fn Shell_NotifyIconW(message: u32, data: *const NOTIFYICONDATAW) -> BOOL;
     pub fn ShellExecuteW(wnd: HWND, verb: PCWSTR, file: PCWSTR, params: PCWSTR, dir: PCWSTR, show: i32) -> isize;
+    pub fn SHFileOperationW(op: *mut SHFILEOPSTRUCTW) -> i32;
 }
 
 #[link(name = "advapi32")]
