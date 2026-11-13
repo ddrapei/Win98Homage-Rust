@@ -251,7 +251,7 @@ static PAPER: AtomicU32 = AtomicU32::new(0x00FF_FFFF);
 static AUTOSAVE_MS: AtomicU32 = AtomicU32::new(0);
 
 /// Win32 packs a colour as 0x00BBGGRR.
-fn colorref(argb: u32) -> u32 {
+pub fn colorref(argb: u32) -> u32 {
     (argb >> 16 & 255) | (argb & 0xFF00) | (argb & 255) << 16
 }
 

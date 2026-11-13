@@ -24,6 +24,7 @@ use crate::canvas::{Canvas, Rect};
 use crate::clock;
 use crate::datetime::DateTime;
 use crate::editor::{self, Editor, Look};
+use crate::entry::{self, Entry};
 use crate::notes::Notes;
 use crate::resources::Resources;
 use crate::settings::Settings;
@@ -35,6 +36,7 @@ use crate::widget::{Ctx, Dirty, Outcome, Request, Widget};
 
 const WIDGETS: usize = 4;
 const NOTES: usize = 2;
+const WEATHER: usize = 3;
 const SECTIONS: [&str; WIDGETS] = ["DateTime", "Resources", "Notes", "Weather"];
 const TITLES: [&str; WIDGETS] = ["Date/Time", "Resource Meter", "Sticky Note", "Weather"];
 
@@ -172,6 +174,8 @@ struct App {
     widgets: Widgets,
     slots: [Slot; WIDGETS],
     editor: Editor,
+    /// The box the weather's city is typed in.
+    city: Entry,
     press: Option<Press>,
     wheel: i32,
     position: Position,
@@ -436,6 +440,9 @@ impl App {
         if i == NOTES {
             self.editor.destroy();
         }
+        if i == WEATHER {
+            self.city.destroy();
+        }
         {
             let (mut ctx, widgets) = self.ctx();
             if let Some(w) = widgets.get_mut(i) {
@@ -524,6 +531,10 @@ impl App {
                 self.leave_editor();
                 Later::Nothing
             }
+            Request::EditCity => {
+                self.open_city();
+                Later::Nothing
+            }
         };
         self.settings.save();
         later
@@ -549,15 +560,13 @@ impl App {
 
     // ---- the note's edit box -------------------------------------------------
 
-    fn open_editor(&mut self, line: usize, down: usize) {
-        let Some(notes) = self.widgets.notes.as_ref() else { return };
-        let skin = notes.skin();
-        let (paper, ink) = notes.colours();
+    /// Where a skin's [EditBox] puts its box, and what it is painted with.
+    fn look(skin: &Skin, paper: u32, ink: u32) -> Look {
         let mut padding = [0; 4];
         for (slot, part) in padding.iter_mut().zip(skin.var("InputPadding").split(',')) {
             *slot = part.trim().parse().unwrap_or(0);
         }
-        let look = Look {
+        Look {
             x: skin.int("InputX", 33),
             y: skin.int("InputY", 42),
             w: skin.int("InputW", 149),
@@ -568,7 +577,13 @@ impl App {
             face: skin.var("Font").to_owned(),
             points: skin.num("FontSize", 8.0),
             autosave_ms: skin.int("InputAUTOSAVE", 1000).max(0) as u32,
-        };
+        }
+    }
+
+    fn open_editor(&mut self, line: usize, down: usize) {
+        let Some(notes) = self.widgets.notes.as_ref() else { return };
+        let (paper, ink) = notes.colours();
+        let look = Self::look(notes.skin(), paper, ink);
         let path = notes.path().clone();
         let status = self.editor.open(self.slots[NOTES].hwnd, editor_proc, &look, &path, line, down);
         if status != editor::Status::Open {
@@ -588,6 +603,35 @@ impl App {
             let dirty = notes.closed(status);
             self.paint(NOTES, dirty);
         }
+    }
+
+    // ---- the weather's city box ----------------------------------------------
+
+    fn open_city(&mut self) {
+        let Some(weather) = self.widgets.weather.as_ref() else { return };
+        let skin = weather.skin();
+        let look = Self::look(skin, skin.colour("FieldBg"), skin.colour("Ink"));
+        let text = weather.city_text().to_owned();
+        self.city.open(self.slots[WEATHER].hwnd, city_proc, &look, &text);
+    }
+
+    /// Take the box down, and hand the weather what was typed in it -- if
+    /// anything was: Escape, or a name left as it stood, changes nothing.
+    fn leave_city(&mut self) {
+        if !self.city.is_open() {
+            return;
+        }
+        self.trim_at = self.ticks + 5;
+        let Some(typed) = self.city.leave() else { return };
+        let dirty = {
+            let (mut ctx, widgets) = self.ctx();
+            match widgets.weather.as_mut() {
+                Some(w) => w.set_city(&typed, &mut ctx),
+                None => return,
+            }
+        };
+        self.paint(WEATHER, dirty);
+        self.settings.save();
     }
 
     // ---- once a second ---------------------------------------------------------
@@ -655,6 +699,7 @@ impl App {
     fn mouse_down(&mut self, i: usize, wnd: HWND, x: i32, y: i32, double: bool) -> Later {
         // Clicking anywhere that is not the edit box finishes the edit.
         self.leave_editor();
+        self.leave_city();
         let mut later = Later::Nothing;
         // A double-click does what the meter under it says a double-click
         // does; where it says nothing, it is simply a second click.
@@ -947,6 +992,7 @@ impl App {
 
     fn shutdown(&mut self) {
         self.editor.destroy();
+        self.city.destroy();
         let (mut ctx, widgets) = self.ctx();
         for i in 0..WIDGETS {
             if let Some(w) = widgets.get_mut(i) {
@@ -1112,7 +1158,10 @@ unsafe extern "system" fn widget_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             WM_LBUTTONUP => with_app(|app| app.mouse_up(i, x_of(lp), y_of(lp))),
             WM_MOUSEWHEEL => with_app(|app| app.mouse_wheel(i, wnd, x_of(lp), y_of(lp), hi_word(wp) as i16 as i32)),
             WM_RBUTTONUP => {
-                with_app(|app| app.leave_editor());
+                with_app(|app| {
+                    app.leave_editor();
+                    app.leave_city();
+                });
                 Some(Later::Menu(Some(i)))
             }
             WM_MOUSELEAVE => with_app(|app| {
@@ -1161,6 +1210,21 @@ unsafe extern "system" fn editor_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
     }
 }
 
+unsafe extern "system" fn city_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if let Some(result) = Entry::handle(wnd, msg, wp, lp) {
+            return result;
+        }
+        match msg {
+            entry::WM_LEAVE => {
+                with_app(|app| app.leave_city());
+                0
+            }
+            _ => DefWindowProcW(wnd, msg, wp, lp),
+        }
+    }
+}
+
 /// Fire the tick just after each second begins, so the clock's second hand
 /// moves when the second does.
 fn schedule_tick(wnd: HWND) {
@@ -1184,6 +1248,7 @@ unsafe extern "system" fn main_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     app.locked = wp == WTS_SESSION_LOCK;
                     if app.locked {
                         app.leave_editor();
+                        app.leave_city();
                     }
                     // let the log hear of it now, and catch the picture up
                     app.tick();
@@ -1293,6 +1358,7 @@ pub fn run() -> i32 {
             widgets: Widgets { datetime: None, resources: None, notes: None, weather: None },
             slots: [slot(), slot(), slot(), slot()],
             editor: Editor::new(),
+            city: Entry::new(),
             press: None,
             wheel: 0,
             position: Position::Desktop,

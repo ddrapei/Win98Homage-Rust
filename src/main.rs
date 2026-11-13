@@ -16,7 +16,8 @@
 //!   datetime     Date/Time Properties  (with usage: the on/unlocked journal)
 //!   resources    Resource Meter
 //!   notes        Sticky Note           (with editor: the box you type in)
-//!   weather      Weather               (and the child that fetches it)
+//!   weather      Weather               (and the child that fetches it; entry:
+//!                                       the box the city is typed in)
 //!   app          windows, mouse, menus, tray, the once-a-second tick
 //!   settings     settings.ini
 //!   clock        time and time zones
@@ -32,6 +33,7 @@ mod clock;
 mod datetime;
 mod dump;
 mod editor;
+mod entry;
 mod notes;
 mod resources;
 mod settings;
@@ -54,6 +56,7 @@ fn main() {
     let code = match args.get(1).map(String::as_str) {
         // the short-lived child that talks to the network
         Some("--fetch-weather") => weather::fetch_main(&args[2..]),
+        Some("--find-city") => weather::find_main(&args[2..]),
         Some("--dump") => dump::run(&args[2..]),
         _ => app::run(),
     };

@@ -174,8 +174,8 @@ fn default_file() -> String {
         "\
 ; Win98 Widgets -- settings.
 ; Edit while the program is not running, or use \"Reload settings\" in the tray
-; menu afterwards.  Positions, the paper colour and the 12/24-hour choice are
-; written back here by the program; everything else is yours.
+; menu afterwards.  Positions, the paper colour, the 12/24-hour choice and the
+; weather's city are written back here by the program; everything else is yours.
 
 [General]
 ; desktop = behind every window, on the desktop itself
@@ -214,7 +214,9 @@ Created={created}
 Enabled=1
 ; celsius or fahrenheit
 TempUnit={unit}
-; fill both in to pin the forecast to one place and never ask ip-api.com
+; the place the forecast is for.  Typing a city into the widget's city field
+; fills these three in; so can you.  With the first two set, ip-api.com is
+; never asked.  All three empty: wherever the public IP address appears to be
 ManualLat={lat}
 ManualLon={lon}
 ManualLocation={place}

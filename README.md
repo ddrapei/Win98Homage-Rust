@@ -48,7 +48,8 @@ widgets as a whole.
 ## Using them
 
 They are desktop widgets, not windows: no taskbar button, not in Alt-Tab, and they never
-take the keyboard (except the note's edit box, while you type in it).
+take the keyboard (except the note's edit box and the weather's city field, while you
+type in them).
 
 | | |
 |--|--|
@@ -58,8 +59,14 @@ take the keyboard (except the note's edit box, while you type in it).
 | `X` | closes that widget (it stops costing anything); `?` says what it does |
 
 In the widgets themselves: tabs, month list, calendar selection, scroll to browse months,
-the 12/24-hour field, checkboxes, the scrollbar, the paper swatch, and
-click-the-paper-to-edit with save-as-you-type and a `.bak`.
+the 12/24-hour field, checkboxes, the scrollbar, the paper swatch,
+click-the-paper-to-edit with save-as-you-type and a `.bak`, and the weather's city field.
+
+**The weather's city.** Click the city field and type a place: `Lviv`, or `Paris, US` /
+`Portland, Maine` to say which one. Enter (or a click anywhere else) looks it up and pins
+the forecast to it; Escape leaves things as they were; an empty field goes back to the
+place your public IP address gives. The pin is kept in `settings.ini` as `ManualLat`,
+`ManualLon` and `ManualLocation`, which can also be written by hand.
 
 **Position** (right-click → Position): *On desktop* (default) keeps the widgets behind
 every window; *Normal*; *Always on top*.
@@ -100,7 +107,7 @@ text         DirectWrite text, rasterised into the canvas
 datetime     Date/Time Properties   (usage: the on/unlocked journal)
 resources    Resource Meter
 notes        Sticky Note            (editor: the box you type in)
-weather      Weather                (and the child that fetches it)
+weather      Weather                (and the child that fetches it; entry: the city box)
 app          windows, mouse, menus, tray, the once-a-second tick
 settings     settings.ini
 clock        time and time zones

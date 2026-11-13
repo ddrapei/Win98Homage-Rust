@@ -259,8 +259,10 @@ pub const WS_EX_LAYERED: u32 = 0x0008_0000;
 pub const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
 pub const CS_DBLCLKS: u32 = 0x0008;
 
+pub const ES_CENTER: u32 = 0x0001;
 pub const ES_MULTILINE: u32 = 0x0004;
 pub const ES_AUTOVSCROLL: u32 = 0x0040;
+pub const ES_AUTOHSCROLL: u32 = 0x0080;
 pub const ES_WANTRETURN: u32 = 0x1000;
 
 pub const WM_DESTROY: u32 = 0x0002;
@@ -296,6 +298,7 @@ pub const WM_NULL: u32 = 0;
 pub const WA_INACTIVE: usize = 0;
 pub const MA_NOACTIVATE: isize = 3;
 pub const EN_CHANGE: usize = 0x0300;
+pub const VK_RETURN: usize = 0x0D;
 pub const VK_ESCAPE: usize = 0x1B;
 pub const VK_CONTROL: i32 = 0x11;
 pub const VK_SHIFT: i32 = 0x10;
@@ -460,6 +463,7 @@ unsafe extern "system" {
     pub fn GetWindowTextLengthW(wnd: HWND) -> i32;
     pub fn GetWindowTextW(wnd: HWND, buf: *mut u16, len: i32) -> i32;
     pub fn SetWindowTextW(wnd: HWND, text: PCWSTR) -> BOOL;
+    pub fn FillRect(dc: HDC, rect: *const RECT, brush: HGDIOBJ) -> i32;
 }
 
 #[link(name = "gdi32")]

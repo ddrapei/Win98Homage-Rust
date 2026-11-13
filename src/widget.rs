@@ -37,6 +37,8 @@ pub enum Request {
     Edit { line: usize, down: usize },
     /// Finish the edit, as a click outside the box would.
     LeaveEdit,
+    /// Put the one-line box over the weather's city field.
+    EditCity,
 }
 
 pub struct Outcome {

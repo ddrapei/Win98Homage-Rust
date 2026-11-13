@@ -3,11 +3,18 @@
 //! or never if a place is pinned in settings.ini), then the forecast from
 //! Open-Meteo every half hour.
 //!
+//! The place is pinned by typing a city into the widget's city field (the
+//! box is `entry`).  The name goes to Open-Meteo's geocoder, and what comes
+//! back is kept in settings.ini as ManualLat, ManualLon and ManualLocation --
+//! the same three keys that can be written there by hand.
+//!
 //! The network is kept out of this process altogether.  A fetch is the
 //! program run again as `--fetch-weather`, which loads WinHTTP, writes a few
 //! lines to a cache file and exits -- so the DLLs, sockets and TLS state a
 //! request drags in live for a second every half hour instead of for good.
-//! The cache also means a restart shows the last forecast at once.
+//! Finding a city is the same again as `--find-city`, which goes on to fetch
+//! that city's forecast.  The cache also means a restart shows the last
+//! forecast at once.
 
 use core::ffi::c_void;
 use core::ptr::{null, null_mut};
@@ -34,6 +41,14 @@ const RETRY: i64 = 120;
 const STALE: i64 = 6 * 3600;
 /// A fetch still running after this long is given up on.
 const FETCH_LIMIT: i64 = 60;
+/// Ticks the city field spends saying what became of a name typed into it.
+const NOTICE: u32 = 5;
+
+/// How `--find-city` ends when it has no place to report: the name matched
+/// nothing, or the geocoder could not be asked.  Either way the cache file is
+/// left alone, so the forecast on screen is still there after a restart.
+const EXIT_NO_CITY: i32 = 3;
+const EXIT_NO_GEOCODER: i32 = 4;
 
 /// WMO weather codes, as Open-Meteo uses them.
 fn condition(code: Option<i32>) -> &'static str {
@@ -159,6 +174,11 @@ pub struct Weather {
     last: Report,
     showing: bool,
     child: Option<(Child, i64)>,
+    /// The child is looking a typed city up: what the city field says
+    /// meanwhile.
+    finding: Option<String>,
+    /// What became of the last name typed, and the ticks it has left to show.
+    notice: Option<(&'static str, u32)>,
     next_fetch: i64,
     /// For the test harness: never fetch.
     frozen: bool,
@@ -185,6 +205,8 @@ impl Weather {
             last: Report::default(),
             showing: false,
             child: None,
+            finding: None,
+            notice: None,
             next_fetch: 0,
             frozen: false,
         };
@@ -250,7 +272,7 @@ impl Weather {
         self.temp_now = String::from("--");
         if error == "geo" {
             self.condition = String::from("No location");
-            self.high_low = String::from("Set ManualLat/Lon");
+            self.high_low = String::from("Type a city below");
             self.location = String::from("ip-api.com did not answer");
         } else {
             self.condition = String::from("No forecast");
@@ -258,30 +280,124 @@ impl Weather {
         }
     }
 
-    fn start_fetch(&mut self, now: i64) {
-        let Ok(exe) = std::env::current_exe() else { return };
+    /// Back to "Loading...": what is on screen is for another place.
+    fn blank(&mut self) {
+        self.showing = false;
+        self.temp_now = SKIN.var("TempNow").to_owned();
+        self.condition = SKIN.var("Condition").to_owned();
+        self.high_low = SKIN.var("HighLowText").to_owned();
+        self.location = self.manual_label.clone();
+        self.icon = None;
+    }
+
+    /// This program again, as the child that talks to the network.
+    fn launch(&mut self, mode: &str, extra: &[String], now: i64) -> bool {
+        let Ok(exe) = std::env::current_exe() else { return false };
         let mut command = Command::new(exe);
-        command.arg("--fetch-weather").arg(&self.cache).arg(&self.unit);
-        match &self.manual {
-            Some((lat, lon)) => {
-                command.args([lat.as_str(), lon.as_str(), "", "0"]);
-            }
-            // where the machine was last found, while that is still fresh
-            None if !self.last.lat.is_empty() && now - self.last.located < RELOCATE => {
-                command.args([self.last.lat.as_str(), self.last.lon.as_str(), self.last.city.as_str()]);
-                command.arg(self.last.located.to_string());
-            }
-            None => {}
-        }
+        command.arg(mode).arg(&self.cache).arg(&self.unit).args(extra);
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        if let Ok(child) = command.creation_flags(CREATE_NO_WINDOW).spawn() {
-            self.child = Some((child, now));
+        match command.creation_flags(CREATE_NO_WINDOW).spawn() {
+            Ok(child) => {
+                self.child = Some((child, now));
+                true
+            }
+            Err(_) => false,
         }
     }
 
-    fn finish_fetch(&mut self, now: i64) -> Dirty {
+    fn start_fetch(&mut self, now: i64) {
+        let last = &self.last;
+        let place = match &self.manual {
+            Some((lat, lon)) => vec![lat.clone(), lon.clone(), String::new(), String::from("0")],
+            // where the machine was last found, while that is still fresh
+            None if !last.lat.is_empty() && now - last.located < RELOCATE => {
+                vec![last.lat.clone(), last.lon.clone(), last.city.clone(), last.located.to_string()]
+            }
+            None => Vec::new(),
+        };
+        self.launch("--fetch-weather", &place, now);
+    }
+
+    fn stop_child(&mut self) {
+        if let Some((mut child, _)) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    /// What the city box opens holding: the pinned place by name, or nothing
+    /// while the place is the one the IP address gives.
+    pub fn city_text(&self) -> &str {
+        if self.manual.is_some() { &self.manual_label } else { "" }
+    }
+
+    /// A name typed into the city field.  It is looked up before anything
+    /// changes, so a name that is not a place leaves the forecast as it was;
+    /// an empty one goes back to the place the IP address gives.
+    pub fn set_city(&mut self, typed: &str, ctx: &mut Ctx) -> Dirty {
+        let typed = typed.trim();
+        if typed.is_empty() {
+            return self.set_automatic(ctx);
+        }
+        if self.frozen {
+            return Dirty::None;
+        }
+        self.stop_child();
+        if self.launch("--find-city", &[typed.to_owned()], ctx.now) {
+            self.finding = Some(format!("Finding {typed}..."));
+            self.notice = None;
+        } else {
+            self.finding = None;
+            self.notice = Some(("Lookup failed", NOTICE));
+        }
+        Dirty::All
+    }
+
+    /// Unpin the place: forget the three settings and ask ip-api.com again.
+    fn set_automatic(&mut self, ctx: &mut Ctx) -> Dirty {
+        if self.manual.is_none() && self.finding.is_none() {
+            return Dirty::None;
+        }
+        self.stop_child();
+        self.finding = None;
+        self.notice = None;
+        if self.manual.take().is_some() {
+            for key in ["ManualLat", "ManualLon", "ManualLocation"] {
+                ctx.settings.set(SECTION, key, "");
+            }
+            self.manual_label.clear();
+            self.last = Report::default();
+            self.blank();
+        }
+        self.next_fetch = 0;
+        Dirty::All
+    }
+
+    /// The child has exited; `code` is how.
+    fn finish_fetch(&mut self, code: Option<i32>, ctx: &mut Ctx) -> Dirty {
+        let now = ctx.now;
+        let finding = self.finding.take().is_some();
+        if finding && code == Some(EXIT_NO_CITY) {
+            self.notice = Some(("No such city", NOTICE));
+            return Dirty::All;
+        }
         let report = std::fs::read_to_string(&self.cache).map(|t| Report::parse(&t)).unwrap_or_default();
-        let fresh = report.fetched >= now - FETCH_LIMIT - 5 && report.temp.is_some() && report.error.is_empty();
+        let recent = report.fetched >= now - FETCH_LIMIT - 5;
+        if finding {
+            // 0 and 1 both found the place; 1 is its forecast failing, which
+            // the ordinary retry below takes care of.
+            if !matches!(code, Some(0 | 1)) || !recent || report.lat.is_empty() {
+                self.notice = Some(("Lookup failed", NOTICE));
+                return Dirty::All;
+            }
+            for (key, value) in [("ManualLat", &report.lat), ("ManualLon", &report.lon), ("ManualLocation", &report.city)] {
+                ctx.settings.set(SECTION, key, value);
+            }
+            self.manual = Some((report.lat.clone(), report.lon.clone()));
+            self.manual_label = report.city.clone();
+            self.blank();
+        }
+        let fresh = recent && report.temp.is_some() && report.error.is_empty();
         if fresh {
             self.show(&report);
             self.last = report;
@@ -309,7 +425,13 @@ impl Hooks for Weather {
             "TempNow" => &self.temp_now,
             "Condition" => &self.condition,
             "HighLowText" => &self.high_low,
-            "LocationLabel" => &self.location,
+            // The city field: what became of the name just typed, while that
+            // is news; the lookup, while it runs; otherwise the place.
+            "LocationLabel" => match (&self.notice, &self.finding) {
+                (Some((text, _)), _) => text,
+                (None, Some(finding)) => finding,
+                (None, None) => &self.location,
+            },
             _ => "",
         });
     }
@@ -335,7 +457,10 @@ impl Widget for Weather {
          from Open-Meteo, refreshed every half hour.\n\n\
          The place is where your public IP address appears to be (asked of \
          ip-api.com once a day).  To pin it instead -- or to keep off \
-         ip-api.com altogether -- set ManualLat and ManualLon in settings.ini."
+         ip-api.com altogether -- click the city field and type a city: \
+         \"Lviv\", or \"Paris, US\" or \"Portland, Maine\" to say which one.  \
+         Enter takes it, Escape does not, and an empty field goes back to \
+         the automatic place."
     }
 
     fn tick(&mut self, ctx: &mut Ctx) -> Dirty {
@@ -343,29 +468,41 @@ impl Widget for Weather {
             return Dirty::None;
         }
         let now = ctx.now;
+        let mut dirty = Dirty::None;
+        if let Some((text, left)) = self.notice {
+            self.notice = (left > 1).then_some((text, left - 1));
+            if self.notice.is_none() {
+                dirty = Dirty::All;
+            }
+        }
         if let Some((child, started)) = &mut self.child {
             match child.try_wait() {
-                Ok(Some(_)) => {
+                Ok(Some(status)) => {
                     self.child = None;
-                    return self.finish_fetch(now);
+                    return self.finish_fetch(status.code(), ctx);
                 }
                 Ok(None) if now - *started <= FETCH_LIMIT => {}
                 _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    self.child = None;
-                    self.next_fetch = now + RETRY;
+                    self.stop_child();
+                    if self.finding.take().is_some() {
+                        // the forecast's own schedule stands
+                        self.notice = Some(("Lookup failed", NOTICE));
+                        dirty = Dirty::All;
+                    } else {
+                        self.next_fetch = now + RETRY;
+                    }
                 }
             }
         } else if now >= self.next_fetch {
             self.next_fetch = now + RETRY; // if it cannot even be started
             self.start_fetch(now);
         }
-        Dirty::None
+        dirty
     }
 
     fn command(&mut self, cmd: &str, _arg: i32, _x: i32, _y: i32, _ctx: &mut Ctx) -> Outcome {
         match cmd {
+            "EditCity" if !self.frozen => Outcome::request(Request::EditCity),
             "About" => Outcome::request(Request::About),
             "Close" => Outcome::request(Request::Close),
             _ => Outcome::none(),
@@ -375,6 +512,8 @@ impl Widget for Weather {
     fn menu(&self, items: &mut Vec<MenuItem>) {
         items.push(MenuItem { id: 1, label: "Refresh now", checked: false });
         items.push(MenuItem { id: 2, label: "Fahrenheit", checked: self.unit == "fahrenheit" });
+        items.push(MenuItem { id: 3, label: "Set city...", checked: false });
+        items.push(MenuItem { id: 4, label: "Automatic location", checked: self.manual.is_none() });
     }
 
     fn menu_command(&mut self, id: u32, ctx: &mut Ctx) -> Outcome {
@@ -387,21 +526,21 @@ impl Widget for Weather {
                 ctx.settings.set(SECTION, "TempUnit", &self.unit);
                 self.next_fetch = 0;
             }
+            3 => return Outcome::request(Request::EditCity),
+            4 => return Outcome::dirty(self.set_automatic(ctx)),
             _ => {}
         }
         Outcome::none()
     }
 
     fn shutdown(&mut self, _ctx: &mut Ctx) {
-        if let Some((mut child, _)) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.stop_child();
     }
 }
 
 // ---------------------------------------------------------------------------
 //  The fetch: this program run as `--fetch-weather <cache> <unit> [lat lon city located]`
+//  or as `--find-city <cache> <unit> <name>`
 // ---------------------------------------------------------------------------
 
 /// The text after `key` in `s`.
@@ -464,6 +603,12 @@ pub fn fetch_main(args: &[String]) -> i32 {
         },
     }
 
+    forecast(report, Path::new(cache))
+}
+
+/// The second half of either child: the forecast for the place in `report`,
+/// written to the cache whether or not it came.
+fn forecast(mut report: Report, cache: &Path) -> i32 {
     let path = format!(
         "/v1/forecast?latitude={}&longitude={}&current_weather=true&daily=weathercode,temperature_2m_max,temperature_2m_min&temperature_unit={}&timezone=auto",
         report.lat, report.lon, report.unit
@@ -472,8 +617,80 @@ pub fn fetch_main(args: &[String]) -> i32 {
     if !ok {
         report.error = String::from("forecast");
     }
-    report.write(Path::new(cache));
+    report.write(cache);
     if ok { 0 } else { 1 }
+}
+
+/// What was typed, as the name to search for and what was said about where:
+/// a two-letter country code ("Paris, US"), or a region or country in words
+/// ("Portland, Maine").  Only the code can be asked of the geocoder; the
+/// words are for choosing among what it answers.
+fn split_query(typed: &str) -> (&str, Option<String>, &str) {
+    let Some((name, place)) = typed.split_once(',') else { return (typed.trim(), None, "") };
+    let (name, place) = (name.trim(), place.trim());
+    if place.len() == 2 && place.bytes().all(|b| b.is_ascii_alphabetic()) {
+        let code = place.to_ascii_uppercase();
+        // the one country everybody writes by something other than its code
+        return (name, Some(if code == "UK" { String::from("GB") } else { code }), "");
+    }
+    (name, None, place)
+}
+
+/// Everything but the unreserved characters as %XX, for a query string.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// A place out of the geocoder's answer, as (label, lat, lon): the first of
+/// its results, or -- when `region` names a state or a country -- the first
+/// from there, if there is one.  The results are flat objects, most likely
+/// first, so they come apart at "},{".
+fn parse_city(json: &str, region: &str) -> Option<(String, String, String)> {
+    let text = |item: &str, key: &str| after(item, key).map(|s| until(s, &['"']).to_owned());
+    let mut first = None;
+    for item in after(json, "\"results\":[")?.split("},{") {
+        let number = |key: &str| after(item, key).map(|s| until(s, &[',', '}']).to_owned()).filter(|v| v.parse::<f64>().is_ok());
+        let (Some(name), Some(lat), Some(lon)) = (text(item, "\"name\":\""), number("\"latitude\":"), number("\"longitude\":")) else {
+            continue;
+        };
+        let label = match text(item, "\"country_code\":\"") {
+            Some(code) if !code.is_empty() => format!("{name}, {code}"),
+            _ => name,
+        };
+        let is_there = |key: &str| text(item, key).is_some_and(|v| v.to_lowercase() == region.to_lowercase());
+        if region.is_empty() || is_there("\"admin1\":\"") || is_there("\"country\":\"") {
+            return Some((label, lat, lon));
+        }
+        first.get_or_insert((label, lat, lon));
+    }
+    first
+}
+
+pub fn find_main(args: &[String]) -> i32 {
+    let (Some(cache), Some(unit), Some(typed)) = (args.first(), args.get(1), args.get(2)) else { return 2 };
+    let (name, country, region) = split_query(typed);
+    // one result is enough unless there is a region to look for among them
+    let mut path = format!(
+        "/v1/search?name={}&count={}&language=en&format=json",
+        url_encode(name),
+        if region.is_empty() { 1 } else { 20 }
+    );
+    if let Some(code) = country {
+        path.push_str("&countryCode=");
+        path.push_str(&code);
+    }
+    let Some(json) = http_get("geocoding-api.open-meteo.com", 443, true, &path) else { return EXIT_NO_GEOCODER };
+    let Some((city, lat, lon)) = parse_city(&json, region) else { return EXIT_NO_CITY };
+    let report = Report { fetched: crate::clock::now(), unit: unit.clone(), is_day: true, lat, lon, city, ..Report::default() };
+    forecast(report, Path::new(cache))
 }
 
 /// One GET over WinHTTP, which is loaded here and nowhere else.
@@ -566,6 +783,33 @@ mod tests {
         let mut r = Report::default();
         assert!(parse_forecast(json, &mut r));
         assert_eq!((r.temp, r.code, r.is_day, r.tmax, r.tmin), (Some(9.3), Some(3), false, Some(10.1), Some(4.9)));
+    }
+
+    #[test]
+    fn reads_the_city() {
+        let json = r#"{"results":[{"id":1,"name":"Portland","latitude":45.52345,"longitude":-122.67621,"elevation":15.0,"feature_code":"PPLA2","country_code":"US","admin1_id":5744337,"timezone":"America/Los_Angeles","postcodes":["97201","97202"],"country_id":6252001,"country":"United States","admin1":"Oregon","admin2":"Multnomah"},{"id":2,"name":"Portland","latitude":43.65737,"longitude":-70.2589,"country_code":"US","country":"United States","admin1":"Maine"}],"generationtime_ms":0.2}"#;
+        let oregon = Some(("Portland, US".to_owned(), "45.52345".to_owned(), "-122.67621".to_owned()));
+        assert_eq!(parse_city(json, ""), oregon);
+        assert_eq!(parse_city(json, "maine"), Some(("Portland, US".into(), "43.65737".into(), "-70.2589".into())));
+        assert_eq!(parse_city(json, "united states"), oregon);
+        // a region none of them is in: the likeliest is still an answer
+        assert_eq!(parse_city(json, "Texas"), oregon);
+        // no match at all comes back with no results key
+        assert_eq!(parse_city(r#"{"generationtime_ms":0.1}"#, ""), None);
+    }
+
+    #[test]
+    fn splits_what_was_typed() {
+        assert_eq!(split_query(" Lviv "), ("Lviv", None, ""));
+        assert_eq!(split_query("paris, us"), ("paris", Some("US".to_owned()), ""));
+        assert_eq!(split_query("London,UK"), ("London", Some("GB".to_owned()), ""));
+        assert_eq!(split_query("Portland, Maine"), ("Portland", None, "Maine"));
+    }
+
+    #[test]
+    fn encodes_a_name_for_the_query() {
+        assert_eq!(url_encode("New York"), "New%20York");
+        assert_eq!(url_encode("M\u{fc}nchen&x=1"), "M%C3%BCnchen%26x%3D1");
     }
 
     #[test]
