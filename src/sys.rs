@@ -173,15 +173,6 @@ pub struct NOTIFYICONDATAW {
 }
 
 #[repr(C)]
-pub struct ICONINFO {
-    pub fIcon: BOOL,
-    pub xHotspot: u32,
-    pub yHotspot: u32,
-    pub hbmMask: HGDIOBJ,
-    pub hbmColor: HGDIOBJ,
-}
-
-#[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct SYSTEMTIME {
     pub wYear: u16,
@@ -381,6 +372,8 @@ pub const NIM_DELETE: u32 = 2;
 pub const NIF_MESSAGE: u32 = 1;
 pub const NIF_ICON: u32 = 2;
 pub const NIF_TIP: u32 = 4;
+/// The icon format CreateIconFromResourceEx is handed: the only one there is.
+pub const ICON_VERSION: u32 = 0x0003_0000;
 
 pub const EVENT_SYSTEM_FOREGROUND: u32 = 3;
 pub const WINEVENT_OUTOFCONTEXT: u32 = 0;
@@ -458,7 +451,7 @@ unsafe extern "system" {
     pub fn MessageBoxW(wnd: HWND, text: PCWSTR, caption: PCWSTR, kind: u32) -> i32;
     pub fn SetWinEventHook(min: u32, max: u32, module: HINSTANCE, proc_: WINEVENTPROC, pid: u32, tid: u32, flags: u32) -> isize;
     pub fn UnhookWinEvent(hook: isize) -> BOOL;
-    pub fn CreateIconIndirect(info: *const ICONINFO) -> HICON;
+    pub fn CreateIconFromResourceEx(bits: *const u8, len: u32, icon: BOOL, version: u32, cx: i32, cy: i32, flags: u32) -> HICON;
     pub fn DestroyIcon(icon: HICON) -> BOOL;
     pub fn GetWindowTextLengthW(wnd: HWND) -> i32;
     pub fn GetWindowTextW(wnd: HWND, buf: *mut u16, len: i32) -> i32;
@@ -471,7 +464,6 @@ unsafe extern "system" {
     pub fn CreateCompatibleDC(dc: HDC) -> HDC;
     pub fn DeleteDC(dc: HDC) -> BOOL;
     pub fn CreateDIBSection(dc: HDC, info: *const BITMAPINFOHEADER, usage: u32, bits: *mut *mut c_void, section: HANDLE, offset: u32) -> HGDIOBJ;
-    pub fn CreateBitmap(w: i32, h: i32, planes: u32, bpp: u32, bits: *const c_void) -> HGDIOBJ;
     pub fn SelectObject(dc: HDC, object: HGDIOBJ) -> HGDIOBJ;
     pub fn DeleteObject(object: HGDIOBJ) -> BOOL;
     pub fn CreateFontW(

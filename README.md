@@ -108,7 +108,7 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 ## Layout of the source
 
 ```text
-skins/       the five layouts (.ini) and the weather icons
+skins/       the five layouts (.ini), the weather icons and the tray icon
 build.rs     those .ini files compiled into static tables
 skin         the tables, and drawing and hit-testing them
 canvas       the software canvas they are drawn on

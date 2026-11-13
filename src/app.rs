@@ -57,6 +57,8 @@ const TICK_TIMER: usize = 1;
 /// Runs only while a widget is asking for frames.
 const FRAME_TIMER: usize = 2;
 const WM_TRAY: u32 = WM_APP + 2;
+/// The tray's icon, the .ico file as it is on disk.
+static TRAY_ICO: &[u8] = include_bytes!("../skins/Icons/gears_tweakui_b.ico");
 /// Skins snap to each other and to the screen edge from this far away.
 const SNAP: i32 = 10;
 /// Our own z-order changes do not ask the window for permission.
@@ -1078,46 +1080,24 @@ impl App {
 
     // ---- the tray icon -----------------------------------------------------------
 
-    /// The Date/Time skin's own title-bar icon, twice the size.
-    fn make_icon(&mut self) -> HICON {
-        const SIZE: i32 = 16;
-        let skin = &skin::datetime::SKIN;
-        let Some(meter) = skin.meter("MeterIcon") else { return 0 };
-        let mut small = [0u32; (SIZE * SIZE) as usize];
-        // SAFETY: the canvas is exactly the array.
-        let mut canvas = unsafe { Canvas::new(small.as_mut_ptr(), SIZE, SIZE, SIZE) };
-        struct Plain;
-        impl Hooks for Plain {}
-        // its twelve rows and columns, centred in the sixteen
-        let (ox, oy) = (meter.b[0] - (SIZE - (meter.b[2] - meter.b[0])) / 2, meter.b[1] - (SIZE - (meter.b[3] - meter.b[1])) / 2);
-        skin::draw_meter(meter, meter.x - ox, meter.y - oy, &Plain, &mut canvas, &mut self.text, &mut String::new());
-
-        let big = SIZE * 2;
-        let mut pixels = vec![0u32; (big * big) as usize];
-        for y in 0..big {
-            for x in 0..big {
-                pixels[(y * big + x) as usize] = small[((y / 2) * SIZE + x / 2) as usize];
-            }
+    /// The gears from skins/Icons, straight out of the .ico: the largest image
+    /// in it, at its own size.  The tray scales it to whatever it shows.
+    fn make_icon() -> HICON {
+        let ico = TRAY_ICO;
+        let word = |at: usize| ico.get(at..at + 2).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]) as usize);
+        let long = |at: usize| ico.get(at..at + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+        // ICONDIR: reserved, type (1 = icon), count; then 16 bytes an image:
+        // width and height (0 = 256), colours, reserved, planes, bits a pixel,
+        // the image's length and where in the file it starts.
+        if word(2) != 1 {
+            return 0;
         }
-        unsafe {
-            let header = BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: big, biHeight: -big, biPlanes: 1, biBitCount: 32,
-                ..Default::default()
-            };
-            let mut bits: *mut c_void = null_mut();
-            let colour = CreateDIBSection(0, &header, DIB_RGB_COLORS, &mut bits, 0, 0);
-            if colour == 0 || bits.is_null() {
-                return 0;
-            }
-            core::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u32, pixels.len());
-            let mask_bits = vec![0u8; (big * big / 8) as usize];
-            let mask = CreateBitmap(big, big, 1, 1, mask_bits.as_ptr() as *const c_void);
-            let info = ICONINFO { fIcon: 1, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: colour };
-            let icon = CreateIconIndirect(&info);
-            DeleteObject(colour);
-            DeleteObject(mask);
-            icon
-        }
+        let side = |entry: usize| ico.get(entry).map_or(0, |&w| if w == 0 { 256 } else { w as usize });
+        let Some(entry) = (0..word(4)).map(|i| 6 + 16 * i).max_by_key(|&e| (side(e), word(e + 6))) else { return 0 };
+        let (len, at) = (long(entry + 8), long(entry + 12));
+        let Some(image) = ico.get(at..at.saturating_add(len)) else { return 0 };
+        // SAFETY: the image is `len` bytes of the file; Windows copies what it needs.
+        unsafe { CreateIconFromResourceEx(image.as_ptr(), len as u32, 1, ICON_VERSION, 0, 0, 0) }
     }
 
     fn tray(&self, message: u32) {
@@ -1453,7 +1433,7 @@ pub fn run() -> i32 {
         };
         app.read_general();
         app.read_slots();
-        app.tray = app.make_icon();
+        app.tray = App::make_icon();
         *(&raw mut APP) = Some(app);
 
         with_app(|app| {
@@ -1491,5 +1471,17 @@ impl Drop for Buffer {
             DeleteDC(self.dc);
             DeleteObject(self.bitmap);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_tray_icon_loads_from_the_ico() {
+        let icon = App::make_icon();
+        assert_ne!(icon, 0, "Windows would not take skins/Icons/gears_tweakui_b.ico");
+        unsafe { DestroyIcon(icon) };
     }
 }
