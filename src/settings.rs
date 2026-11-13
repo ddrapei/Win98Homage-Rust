@@ -239,7 +239,8 @@ Enabled=1
 Enabled=1
 ; the note itself; a bare name is kept beside this file
 NoteFile={note_file}
-; 1 = canary paper, 2 = white
+; the paper: 1 canary, 2 white, 3 pink, 4 green, 5 blue, 6 orange, 7 lilac
+; (the note's swatch button goes round them)
 Colour={colour}
 ; 1 = ruled paper, 0 = plain
 Ruled={ruled}

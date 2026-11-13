@@ -72,6 +72,11 @@ ends the list), and Backspace at the start of one removes the checkbox. A click 
 else, or Escape, finishes; the note is saved a second after you stop typing and again
 when you finish.
 
+**The note's paper.** The swatch button in the note's title bar moves on to the next
+paper colour each time it is clicked — canary, white, pink, green, blue, orange, lilac,
+and round to canary again — and the note remembers which. The colours are the `Paper1`,
+`Paper2`, … variables in `skins/Win98Notes.ini`; another line there is another colour.
+
 **More than one note.** Right-click a note → *New note* (or the tray icon → Widgets →
 *New Sticky Note*) puts another note beside it, in the nearest place where there is room.
 Each note has its own text, its own paper and ruling and its own place; none has a title

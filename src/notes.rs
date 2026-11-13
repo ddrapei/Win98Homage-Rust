@@ -64,7 +64,6 @@ const BAR_W: i32 = 11;
 /// Px to the left of the text column that still count as text: a click just
 /// short of the first letter is a click before it.
 const REACH: i32 = 2;
-const SWATCHES: usize = 2;
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
 // ---------------------------------------------------------------------------
@@ -289,6 +288,13 @@ fn show(chars: &[char], out: &mut String) {
     }
 }
 
+/// The papers a note can be on: Paper1, Paper2, ... of the skin, for as long
+/// as there is a next one.  A note's `Colour` in settings.ini is the number.
+fn papers() -> Vec<u32> {
+    let found: Vec<u32> = (1..).map_while(|i| skin::parse_colour(SKIN.var(&format!("Paper{i}")))).collect();
+    if found.is_empty() { vec![SKIN.colour("FieldBg")] } else { found }
+}
+
 /// A fractional x as the pixel column it falls on.
 fn px(x: f32) -> i32 {
     (x + 0.5).floor() as i32
@@ -316,7 +322,8 @@ pub struct Notes {
     faded: u32,
     select_bg: u32,
     select_ink: u32,
-    papers: [u32; SWATCHES],
+    /// The papers the swatch button goes round; never empty.
+    papers: Vec<u32>,
     palette: [u32; 5],
     /// The font the rows are drawn in, as the host's `Text` numbers it.
     font: usize,
@@ -385,7 +392,8 @@ impl Notes {
         let n = |name: &str, default: i32| SKIN.int(name, default);
         let (filename, kept) = place(ctx.settings, section);
         let path = file.unwrap_or(kept);
-        let colour = (ctx.settings.int(section, "Colour", 1).clamp(1, SWATCHES as i32) - 1) as usize;
+        let papers = papers();
+        let colour = (ctx.settings.int(section, "Colour", 1).clamp(1, papers.len() as i32) - 1) as usize;
         let ruled = ctx.settings.flag(section, "Ruled", n("Ruled", 0) != 0);
 
         // The first run stamps the note with the day it was started and never
@@ -416,7 +424,7 @@ impl Notes {
             faded: SKIN.colour("Shadow"),
             select_bg: SKIN.colour("SelectBg"),
             select_ink: SKIN.colour("SelectInk"),
-            papers: [SKIN.colour("Paper1"), SKIN.colour("Paper2")],
+            papers,
             palette: ["Face", "Hilite", "DkShadow", "Light", "Shadow"].map(|c| SKIN.colour(c)),
             font: skin::FONTS.iter().position(|&(pt, bold)| pt == points && !bold).unwrap_or(0),
             autosave_ms: n("AutoSave", 1000).max(0) as u32,
@@ -733,7 +741,7 @@ impl Notes {
     }
 
     fn next_paper(&mut self, ctx: &mut Ctx) -> Outcome {
-        self.colour = (self.colour + 1) % SWATCHES;
+        self.colour = (self.colour + 1) % self.papers.len();
         ctx.settings.set_int(&self.section, "Colour", self.colour as i32 + 1);
         Outcome::all()
     }
@@ -915,7 +923,7 @@ impl Widget for Notes {
          Enter\t\ton a checkbox line starts another\n\
          Backspace\tat the start of one takes the checkbox away\n\
          Ctrl+Z, Ctrl+Y\tundo, redo\n\
-         Swatch button\tswap canary and white paper\n\
+         Swatch button\tthe next paper colour, round all of them\n\
          Lines button\truled or plain paper\n\
          Double-click icon\topen the note in a text editor\n\
          Right-click\t\tNew note: another, with a text of its own\n\n\
@@ -1125,7 +1133,7 @@ impl Widget for Notes {
 
     fn menu(&self, items: &mut Vec<MenuItem>) {
         items.push(MenuItem { id: 1, label: "Open the note in a text editor", checked: false });
-        items.push(MenuItem { id: 2, label: "Canary paper", checked: self.colour == 0 });
+        items.push(MenuItem { id: 2, label: "Next paper colour", checked: false });
         items.push(MenuItem { id: 4, label: "Ruled paper", checked: self.ruled });
         items.push(MenuItem { id: 3, label: "About Sticky Note", checked: false });
     }
@@ -1275,6 +1283,35 @@ mod tests {
             let inked = chars.len() - chars.iter().rev().take_while(|&&c| editor::blank(c)).count();
             assert!(row.xs[inked] <= room, "{:?} is {} px", chars.iter().collect::<String>(), row.xs[inked]);
         }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_swatch_button_goes_round_every_paper_and_remembers_which() {
+        let (mut n, path) = note("papers", Some("milk\n"));
+        let mut settings = Settings::in_memory();
+        let mut ctx = Ctx { now: 0, settings: &mut settings, locked: false, signed_in: None };
+        // canary and white are where they always were; the rest follow
+        assert!(n.papers.len() >= 7);
+        assert_eq!((n.papers[0], n.papers[1]), (SKIN.colour("Paper1"), SKIN.colour("Paper2")));
+        let mut seen = vec![n.colour("NoteBg")];
+        for _ in 1..n.papers.len() {
+            n.next_paper(&mut ctx);
+            seen.push(n.colour("NoteBg"));
+        }
+        assert_eq!(seen, n.papers);
+        assert_eq!(ctx.settings.int(FIRST, "Colour", 0), n.papers.len() as i32);
+        // no two alike, and after the last the first again
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), n.papers.len());
+        n.next_paper(&mut ctx);
+        assert_eq!((n.colour("NoteBg"), ctx.settings.int(FIRST, "Colour", 0)), (n.papers[0], 1));
+
+        // a number past the last paper, written by hand, is the last paper
+        ctx.settings.set(FIRST, "Colour", "99");
+        let last = Notes::new(&mut ctx, FIRST, Some(path.clone()));
+        assert_eq!(last.colour("NoteBg"), *last.papers.last().unwrap());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
