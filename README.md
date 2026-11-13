@@ -31,16 +31,16 @@ image — in the order they are painted. `build.rs` compiles the five of them in
 tables — every meter's position, shapes, colours, text options and mouse actions — so
 **the `.ini` files are the single source of truth for the layout**. Change a colour or move
 a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
-runs: the logic behind each widget is plain Rust (`datetime.rs`, `resources.rs`,
-`notes.rs`, `weather.rs`, `rain.rs`), and a mouse action in a skin, such as
+runs: the logic behind each widget is plain Rust in `src/widgets/` (`datetime.rs`,
+`resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`), and a mouse action in a skin, such as
 `LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
 Text is laid out by DirectWrite and rasterised with aliased glyphs. Shapes are filled by a
 small software canvas.
 
 `--dump <dir> [--state <file>]` draws each widget off-screen, in a state given by the
-file (which can ask for more than one note), and writes it out as a BMP — for comparing before and after a change (see
-`src/dump.rs`).
+file (which can ask for more than one note), and writes it out as a BMP — for comparing
+before and after a change (see `src/tools/dump.rs`).
 
 The program is deliberately not DPI aware, so on a scaled display Windows stretches the
 widgets as a whole.
@@ -136,20 +136,34 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 ```text
 skins/       the five layouts (.ini), the weather icons and the tray icon
 build.rs     those .ini files compiled into static tables
-skin         the tables, and drawing and hit-testing them
-canvas       the software canvas they are drawn on
-text         DirectWrite text, rasterised into the canvas
-datetime     Date/Time Properties   (usage: the on/unlocked journal)
-resources    Resource Meter
-notes        Sticky Note            (editor: its text and what the keys do to it;
-                                     keys: the window that holds the keyboard for it);
-                                    also which sections of settings.ini are notes
-weather      Weather                (and the child that fetches it; entry: the city box)
-rain         Rain Window            (the one that is animated)
-app          windows (one per widget, and per note), mouse, menus, tray, the
-             once-a-second tick, the frames in between
-settings     settings.ini
-clock        time and time zones
-sys          the Win32 declarations all of it uses
-dump         off-screen rendering, for checking a change
+src/
+  main.rs      the way in, and the list of modules
+  app.rs       the host: windows (one per widget, and per note), mouse, menus,
+               tray, the once-a-second tick, the frames in between
+  tools/       for working on the program
+    dump         off-screen rendering, for checking a change
+  widgets/     what a widget is, and the five there are
+    widget       the Widget trait: all the host knows about a widget
+    datetime     Date/Time Properties
+    resources    Resource Meter
+    notes        Sticky Note (also: which sections of settings.ini are notes)
+    weather      Weather (and the child that fetches it)
+    rain         Rain Window (the one that is animated)
+  input/       typing
+    keys         the window that holds the keyboard for a widget
+    editor       a text and what the keys do to it: the note's, the city field's
+  storage/     what is kept on disk
+    settings     settings.ini
+    usage        the on/unlocked journal the Date/Time graph is drawn from
+  graphics/    drawing
+    skin         the compiled tables, and drawing and hit-testing them
+    canvas       the software canvas they are drawn on
+    text         DirectWrite text, rasterised into the canvas
+  platform/    Windows
+    sys          the Win32 declarations all of it uses
+    clock        time and time zones
 ```
+
+Each folder uses only the ones below it in that list. The modules keep their short names
+in code (`crate::canvas`, `crate::notes`): `main.rs` re-exports each from its folder, so
+moving a file between folders changes `main.rs` and nothing else.

@@ -3,13 +3,13 @@
 //! The .ini files in `skins/` are the single source of truth for every
 //! pixel: each meter's position, shapes, colours, text options and mouse
 //! actions are read here, at build time, and written out as constants that
-//! `src/skin.rs` includes.  Nothing parses an .ini while the program runs.
+//! `src/graphics/skin.rs` includes.  Nothing parses an .ini while the program runs.
 //!
 //! What is resolved here: every `#Variable#` that only ever has the value the
 //! .ini gives it (the palette, `Pad`, the layout figures).  What is left for
 //! the program: the variables that change at run time -- those stay in the
 //! tables by name (`Col::V("NoteBg")`, `Src::V("TimeText")`, a `hidden` or
-//! position formula), and the widget's own module in `src/` answers for
+//! position formula), and the widget's own module in `src/widgets/` answers for
 //! them.  A meter whose *geometry* depends on one (the clock hands, the usage
 //! bars, the scrollbar thumb) is emitted as `Kind::Custom` and drawn by hand.
 //!
