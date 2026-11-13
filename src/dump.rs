@@ -24,6 +24,9 @@
 //!                                      point of the window, type TEXT, and
 //!                                      key [Shift+][Ctrl+]NAME.  Nothing is
 //!                                      written to the note file by these.
+//!   type.weather=press 107 167;type Lviv
+//!                                      the same for the weather's city field;
+//!                                      nothing is looked up.
 
 use std::path::{Path, PathBuf};
 
@@ -83,22 +86,22 @@ fn perform(widget: &mut dyn Widget, script: &str, ctx: &mut Ctx) {
     }
 }
 
-/// "press 60 50;type milk;key Shift+Home": the note typed on, through the same
-/// doors the window uses.
-fn type_on(notes: &mut Notes, script: &str) {
+/// "press 60 50;type milk;key Shift+Home": a widget typed on -- the note, the
+/// weather's city field -- through the same doors the window uses.
+fn type_on(widget: &mut dyn Widget, script: &str) {
     for step in script.split(';').map(str::trim_start).filter(|s| !s.is_empty()) {
         let (verb, rest) = step.split_once(' ').unwrap_or((step, ""));
         let mut nums = rest.split_whitespace().filter_map(|p| p.parse::<i32>().ok());
         let (x, y) = (nums.next().unwrap_or(0), nums.next().unwrap_or(0));
         match verb {
-            "press" => drop(notes.press(x, y, false, false)),
-            "shift" => drop(notes.press(x, y, false, true)),
+            "press" => drop(widget.press(x, y, false, false)),
+            "shift" => drop(widget.press(x, y, false, true)),
             "double" => {
-                notes.press(x, y, false, false);
-                notes.press(x, y, true, false);
+                widget.press(x, y, false, false);
+                widget.press(x, y, true, false);
             }
-            "drag" => drop(notes.drag(x, y)),
-            "type" => rest.chars().for_each(|c| drop(notes.typed(c))),
+            "drag" => drop(widget.drag(x, y)),
+            "type" => rest.chars().for_each(|c| drop(widget.typed(c))),
             "key" => {
                 let mut name = rest.trim();
                 let (mut shift, mut ctrl) = (false, false);
@@ -124,12 +127,13 @@ fn type_on(notes: &mut Notes, script: &str) {
                     "Delete" => Key::Delete,
                     "Enter" => Key::Enter,
                     "Tab" => Key::Tab,
+                    "Escape" => Key::Escape,
                     "A" => Key::SelectAll,
                     "Z" => Key::Undo,
                     "Y" => Key::Redo,
                     _ => continue,
                 };
-                notes.key(key, shift, ctrl);
+                widget.key(key, shift, ctrl);
             }
             _ => {}
         }
@@ -196,6 +200,7 @@ pub fn run(args: &[String]) -> i32 {
             let num = |i: usize| p.get(i).and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0);
             w.set_fixed(num(0), num(1) as i32, num(2) != 0.0, num(3), num(4), p.get(5).copied().unwrap_or(""));
         }
+        type_on(&mut w, get("type.weather").unwrap_or(""));
         render(&w, &mut text, &dir.join("weather.bmp"));
     }
     {

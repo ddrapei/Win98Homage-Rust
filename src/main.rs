@@ -18,8 +18,9 @@
 //!   notes        Sticky Note           (with editor: its text and what the
 //!                                       keys do to it; keys: the window that
 //!                                       holds the keyboard for it)
-//!   weather      Weather               (and the child that fetches it; entry:
-//!                                       the box the city is typed in)
+//!   weather      Weather               (and the child that fetches it; its
+//!                                       city field is typed on with the
+//!                                       note's editor and keys)
 //!   rain         Rain Window           (the one that is animated)
 //!   app          windows, mouse, menus, tray, the once-a-second tick and
 //!                the frames in between
@@ -37,7 +38,6 @@ mod clock;
 mod datetime;
 mod dump;
 mod editor;
-mod entry;
 mod keys;
 mod notes;
 mod rain;

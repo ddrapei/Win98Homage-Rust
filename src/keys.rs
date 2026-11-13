@@ -1,18 +1,20 @@
-//! The note's keyboard.
+//! The keyboard, for a widget that is typed on: the note, and the weather's
+//! city field.
 //!
 //! A widget's window never takes the keyboard, and stays where it is in the
-//! stack of windows whatever is clicked.  So while the note is being typed on,
-//! a window of no size that it owns takes the keyboard for it: what is typed
+//! stack of windows whatever is clicked.  So while one is being typed on, a
+//! window of no size that it owns takes the keyboard for it: what is typed
 //! arrives here and is handed on as `Input`, and losing the keyboard again --
 //! a click on the desktop, another window coming forward -- is exactly
-//! "clicked elsewhere", which is when a sticky note is done with.
+//! "clicked elsewhere", which is when the typing is done with.
 //!
 //! The same window runs the one timer the typing needs, which blinks the
 //! caret and lets the note save itself once the typing has paused; and it is
 //! the window the clipboard is opened for.
 //!
-//! Nothing is drawn here.  The note draws its own text, caret and selection,
-//! the same way whether or not anyone is typing -- see `notes`.
+//! Nothing is drawn here.  The widget draws its own text, caret and
+//! selection, the same way whether or not anyone is typing -- see `notes`
+//! and `weather`.
 
 use core::ptr::{null, null_mut};
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
@@ -22,7 +24,7 @@ use crate::sys::*;
 /// Posted to the window when the keyboard has gone elsewhere.
 pub const WM_LEAVE: u32 = WM_APP + 1;
 const PULSE_TIMER: usize = 1;
-const CLASS: &str = "Win98NoteKeys";
+const CLASS: &str = "Win98Keys";
 /// Ms between pulses when the caret is set not to blink.
 const STEADY_MS: u32 = 500;
 
@@ -76,12 +78,14 @@ static HIGH: AtomicU32 = AtomicU32::new(0);
 
 pub struct Keys {
     wnd: HWND,
+    /// The widget's window it was made for, and is owned by.
+    owner: HWND,
     registered: bool,
 }
 
 impl Keys {
     pub const fn new() -> Keys {
-        Keys { wnd: 0, registered: false }
+        Keys { wnd: 0, owner: 0, registered: false }
     }
 
     pub fn is_open(&self) -> bool {
@@ -91,6 +95,11 @@ impl Keys {
     /// The window, for the clipboard to be opened under.
     pub fn window(&self) -> HWND {
         self.wnd
+    }
+
+    /// Whether the window belongs to this widget's, and so goes when it does.
+    pub fn owned_by(&self, owner: HWND) -> bool {
+        self.wnd != 0 && self.owner == owner
     }
 
     /// Ms between pulses: half a blink of the caret, as the user has it set.
@@ -107,9 +116,14 @@ impl Keys {
     }
 
     fn create(&mut self, owner: HWND, proc_: WNDPROC) -> bool {
-        if self.wnd != 0 {
+        if self.owned_by(owner) {
             return true;
         }
+        // There is one keyboard, lent to whichever widget is typed on, and
+        // the window that holds it is owned by that one: made again for a
+        // different widget rather than kept from the last.
+        self.destroy();
+        self.owner = owner;
         unsafe {
             let module = GetModuleHandleW(null());
             let class = wide(CLASS);
@@ -140,7 +154,8 @@ impl Keys {
     }
 
     /// Take the keyboard for the widget whose window is `owner`.  False if
-    /// there is no window to take it with.
+    /// there is no window to take it with.  The window procedure is the one
+    /// given the first time; it is the same for every widget.
     pub fn open(&mut self, owner: HWND, proc_: WNDPROC) -> bool {
         if !self.create(owner, proc_) {
             return false;

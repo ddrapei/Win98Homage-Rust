@@ -1,10 +1,13 @@
 //! What the window host knows about a widget: a skin to draw, a tick once a
 //! second -- and frames in between, for the one that asks -- and commands,
-//! the names the skins' mouse actions call.
+//! the names the skins' mouse actions call.  A widget with text to type on
+//! takes the press that lands on it, asks for the keyboard, and is handed
+//! what is typed until the keyboard goes elsewhere.
 
 use std::path::PathBuf;
 
 use crate::canvas::Rect;
+use crate::keys::Key;
 use crate::settings::Settings;
 use crate::skin::{Hooks, Skin};
 
@@ -33,12 +36,10 @@ pub enum Request {
     About,
     Close,
     Open(PathBuf),
-    /// Give the note the keyboard: it is being typed on.
+    /// Give the widget the keyboard: it is being typed on.
     TakeKeys,
-    /// The note is done with the keyboard, as a click elsewhere would say.
+    /// The widget is done with the keyboard, as a click elsewhere would say.
     DropKeys,
-    /// Put the one-line box over the weather's city field.
-    EditCity,
 }
 
 pub struct Outcome {
@@ -121,6 +122,47 @@ pub trait Widget: Hooks {
     fn ibeam(&self, _x: i32, _y: i32) -> bool {
         false
     }
+
+    // What follows is for a widget that is typed on.  It asks for the
+    // keyboard with `Request::TakeKeys`, and has it until it gives it back
+    // with `Request::DropKeys` or the host takes it away -- a click somewhere
+    // else, another window coming forward.  Either way `blur` is the end.
+
+    /// Whether a press at this point of the window leaves the typing going:
+    /// it is on the text, or on something that only moves it.
+    fn typing_at(&self, _x: i32, _y: i32) -> bool {
+        false
+    }
+    /// One typed character.
+    fn typed(&mut self, _c: char) -> Outcome {
+        Outcome::none()
+    }
+    /// A key that is not a character.  Copy, Cut and Paste never arrive: the
+    /// host has the clipboard, and calls the three below.
+    fn key(&mut self, _key: Key, _shift: bool, _ctrl: bool) -> Outcome {
+        Outcome::none()
+    }
+    /// What is selected, for the clipboard.
+    fn copy(&self) -> Option<String> {
+        None
+    }
+    /// What is selected, taken out of the text.
+    fn cut(&mut self) -> (Option<String>, Outcome) {
+        (None, Outcome::none())
+    }
+    fn paste(&mut self, _text: &str) -> Outcome {
+        Outcome::none()
+    }
+    /// The keyboard's timer, `ms` after the last; `blink` if the caret is one
+    /// that does.
+    fn pulse(&mut self, _ms: u32, _blink: bool) -> Dirty {
+        Dirty::None
+    }
+    /// The keyboard has gone elsewhere: the typing is over.
+    fn blur(&mut self, _ctx: &mut Ctx) -> Dirty {
+        Dirty::None
+    }
+
     /// Its own entries for the right-click menu.
     fn menu(&self, _items: &mut Vec<MenuItem>) {}
     fn menu_command(&mut self, _id: u32, _ctx: &mut Ctx) -> Outcome {

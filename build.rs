@@ -502,7 +502,7 @@ fn dyn_notes(n: &str) -> bool {
 }
 
 fn dyn_weather(n: &str) -> bool {
-    matches!(n, "TempNow" | "Condition" | "HighLowText" | "LocationLabel" | "Lat" | "Lon")
+    matches!(n, "TempNow" | "Condition" | "HighLowText" | "Lat" | "Lon")
 }
 
 const SKINS: [SkinDef; 5] = [
@@ -674,18 +674,6 @@ fn compile_skin(def: &SkinDef, root: &Path, fonts: &mut Vec<(String, bool)>, out
     writeln!(out, "    static VARS: &[(&str, &str)] = &[").unwrap();
     for (spelled, key) in &var_order {
         writeln!(out, "        ({spelled:?}, {:?}),", ctx.resolve(&ctx.vars[key])).unwrap();
-    }
-    // The edit box is not a meter, but where it sits over the paper is
-    // layout all the same.
-    if let Some(input) = sections.iter().find(|s| s.name.eq_ignore_ascii_case("EditBox")) {
-        for key in ["x", "y", "w", "h"] {
-            if let Some(n) = input.get(key).and_then(|v| eval(&ctx.resolve(v))) {
-                writeln!(out, "        (\"Input{}\", \"{n}\"),", key.to_ascii_uppercase()).unwrap();
-            }
-        }
-        if let Some(p) = input.get("padding") {
-            writeln!(out, "        (\"InputPadding\", {:?}),", ctx.resolve(p)).unwrap();
-        }
     }
     writeln!(out, "    ];\n}}\n").unwrap();
 }

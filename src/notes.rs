@@ -346,10 +346,6 @@ impl Notes {
         notes
     }
 
-    pub fn is_editing(&self) -> bool {
-        self.editing
-    }
-
     fn say(&mut self, text: &'static str) {
         self.notice = Some((text, 4));
     }
@@ -545,7 +541,7 @@ impl Notes {
 
     /// Whether a point of the window is on the sheet or its scrollbar: the
     /// part of the note that can be clicked without the typing being over.
-    pub fn on_sheet(&self, x: i32, y: i32) -> bool {
+    fn on_sheet(&self, x: i32, y: i32) -> bool {
         Rect::new(self.paper.x0, self.paper.y0, self.trough_x + BAR_W, self.paper.y1).contains(x - self.pad, y - self.pad)
     }
 
@@ -573,112 +569,6 @@ impl Notes {
         // a caret after blanks that run past the column waits at its edge
         let cx = self.text_x + px(x).min(self.text_w - 1);
         Some(Rect::xywh(cx, self.first_y + slot * self.pitch, 1, self.pitch))
-    }
-
-    // ---- the keyboard -----------------------------------------------------------
-
-    /// One typed character.
-    pub fn typed(&mut self, c: char) -> Outcome {
-        if !self.editing {
-            return Outcome::none();
-        }
-        self.doc.type_char(c);
-        self.edited()
-    }
-
-    pub fn key(&mut self, key: Key, shift: bool, ctrl: bool) -> Outcome {
-        if !self.editing {
-            return Outcome::none();
-        }
-        let page = (self.rows_shown - PAGE_KEEP).max(1) as isize;
-        match key {
-            Key::Left => self.doc.left(ctrl, shift),
-            Key::Right => self.doc.right(ctrl, shift),
-            Key::Up => self.doc.vertical(&self.rows, -1, shift),
-            Key::Down => self.doc.vertical(&self.rows, 1, shift),
-            Key::PageUp => self.doc.vertical(&self.rows, -page, shift),
-            Key::PageDown => self.doc.vertical(&self.rows, page, shift),
-            Key::Home => self.doc.home(&self.rows, ctrl, shift),
-            Key::End => self.doc.end(&self.rows, ctrl, shift),
-            Key::Backspace => self.doc.backspace(ctrl),
-            Key::Delete => self.doc.delete(ctrl),
-            Key::Enter => self.doc.enter(),
-            Key::Tab => self.doc.type_char('\t'),
-            Key::SelectAll => self.doc.select_all(),
-            Key::Undo => {
-                self.doc.undo();
-            }
-            Key::Redo => {
-                self.doc.redo();
-            }
-            Key::Escape => return Outcome::request(Request::DropKeys),
-            // the host's: it is the one that can reach the clipboard
-            Key::Copy | Key::Cut | Key::Paste => return Outcome::none(),
-        }
-        self.edited()
-    }
-
-    /// What is selected, for the clipboard.
-    pub fn copy(&self) -> Option<String> {
-        self.doc.selection().filter(|_| self.editing)
-    }
-
-    /// What is selected, taken out of the note.
-    pub fn cut(&mut self) -> (Option<String>, Outcome) {
-        let Some(taken) = self.copy() else { return (None, Outcome::none()) };
-        self.doc.backspace(false);
-        (Some(taken), self.edited())
-    }
-
-    pub fn paste(&mut self, text: &str) -> Outcome {
-        if !self.editing {
-            return Outcome::none();
-        }
-        self.doc.insert(text);
-        self.edited()
-    }
-
-    /// The keyboard's timer, `ms` after the last: the caret blinks, if it is
-    /// one that does, and typing that has paused long enough is written.
-    pub fn pulse(&mut self, ms: u32, blink: bool) -> Dirty {
-        if !self.editing {
-            return Dirty::None;
-        }
-        let mut dirty = Dirty::None;
-        if self.unsaved && self.autosave_ms > 0 {
-            self.idle_ms = self.idle_ms.saturating_add(ms);
-            if self.idle_ms >= self.autosave_ms {
-                self.idle_ms = 0;
-                self.save();
-                if self.refresh() {
-                    dirty = Dirty::All;
-                }
-            }
-        }
-        let on = !blink || !self.caret_on;
-        if on != self.caret_on {
-            self.caret_on = on;
-            if let Some(c) = self.caret_box() {
-                dirty = dirty.and(Dirty::Part(Rect::new(c.x0 + self.pad, c.y0 + self.pad, c.x1 + self.pad, c.y1 + self.pad)));
-            }
-        }
-        dirty
-    }
-
-    /// The keyboard has gone elsewhere: write the note, and take the caret
-    /// and the selection off the sheet.
-    pub fn blur(&mut self) -> Dirty {
-        if !self.editing {
-            return Dirty::None;
-        }
-        self.editing = false;
-        self.doc.deselect();
-        if self.unsaved {
-            self.save();
-        }
-        self.bak_due = false;
-        self.refresh();
-        Dirty::All
     }
 
     // ---- commands -------------------------------------------------------------
@@ -1007,6 +897,117 @@ impl Widget for Notes {
         self.on_text(x - self.pad, y - self.pad)
     }
 
+    // ---- the keyboard -----------------------------------------------------------
+
+    /// The wheel and the scrollbar move the sheet without ending the typing.
+    fn typing_at(&self, x: i32, y: i32) -> bool {
+        self.on_sheet(x, y)
+    }
+
+    /// One typed character.
+    fn typed(&mut self, c: char) -> Outcome {
+        if !self.editing {
+            return Outcome::none();
+        }
+        self.doc.type_char(c);
+        self.edited()
+    }
+
+    fn key(&mut self, key: Key, shift: bool, ctrl: bool) -> Outcome {
+        if !self.editing {
+            return Outcome::none();
+        }
+        let page = (self.rows_shown - PAGE_KEEP).max(1) as isize;
+        match key {
+            Key::Left => self.doc.left(ctrl, shift),
+            Key::Right => self.doc.right(ctrl, shift),
+            Key::Up => self.doc.vertical(&self.rows, -1, shift),
+            Key::Down => self.doc.vertical(&self.rows, 1, shift),
+            Key::PageUp => self.doc.vertical(&self.rows, -page, shift),
+            Key::PageDown => self.doc.vertical(&self.rows, page, shift),
+            Key::Home => self.doc.home(&self.rows, ctrl, shift),
+            Key::End => self.doc.end(&self.rows, ctrl, shift),
+            Key::Backspace => self.doc.backspace(ctrl),
+            Key::Delete => self.doc.delete(ctrl),
+            Key::Enter => self.doc.enter(),
+            Key::Tab => self.doc.type_char('\t'),
+            Key::SelectAll => self.doc.select_all(),
+            Key::Undo => {
+                self.doc.undo();
+            }
+            Key::Redo => {
+                self.doc.redo();
+            }
+            Key::Escape => return Outcome::request(Request::DropKeys),
+            // the host's: it is the one that can reach the clipboard
+            Key::Copy | Key::Cut | Key::Paste => return Outcome::none(),
+        }
+        self.edited()
+    }
+
+    /// What is selected, for the clipboard.
+    fn copy(&self) -> Option<String> {
+        self.doc.selection().filter(|_| self.editing)
+    }
+
+    /// What is selected, taken out of the note.
+    fn cut(&mut self) -> (Option<String>, Outcome) {
+        let Some(taken) = self.copy() else { return (None, Outcome::none()) };
+        self.doc.backspace(false);
+        (Some(taken), self.edited())
+    }
+
+    fn paste(&mut self, text: &str) -> Outcome {
+        if !self.editing {
+            return Outcome::none();
+        }
+        self.doc.insert(text);
+        self.edited()
+    }
+
+    /// The keyboard's timer, `ms` after the last: the caret blinks, if it is
+    /// one that does, and typing that has paused long enough is written.
+    fn pulse(&mut self, ms: u32, blink: bool) -> Dirty {
+        if !self.editing {
+            return Dirty::None;
+        }
+        let mut dirty = Dirty::None;
+        if self.unsaved && self.autosave_ms > 0 {
+            self.idle_ms = self.idle_ms.saturating_add(ms);
+            if self.idle_ms >= self.autosave_ms {
+                self.idle_ms = 0;
+                self.save();
+                if self.refresh() {
+                    dirty = Dirty::All;
+                }
+            }
+        }
+        let on = !blink || !self.caret_on;
+        if on != self.caret_on {
+            self.caret_on = on;
+            if let Some(c) = self.caret_box() {
+                dirty = dirty.and(Dirty::Part(Rect::new(c.x0 + self.pad, c.y0 + self.pad, c.x1 + self.pad, c.y1 + self.pad)));
+            }
+        }
+        dirty
+    }
+
+    /// The keyboard has gone elsewhere: write the note, and take the caret
+    /// and the selection off the sheet.
+    fn blur(&mut self, _ctx: &mut Ctx) -> Dirty {
+        if !self.editing {
+            return Dirty::None;
+        }
+        self.editing = false;
+        self.doc.deselect();
+        if self.unsaved {
+            self.save();
+        }
+        self.bak_due = false;
+        self.refresh();
+        Dirty::All
+    }
+
     fn menu(&self, items: &mut Vec<MenuItem>) {
         items.push(MenuItem { id: 1, label: "Open the note in a text editor", checked: false });
         items.push(MenuItem { id: 2, label: "Canary paper", checked: self.colour == 0 });
@@ -1106,8 +1107,9 @@ mod tests {
             n.typed(c);
         }
         assert!(n.unsaved);
-        n.blur();
-        assert!(!n.unsaved && !n.is_editing());
+        let mut settings = Settings::in_memory();
+        n.blur(&mut Ctx { now: 0, settings: &mut settings, locked: false, signed_in: None });
+        assert!(!n.unsaved && !n.editing);
         assert_eq!(std::fs::read(&path).unwrap(), b"[ ] milk\r\n[ ] eggs\r\nplain\r\n");
         // the note as it was is beside it
         let mut bak = path.clone().into_os_string();

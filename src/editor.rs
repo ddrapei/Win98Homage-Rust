@@ -13,6 +13,10 @@
 //! Nothing here knows about Windows, the file or the screen.  Widths come
 //! from whoever calls `layout`, which is what lets the same rows be drawn
 //! whether or not anyone is typing -- see `notes`.
+//!
+//! The weather's city field is typed on with the same text, caret and keys,
+//! as a `Doc::one_line`: no line breaks and no checkboxes, where `[ ]` is
+//! three characters like any others -- see `weather`.
 
 /// The spaces a tab is as wide as.
 pub const TAB: usize = 4;
@@ -195,6 +199,9 @@ pub struct Doc {
     swallow: bool,
     /// Counts the changes to the text.
     rev: u64,
+    /// One line of plain text: it takes no line break, and brackets at its
+    /// head are not a checkbox.
+    plain: bool,
 }
 
 impl Doc {
@@ -210,7 +217,13 @@ impl Doc {
             run: Run::None,
             swallow: false,
             rev: 0,
+            plain: false,
         }
+    }
+
+    /// A single line of plain text, for a field rather than a sheet.
+    pub fn one_line() -> Doc {
+        Doc { plain: true, ..Doc::new() }
     }
 
     /// Start again from `text`: the file has been read.
@@ -264,6 +277,9 @@ impl Doc {
 
     /// Where the shown part of the line starting at `line` begins.
     fn text_start(&self, line: usize) -> usize {
+        if self.plain {
+            return line;
+        }
         line + marker(&self.text[line..self.line_end(line)]).map_or(0, |m| m.hidden)
     }
 
@@ -511,7 +527,7 @@ impl Doc {
 
         // "[ ]" finished at the head of a line: it is a checkbox from here on,
         // and the caret goes to where its words will.
-        if c == ']' {
+        if c == ']' && !self.plain {
             let line = self.line_start(self.caret);
             if let Some(m) = marker(&self.text[line..self.line_end(line)]) {
                 if self.caret == line + m.mark + 2 {
@@ -533,6 +549,7 @@ impl Doc {
         let mut rest = s.chars().peekable();
         while let Some(c) = rest.next() {
             match c {
+                '\r' | '\n' if self.plain => {}
                 '\r' => {
                     if rest.peek() == Some(&'\n') {
                         rest.next();
@@ -554,6 +571,9 @@ impl Doc {
     }
 
     pub fn enter(&mut self) {
+        if self.plain {
+            return;
+        }
         self.swallow = false;
         self.save(Run::None);
         let (a, b) = self.range();
@@ -827,6 +847,23 @@ mod tests {
         assert_eq!(text(&d), "buy oat milk");
         assert!(d.redo());
         assert_eq!(text(&d), "buy x milk");
+    }
+
+    #[test]
+    fn one_line_has_no_checkboxes_and_no_line_breaks() {
+        let mut d = Doc::one_line();
+        for c in "[ ] x".chars() {
+            d.type_char(c);
+        }
+        assert_eq!(text(&d), "[ ] x");
+        // nothing of it is hidden: the caret can stand in the brackets
+        d.click(1, false, false);
+        assert_eq!(d.caret(), 1);
+        d.home(&[], true, false);
+        assert_eq!(d.caret(), 0);
+        d.enter();
+        d.insert("a\r\nb");
+        assert_eq!(text(&d), "ab[ ] x");
     }
 
     #[test]
