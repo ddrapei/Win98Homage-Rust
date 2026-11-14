@@ -926,7 +926,7 @@ impl Widget for Notes {
          Swatch button\tthe next paper colour, round all of them\n\
          Lines button\truled or plain paper\n\
          Double-click icon\topen the note in a text editor\n\
-         Right-click\t\tNew note: another, with a text of its own\n\n\
+         Right-click\t\tWidgets, Sticky Note +: another, with a text of its own\n\n\
          Each note is a plain text file, saved as you type; the copy from \
          before the latest edit is kept beside it as .bak."
     }

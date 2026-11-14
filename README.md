@@ -54,8 +54,8 @@ them).
 | | |
 |--|--|
 | drag anywhere | move a widget; it snaps to screen edges and to the others (hold Ctrl or Shift not to). The note's text is the exception: dragging there selects |
-| right-click | menu: the widget's own options, New note (on a note), Position, Snap, Lock, Close, the list of widgets, Start with Windows, settings, Exit |
-| tray icon | the same menu — this is how a closed widget is brought back, and Widgets → New Sticky Note is another way to a new note |
+| right-click | menu: the widget's own options, Position, Snap, Lock, Close, the list of widgets (with *Sticky Note +* and *−* for the notes), Start with Windows, settings, Exit |
+| tray icon | the same menu — this is how a closed widget is brought back |
 | `X` | closes that widget (it stops costing anything); `?` says what it does |
 
 In the widgets themselves: tabs, month list, calendar selection, scroll to browse months,
@@ -77,14 +77,17 @@ paper colour each time it is clicked — canary, white, pink, green, blue, orang
 and round to canary again — and the note remembers which. The colours are the `Paper1`,
 `Paper2`, … variables in `skins/Win98Notes.ini`; another line there is another colour.
 
-**More than one note.** Right-click a note → *New note* (or the tray icon → Widgets →
-*New Sticky Note*) puts another note beside it, in the nearest place where there is room.
-Each note has its own text, its own paper and ruling and its own place; none has a title
-— the bar is the icon and the buttons. `X` closes a note like any other widget — it keeps
-its text and comes back from the Widgets list, where the notes after the first are
-*Sticky Note 2*, *Sticky Note 3*. Right-click → *Delete this note* removes one for good: its text file goes to the
-Recycle Bin, after a question if there is anything written on it. The first note is the
-one that is always there: it can be closed but not deleted.
+**More than one note.** The other widgets are ticked on and off in the Widgets list; the
+notes are counted there instead. *Sticky Note +* puts one more note on the screen and
+*Sticky Note −* takes one off — the note the menu was opened on, or else the last one.
+A note taken off, or closed with its `X`, keeps its text, and `+` brings those back first,
+where they were, before it makes a new one; a new one goes beside the note the menu was
+opened on (or the last one), in the nearest place where there is room. Each note has its
+own text, its own paper and ruling and its own place; none has a title — the bar is the
+icon and the buttons. Right-click a note after the first → *Delete this note* removes it
+for good: its text file goes to the Recycle Bin, after a question if there is anything
+written on it. The first note is the one that is always there: it can be closed but not
+deleted.
 
 **The weather's city.** Click the city field and type a place: `Lviv`, or `Paris, US` /
 `Portland, Maine` to say which one. Enter (or a click anywhere else) looks it up and pins

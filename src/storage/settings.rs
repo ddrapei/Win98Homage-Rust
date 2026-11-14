@@ -234,7 +234,7 @@ GraphTo={graph_to}
 Enabled=1
 
 [Notes]
-; The first note.  Every other one (right-click a note, New note) has a section
+; The first note.  Every other one (right-click, Widgets, Sticky Note +) has a section
 ; like this of its own -- [Notes2], [Notes3], ... -- and a file of its own.
 Enabled=1
 ; the note itself; a bare name is kept beside this file

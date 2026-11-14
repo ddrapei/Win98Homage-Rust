@@ -116,16 +116,16 @@ const CMD_TOPMOST: usize = 12;
 const CMD_SNAP: usize = 20;
 const CMD_LOCK: usize = 21;
 const CMD_CLOSE: usize = 30;
-const CMD_NEW_NOTE: usize = 40;
+const CMD_MORE_NOTES: usize = 40;
 const CMD_DELETE_NOTE: usize = 41;
+const CMD_FEWER_NOTES: usize = 42;
 const CMD_AUTOSTART: usize = 50;
 const CMD_SETTINGS: usize = 51;
 const CMD_RELOAD: usize = 52;
 const CMD_EXIT: usize = 60;
 /// From here up to CMD_TOGGLE: the widget's own entries.
 const CMD_WIDGET: usize = 100;
-/// From here up: show or close a window, by its number.  Last, because there
-/// is no saying how many notes there will be.
+/// From here up: show or close a window, by its number.
 const CMD_TOGGLE: usize = 1000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -165,6 +165,12 @@ enum Later {
     /// and the text of the question, for a note that has something on it.
     Delete(String, Option<(String, String)>),
     Quit,
+}
+
+/// The frame of a window at (x, y): a window has `Pad` of nothing round it.
+fn frame(kind: Kind, x: i32, y: i32) -> Rect {
+    let (skin, pad) = (kind.skin(), kind.skin().int("Pad", 12));
+    Rect::new(x + pad, y + pad, x + skin.w - pad, y + skin.h - pad)
 }
 
 struct Slot {
@@ -598,11 +604,6 @@ impl App {
     /// overlapped would be made and not seen.)  Side by side the frames
     /// touch, and one above the other they are APART, as when first laid out.
     fn room_beside(&self, b: usize) -> (i32, i32) {
-        // frames, not windows: a window has `Pad` of nothing round its frame
-        let frame = |kind: Kind, x: i32, y: i32| {
-            let (skin, pad) = (kind.skin(), kind.skin().int("Pad", 12));
-            Rect::new(x + pad, y + pad, x + skin.w - pad, y + skin.h - pad)
-        };
         let base = &self.slots[b];
         let skin = base.kind.skin();
         let own = frame(base.kind, base.x, base.y);
@@ -618,6 +619,48 @@ impl App {
             .map(|(i, j)| (base.x + i * dx, base.y + j * dy))
             .find(free)
             .unwrap_or_else(|| clamp_to_screen(base.x + CASCADE, base.y + CASCADE, skin.w, skin.h))
+    }
+
+    /// The notes there are: the first, then the others in the order of their
+    /// numbers -- which, their names being alike but for the number, is
+    /// shortest name first.
+    fn notes(&self) -> Vec<usize> {
+        let mut more: Vec<usize> = (FIXED.len()..self.slots.len()).filter(|&j| !self.slots[j].deleted).collect();
+        more.sort_by_key(|&j| (self.slots[j].title.len(), &self.slots[j].title));
+        core::iter::once(NOTE).chain(more).collect()
+    }
+
+    /// The note "one fewer" takes off the screen: the one it was asked for
+    /// on, or, asked for anywhere else, the last that is showing.
+    fn note_to_close(&self, from: Option<usize>) -> Option<usize> {
+        let open = |&j: &usize| self.slots[j].kind == Kind::Notes && self.widgets.get(j).is_some();
+        from.filter(open).or_else(|| self.notes().into_iter().rev().find(open))
+    }
+
+    /// One more note on the screen.  A note that was closed comes back first,
+    /// where it was and with what was on it, the lowest number before the
+    /// others -- there is no other way back to it -- and with none closed a
+    /// new one is made.
+    fn more_notes(&mut self, from: Option<usize>) {
+        let Some(closed) = self.notes().into_iter().find(|&j| self.widgets.get(j).is_none()) else {
+            return self.new_note(from);
+        };
+        // Something may have been put where it was since: it would come back
+        // underneath that, and not be seen.  Then it goes where a new one would.
+        let own = frame(Kind::Notes, self.slots[closed].x, self.slots[closed].y);
+        if self.slots.iter().any(|s| s.hwnd != 0 && frame(s.kind, s.x, s.y).intersects(&own)) {
+            let beside = self.note_to_close(from).unwrap_or(closed);
+            (self.slots[closed].x, self.slots[closed].y) = self.room_beside(beside);
+            self.keep_place(closed);
+        }
+        self.set_enabled(closed, true);
+    }
+
+    /// One note fewer on the screen: closed, as its X closes it, text kept.
+    fn fewer_notes(&mut self, from: Option<usize>) {
+        if let Some(i) = self.note_to_close(from) {
+            self.set_enabled(i, false);
+        }
     }
 
     /// Another note: a window beside the note it was asked for on -- or, asked
@@ -1099,13 +1142,10 @@ impl App {
             if !own.is_empty() {
                 m.push((0, String::new(), false));
             }
-            // A note can have others beside it.  The first is closed, like the
-            // other four widgets; the ones after it can also be deleted.
-            if self.slots[i].kind == Kind::Notes {
-                m.push((CMD_NEW_NOTE, String::from("New note"), false));
-                if i >= FIXED.len() {
-                    m.push((CMD_DELETE_NOTE, String::from("Delete this note"), false));
-                }
+            // The first note is closed, like the other four widgets; the ones
+            // after it can also be deleted.
+            if self.slots[i].kind == Kind::Notes && i >= FIXED.len() {
+                m.push((CMD_DELETE_NOTE, String::from("Delete this note"), false));
                 m.push((0, String::new(), false));
             }
         }
@@ -1121,16 +1161,19 @@ impl App {
         }
         m.push((0, String::new(), false));
         m.push((SUB, String::from("Widgets"), false));
-        // The notes together where the first of them is, in the order of
-        // their numbers -- which, their names being alike but for the number,
-        // is shortest name first.
-        let mut more: Vec<usize> = (FIXED.len()..self.slots.len()).filter(|&j| !self.slots[j].deleted).collect();
-        more.sort_by_key(|&j| (self.slots[j].title.len(), &self.slots[j].title));
-        for j in (0..=NOTE).chain(more).chain(NOTE + 1..FIXED.len()) {
-            m.push((CMD_TOGGLE + j, self.slots[j].title.clone(), self.slots[j].hwnd != 0));
+        for j in 0..FIXED.len() {
+            if j != NOTE {
+                m.push((CMD_TOGGLE + j, self.slots[j].title.clone(), self.slots[j].hwnd != 0));
+                continue;
+            }
+            // There is one of each of the others, shown or not.  Of notes
+            // there is a number: one more, and -- while any is showing -- one
+            // fewer.
+            m.push((CMD_MORE_NOTES, format!("{} +", FIXED[NOTE].2), false));
+            if self.note_to_close(i).is_some() {
+                m.push((CMD_FEWER_NOTES, format!("{} \u{2212}", FIXED[NOTE].2), false));
+            }
         }
-        m.push((0, String::new(), false));
-        m.push((CMD_NEW_NOTE, String::from("New Sticky Note"), false));
         m.push((SUB, String::new(), false));
         m.push((CMD_AUTOSTART, String::from("Start with Windows"), autostart_enabled()));
         m.push((CMD_SETTINGS, String::from("Open settings file"), false));
@@ -1166,7 +1209,8 @@ impl App {
             }
             CMD_RELOAD => self.reload(),
             CMD_EXIT => return Later::Quit,
-            CMD_NEW_NOTE => self.new_note(i),
+            CMD_MORE_NOTES => self.more_notes(i),
+            CMD_FEWER_NOTES => self.fewer_notes(i),
             CMD_DELETE_NOTE => {
                 let Some(slot) = i.filter(|&i| i >= FIXED.len()).map(|i| &self.slots[i]) else { return Later::Nothing };
                 // Asked about first, unless there is nothing on it to lose.
@@ -1701,7 +1745,13 @@ mod tests {
 
     /// What the Widgets submenu lists, top to bottom.
     fn listed(app: &App) -> Vec<String> {
-        app.menu(None).into_iter().filter(|m| (CMD_TOGGLE..usize::MAX).contains(&m.0)).map(|m| m.1).collect()
+        let entry = |m: &(usize, String, bool)| (CMD_TOGGLE..usize::MAX).contains(&m.0) || [CMD_MORE_NOTES, CMD_FEWER_NOTES].contains(&m.0);
+        app.menu(None).into_iter().filter(entry).map(|m| m.1).collect()
+    }
+
+    /// The notes there are, by what they are called.
+    fn titles(app: &App) -> Vec<String> {
+        app.notes().into_iter().map(|j| app.slots[j].title.clone()).collect()
     }
 
     fn offers(app: &App, i: usize, label: &str) -> bool {
@@ -1719,7 +1769,7 @@ mod tests {
         assert_eq!(app.slots.len(), FIXED.len());
         app.new_note(Some(NOTE));
         app.new_note(None);
-        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note", "Sticky Note 2", "Sticky Note 3", "Weather", "Rain Window"]);
+        assert_eq!(titles(&app), ["Sticky Note", "Sticky Note 2", "Sticky Note 3"]);
         // each is running, on a file of its own, and will be there next time
         let (second, third) = (FIXED.len(), FIXED.len() + 1);
         assert!(app.widgets.get(second).is_some() && app.widgets.get(third).is_some());
@@ -1727,10 +1777,8 @@ mod tests {
         assert_eq!(app.settings.get("Notes3", "Enabled"), Some("1"));
         assert!(app.settings.get("Notes3", "X").is_some());
 
-        // any note offers another; only one after the first can be deleted
-        assert!(offers(&app, NOTE, "New note") && !offers(&app, NOTE, "Delete this note"));
-        assert!(offers(&app, third, "New note") && offers(&app, third, "Delete this note"));
-        assert!(!offers(&app, WEATHER, "New note"));
+        // only a note after the first can be deleted
+        assert!(!offers(&app, NOTE, "Delete this note") && offers(&app, third, "Delete this note"));
         assert!(matches!(app.menu_command(Some(NOTE), CMD_DELETE_NOTE), Later::Nothing));
         assert!(app.delete_note(notes::FIRST).is_empty() && !app.slots[NOTE].deleted);
 
@@ -1738,7 +1786,7 @@ mod tests {
         let Later::Delete(section, None) = app.menu_command(Some(second), CMD_DELETE_NOTE) else { panic!("asked about an empty note") };
         assert_eq!(app.delete_note(&section), [dir.join("Notes2.txt")]);
         assert!(app.slots[second].deleted && app.widgets.get(second).is_none());
-        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note", "Sticky Note 3", "Weather", "Rain Window"]);
+        assert_eq!(titles(&app), ["Sticky Note", "Sticky Note 3"]);
         // nothing brings it back, and nothing writes its section again
         app.set_enabled(second, true);
         app.keep_place(second);
@@ -1753,8 +1801,79 @@ mod tests {
             app.stop(i);
         }
         app.read_slots();
-        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note", "Sticky Note 3", "Weather", "Rain Window"]);
+        assert_eq!(titles(&app), ["Sticky Note", "Sticky Note 3"]);
         assert_eq!(app.slots.len(), app.widgets.0.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notes_are_counted_up_and_down_from_one_place() {
+        let (mut app, dir) = app("count");
+        // one entry for more of them wherever the menu is opened, in the list
+        // of widgets, and none that ticks a note on and off
+        for at in [None, Some(NOTE), Some(WEATHER)] {
+            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", "Weather", "Rain Window"]);
+            assert_eq!(app.menu(at).iter().filter(|m| m.0 == CMD_MORE_NOTES).count(), 1);
+            assert!(!app.menu(at).iter().any(|m| m.0 == CMD_TOGGLE + NOTE));
+        }
+        let running = |app: &App| app.notes().into_iter().filter(|&j| app.widgets.get(j).is_some()).count();
+        let minus = "Sticky Note \u{2212}";
+
+        // the first comes out, and with it the way to put one back
+        app.menu_command(None, CMD_MORE_NOTES);
+        assert_eq!((running(&app), app.slots.len()), (1, FIXED.len()));
+        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", minus, "Weather", "Rain Window"]);
+        // with none closed, more is a new one each time
+        app.menu_command(None, CMD_MORE_NOTES);
+        app.menu_command(Some(WEATHER), CMD_MORE_NOTES);
+        assert_eq!((running(&app), titles(&app).len()), (3, 3));
+
+        // fewer takes the last, or the one it was asked for on, and keeps it
+        let (second, third) = (FIXED.len(), FIXED.len() + 1);
+        std::fs::write(dir.join("Notes3.txt"), "milk\n").unwrap();
+        app.menu_command(None, CMD_FEWER_NOTES);
+        assert!(app.widgets.get(third).is_none() && app.widgets.get(second).is_some());
+        app.menu_command(Some(NOTE), CMD_FEWER_NOTES);
+        assert!(app.widgets.get(NOTE).is_none() && app.widgets.get(second).is_some());
+        assert_eq!(app.settings.get("Notes3", "Enabled"), Some("0"));
+        assert_eq!(std::fs::read(dir.join("Notes3.txt")).unwrap(), b"milk\n");
+
+        // more brings the closed ones back, lowest number first, before any is made
+        app.menu_command(None, CMD_MORE_NOTES);
+        assert!(app.widgets.get(NOTE).is_some() && app.widgets.get(third).is_none());
+        app.menu_command(None, CMD_MORE_NOTES);
+        assert_eq!((running(&app), titles(&app).len()), (3, 3));
+        app.menu_command(None, CMD_MORE_NOTES);
+        assert_eq!((running(&app), titles(&app).len()), (4, 4));
+
+        // down to none: nothing left to take away, and no entry that offers to
+        for _ in 0..4 {
+            app.menu_command(None, CMD_FEWER_NOTES);
+        }
+        assert_eq!(running(&app), 0);
+        assert!(!offers(&app, WEATHER, minus));
+        app.menu_command(None, CMD_FEWER_NOTES);
+        assert_eq!(titles(&app).len(), 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_does_not_come_back_underneath_another_widget() {
+        let (mut app, dir) = app("back");
+        let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
+        let skin = Kind::Notes.skin();
+        let (x, y) = ((work.left + work.right - skin.w) / 2, (work.top + work.bottom - skin.h) / 2);
+        // where it was left, with nothing there
+        (app.slots[NOTE].x, app.slots[NOTE].y) = (x, y);
+        app.more_notes(None);
+        assert_eq!((app.slots[NOTE].x, app.slots[NOTE].y), (x, y));
+        // the rain has been put there since: beside it, then
+        app.fewer_notes(None);
+        show(&mut app, RAIN, x, y);
+        app.more_notes(None);
+        let moved = frame(Kind::Notes, app.slots[NOTE].x, app.slots[NOTE].y);
+        assert!(!moved.intersects(&frame(Kind::Rain, x, y)));
+        assert_eq!(app.settings.int(notes::FIRST, "X", -1), app.slots[NOTE].x);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
