@@ -1,9 +1,9 @@
 //! The host: one small process, one thread, a layered window for each widget.
 //!
-//! There is one of each of the six, and as many more Sticky Notes as have
+//! There is one of each of the seven, and as many more Sticky Notes as have
 //! been asked for: a note after the first is a window like any other, made
 //! from the same skin, with a section of settings.ini and a text file of its
-//! own (see `notes`).  The windows are numbered -- the six first, then the
+//! own (see `notes`).  The windows are numbered -- the seven first, then the
 //! other notes -- and a number is never handed on: a deleted note's stays
 //! its own, unused, until the program ends.
 //!
@@ -48,6 +48,7 @@ use crate::sys::*;
 use crate::text::Text;
 use crate::weather::Weather;
 use crate::widget::{Ctx, Dirty, Outcome, Pressed, Request, Widget};
+use crate::world::World;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -57,6 +58,7 @@ enum Kind {
     Weather,
     Rain,
     Disk,
+    World,
 }
 
 impl Kind {
@@ -68,6 +70,7 @@ impl Kind {
             Kind::Weather => &skin::weather::SKIN,
             Kind::Rain => &skin::rain::SKIN,
             Kind::Disk => &skin::disk::SKIN,
+            Kind::World => &skin::world::SKIN,
         }
     }
 }
@@ -75,19 +78,21 @@ impl Kind {
 /// The widgets there is always one of, in the order their windows are
 /// numbered: what each is, its section of settings.ini, and what the menus
 /// call it.  The notes after the first follow these.
-const FIXED: [(Kind, &str, &str); 6] = [
+const FIXED: [(Kind, &str, &str); 7] = [
     (Kind::DateTime, "DateTime", "Date/Time"),
     (Kind::Resources, "Resources", "Resource Meter"),
     (Kind::Notes, notes::FIRST, "Sticky Note"),
     (Kind::Weather, "Weather", "Weather"),
     (Kind::Rain, "Rain", "Rain Window"),
     (Kind::Disk, "Disk", "Disk Space"),
+    (Kind::World, "World", "World Clock"),
 ];
 const DATETIME: usize = 0;
 const NOTE: usize = 2;
 const WEATHER: usize = 3;
 const RAIN: usize = 4;
 const DISK: usize = 5;
+const WORLD: usize = 6;
 
 const WIDGET_CLASS: &str = "Win98Widget";
 const MAIN_CLASS: &str = "Win98WidgetsMain";
@@ -522,6 +527,7 @@ impl App {
                 Kind::Weather => Box::new(Weather::new(&ctx)),
                 Kind::Rain => Box::new(Rain::new(&ctx)),
                 Kind::Disk => Box::new(Disk::new(&ctx)),
+                Kind::World => Box::new(World::new(&ctx)),
             };
             widget.tick(&mut ctx);
             widgets.0[i] = Some(widget);
@@ -786,8 +792,8 @@ impl App {
 
     // ---- the keyboard ----------------------------------------------------------
 
-    /// Widget `i` is being typed on -- the note, or the weather's city field
-    /// -- give it the keyboard.  There is one keyboard: whichever had it is
+    /// Widget `i` is being typed on -- the note, or a city field of the
+    /// weather's or the world clock's -- give it the keyboard.  There is one keyboard: whichever had it is
     /// done.
     fn open_editor(&mut self, i: usize) {
         if self.typing.is_some_and(|other| other != i) {
@@ -1148,7 +1154,7 @@ impl App {
             if !own.is_empty() {
                 m.push((0, String::new(), false));
             }
-            // The first note is closed, like the other five widgets; the ones
+            // The first note is closed, like the other six widgets; the ones
             // after it can also be deleted.
             if self.slots[i].kind == Kind::Notes && i >= FIXED.len() {
                 m.push((CMD_DELETE_NOTE, String::from("Delete this note"), false));
@@ -1275,12 +1281,13 @@ impl App {
         self.locked_in_place = self.settings.flag("General", "LockPosition", false);
     }
 
-    /// Which windows there are -- the six, and a note for every other
+    /// Which windows there are -- the seven, and a note for every other
     /// section of settings.ini that is a note's -- and where each sits: where
     /// it was left, or -- the first time -- in a column down the right-hand
     /// side of the screen, frames ten pixels apart, the note and the weather
     /// side by side at the foot, the rain to the left of the note and the disk
-    /// to the left of the rain, frame against frame.  Called with every window shut: at the start, and when
+    /// to the left of the rain, frame against frame; the world clock heads a
+    /// second column, to the left of the date and time.  Called with every window shut: at the start, and when
     /// settings.ini is read again.
     fn read_slots(&mut self) {
         self.slots = FIXED.iter().map(|&(kind, section, title)| Slot::new(kind, section, title.to_owned())).collect();
@@ -1306,6 +1313,7 @@ impl App {
             (x0 + size(DATETIME).0 - size(WEATHER).0, y2),
             (x0 - size(RAIN).0 + 2 * pad, y2),
             (x0 - size(RAIN).0 - size(DISK).0 + 4 * pad, y2),
+            (x0 - size(WORLD).0 + 2 * pad, y0),
         ];
         for i in 0..self.slots.len() {
             // A note after the first was put somewhere when it was made.  One
@@ -1819,7 +1827,7 @@ mod tests {
         // one entry for more of them wherever the menu is opened, in the list
         // of widgets, and none that ticks a note on and off
         for at in [None, Some(NOTE), Some(WEATHER)] {
-            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", "Weather", "Rain Window", "Disk Space"]);
+            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", "Weather", "Rain Window", "Disk Space", "World Clock"]);
             assert_eq!(app.menu(at).iter().filter(|m| m.0 == CMD_MORE_NOTES).count(), 1);
             assert!(!app.menu(at).iter().any(|m| m.0 == CMD_TOGGLE + NOTE));
         }
@@ -1829,7 +1837,7 @@ mod tests {
         // the first comes out, and with it the way to put one back
         app.menu_command(None, CMD_MORE_NOTES);
         assert_eq!((running(&app), app.slots.len()), (1, FIXED.len()));
-        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", minus, "Weather", "Rain Window", "Disk Space"]);
+        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", minus, "Weather", "Rain Window", "Disk Space", "World Clock"]);
         // with none closed, more is a new one each time
         app.menu_command(None, CMD_MORE_NOTES);
         app.menu_command(Some(WEATHER), CMD_MORE_NOTES);

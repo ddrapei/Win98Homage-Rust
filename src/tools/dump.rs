@@ -35,6 +35,11 @@
 //!   type.weather=press 107 167;type Lviv
 //!                                      the same for the weather's city field;
 //!                                      nothing is looked up.
+//!   type.world=press 202 135;type Kyiv
+//!                                      and for a city field of the world
+//!                                      clock, whose three cities and zones
+//!                                      are set.World.City1, set.World.Zone1
+//!                                      and so on.
 
 use std::path::{Path, PathBuf};
 
@@ -51,6 +56,7 @@ use crate::skin::{self, Hooks};
 use crate::text::Text;
 use crate::weather::Weather;
 use crate::widget::{Ctx, Widget};
+use crate::world::World;
 
 fn write_bmp(path: &Path, w: i32, h: i32, px: &[u32]) -> std::io::Result<()> {
     let size = (w * h * 4) as u32;
@@ -230,6 +236,14 @@ pub fn run(args: &[String]) -> i32 {
         let letter = p.first().and_then(|s| s.bytes().next()).unwrap_or(b'C');
         w.set_fixed(letter, num(1) as u32, p.get(2).copied().unwrap_or(""), num(3), num(4));
         render(&w, &mut text, &dir.join("disk.bmp"));
+    }
+    {
+        // the three cities settings.ini has (set.World.City1, set.World.Zone1,
+        // ...), at the moment given; nothing is looked up
+        let mut w = World::new(&ctx);
+        w.set_fixed();
+        type_on(&mut w, get("type.world").unwrap_or(""));
+        render(&w, &mut text, &dir.join("world.bmp"));
     }
     0
 }

@@ -202,6 +202,7 @@ fn default_file() -> String {
     let dt = &skin::datetime::SKIN;
     let notes = &skin::notes::SKIN;
     let wx = &skin::weather::SKIN;
+    let world = &skin::world::SKIN;
     format!(
         "\
 ; Win98 Widgets -- settings.
@@ -262,6 +263,18 @@ ManualLocation={place}
 Enabled=1
 ; the drive shown: its letter.  Empty is the drive Windows is on
 Drive={drive}
+
+[World]
+Enabled=1
+; the three clocks: a city, and the time zone it keeps -- by the name Windows
+; knows the zone by, which is the name of its key in the registry.  Typing a
+; city into the widget fills in both; both empty is a clock put away
+City1={city1}
+Zone1={zone1}
+City2={city2}
+Zone2={zone2}
+City3={city3}
+Zone3={zone3}
 ",
         week_start = dt.var("WeekStart"),
         use24 = dt.var("Use24Hour"),
@@ -279,6 +292,12 @@ Drive={drive}
         lon = wx.var("ManualLon"),
         place = wx.var("ManualLocation"),
         drive = skin::disk::SKIN.var("Drive"),
+        city1 = world.var("City1"),
+        zone1 = world.var("Zone1"),
+        city2 = world.var("City2"),
+        zone2 = world.var("Zone2"),
+        city3 = world.var("City3"),
+        zone3 = world.var("Zone3"),
     )
 }
 

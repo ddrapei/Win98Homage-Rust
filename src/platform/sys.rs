@@ -218,6 +218,21 @@ pub struct TIME_ZONE_INFORMATION {
     pub DaylightBias: i32,
 }
 
+/// A time zone with the name its rules are kept under, so that Windows can
+/// apply the rules of whichever year is asked about.
+#[repr(C)]
+pub struct DYNAMIC_TIME_ZONE_INFORMATION {
+    pub Bias: i32,
+    pub StandardName: [u16; 32],
+    pub StandardDate: SYSTEMTIME,
+    pub StandardBias: i32,
+    pub DaylightName: [u16; 32],
+    pub DaylightDate: SYSTEMTIME,
+    pub DaylightBias: i32,
+    pub TimeZoneKeyName: [u16; 128],
+    pub DynamicDaylightTimeDisabled: u8,
+}
+
 #[repr(C)]
 #[derive(Default)]
 pub struct MEMORYSTATUSEX {

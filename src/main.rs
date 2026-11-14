@@ -1,10 +1,10 @@
-//! Win98 Widgets -- six Windows 98 style desktop widgets as one small native
-//! program.
+//! Win98 Widgets -- seven Windows 98 style desktop widgets as one small
+//! native program.
 //!
-//! Date/Time Properties, Resource Meter, Sticky Note, Weather, Rain Window
-//! and Disk Space, drawn from the .ini files in `skins/` -- with no Direct2D
-//! and no script engine underneath.  One of each, and as many more Sticky
-//! Notes as are asked for.
+//! Date/Time Properties, Resource Meter, Sticky Note, Weather, Rain Window,
+//! Disk Space and World Clock, drawn from the .ini files in `skins/` -- with
+//! no Direct2D and no script engine underneath.  One of each, and as many
+//! more Sticky Notes as are asked for.
 //!
 //! # Where things are
 //!
@@ -21,20 +21,28 @@
 //!   tools/         for working on the program
 //!     dump           off-screen rendering, for checking a change
 //!
-//!   widgets/       what a widget is, and the six there are
+//!   widgets/       what a widget is, and the seven there are
 //!     widget         what the host asks of a widget -- the one thing about
 //!                    them it knows
+//!     field          a city field, typed on where it stands: the weather's
+//!                    one and the world clock's three
 //!     datetime       Date/Time Properties
 //!     resources      Resource Meter
 //!     notes          Sticky Note
 //!     weather        Weather          (and the child that fetches it)
 //!     rain           Rain Window      (the one that is animated)
 //!     disk           Disk Space
+//!     world          World Clock      (and the child that finds a city's
+//!                    time zone)
 //!
 //!   input/        typing
 //!     keys           the window that holds the keyboard for a widget
-//!     editor         a text and what the keys do to it: the note's, and the
-//!                    weather's city field
+//!     editor         a text and what the keys do to it: the note's, and a
+//!                    city field's
+//!
+//!   net/           the network, which only a child ever touches
+//!     geocode        a city by name: where it is, and its time zone
+//!     http           one GET over WinHTTP
 //!
 //!   storage/       what is kept on disk
 //!     settings       settings.ini
@@ -55,6 +63,7 @@
 mod app;
 mod graphics;
 mod input;
+mod net;
 mod platform;
 mod storage;
 mod tools;
@@ -66,10 +75,11 @@ mod widgets;
 // the file, or in any file that uses it.
 use graphics::{canvas, skin, text};
 use input::{editor, keys};
+use net::{geocode, http};
 use platform::{clock, sys};
 use storage::{settings, usage};
 use tools::dump;
-use widgets::{datetime, disk, notes, rain, resources, weather, widget};
+use widgets::{datetime, disk, field, notes, rain, resources, weather, widget, world};
 
 fn main() {
     // There is no console to complain to: if something does go wrong, leave
@@ -81,9 +91,10 @@ fn main() {
     }));
     let args: Vec<String> = std::env::args().collect();
     let code = match args.get(1).map(String::as_str) {
-        // the short-lived child that talks to the network
+        // the short-lived children that talk to the network
         Some("--fetch-weather") => weather::fetch_main(&args[2..]),
         Some("--find-city") => weather::find_main(&args[2..]),
+        Some("--find-zone") => world::find_main(&args[2..]),
         Some("--dump") => dump::run(&args[2..]),
         _ => app::run(),
     };

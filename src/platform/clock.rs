@@ -185,6 +185,80 @@ pub fn zone() -> Zone {
     }
 }
 
+/// Somewhere that keeps another time: one of the time zones Windows has the
+/// rules of, summer time and all.
+pub struct Elsewhere {
+    rules: sys::DYNAMIC_TIME_ZONE_INFORMATION,
+    convert: unsafe extern "system" fn(*const sys::DYNAMIC_TIME_ZONE_INFORMATION, *const sys::SYSTEMTIME, *mut sys::SYSTEMTIME) -> sys::BOOL,
+}
+
+/// The time zone Windows knows by this name -- "Tokyo Standard Time", the
+/// name of its key in the registry -- if it knows one.
+pub fn elsewhere(key: &str) -> Option<Elsewhere> {
+    type Enumerate = unsafe extern "system" fn(u32, *mut sys::DYNAMIC_TIME_ZONE_INFORMATION) -> u32;
+    if key.trim().is_empty() {
+        return None;
+    }
+    // SAFETY: both are documented with these signatures, and are looked up
+    // by name because not every import library has them.
+    unsafe {
+        let enumerate: Enumerate = core::mem::transmute(sys::proc_address("advapi32.dll", b"EnumDynamicTimeZoneInformation\0")?);
+        let convert = core::mem::transmute(sys::proc_address("kernel32.dll", b"SystemTimeToTzSpecificLocalTimeEx\0")?);
+        let mut rules: sys::DYNAMIC_TIME_ZONE_INFORMATION = core::mem::zeroed();
+        // there are some hundred and forty; the list ends with an error
+        for index in 0..1000 {
+            if enumerate(index, &mut rules) != 0 {
+                break;
+            }
+            if sys::from_wide(&rules.TimeZoneKeyName).eq_ignore_ascii_case(key.trim()) {
+                return Some(Elsewhere { rules, convert });
+            }
+        }
+    }
+    None
+}
+
+impl Elsewhere {
+    /// The time there.
+    pub fn local(&self, ts: i64) -> Tm {
+        let (mut st, mut out) = (sys::SYSTEMTIME::default(), sys::SYSTEMTIME::default());
+        unsafe {
+            sys::FileTimeToSystemTime(&unix_to_filetime(ts), &mut st);
+            if (self.convert)(&self.rules, &st, &mut out) == 0 {
+                out = st;
+            }
+        }
+        tm_of(&out)
+    }
+}
+
+/// What a clock showing `t` has counted since 1970, in seconds: the
+/// difference between two of these, for the same moment, is how far apart
+/// the two clocks stand.
+pub fn reading(t: &Tm) -> i64 {
+    days_from_civil(t.year, t.month, t.day) * 86_400 + (t.hour * 3600 + t.min * 60 + t.sec) as i64
+}
+
+/// The name Windows keeps a tz database zone under: "Asia/Tokyo" is "Tokyo
+/// Standard Time".  ICU knows, and Windows carries ICU -- which is some
+/// thirty megabytes, so this is for a child that is about to exit to ask,
+/// never the program that stays.
+pub fn windows_zone(tz: &str) -> Option<String> {
+    type Lookup = unsafe extern "C" fn(*const u16, i32, *mut u16, i32, *mut i32) -> i32;
+    let name = sys::wide(tz);
+    let mut out = [0u16; 128];
+    let mut status = 0;
+    // icu.dll is all of ICU, since Windows 10 1903; before that it came in two
+    let lookup = ["icu.dll", "icuin.dll"].iter().find_map(|dll| unsafe { sys::proc_address(dll, b"ucal_getWindowsTimeZoneID\0") })?;
+    // SAFETY: the signature is ICU's; the lengths given are the buffers'.
+    let len = unsafe {
+        let lookup: Lookup = core::mem::transmute(lookup);
+        lookup(name.as_ptr(), -1, out.as_mut_ptr(), out.len() as i32, &mut status)
+    };
+    // an error is above zero; a zone Windows has no name for comes back empty
+    (status <= 0 && len > 0 && (len as usize) < out.len()).then(|| sys::from_wide(&out))
+}
+
 /// "2026-11-11 17:30:45" as local time; for the test harness.
 pub fn parse_local(s: &str) -> Option<i64> {
     let (date, time) = s.trim().split_once(' ')?;
