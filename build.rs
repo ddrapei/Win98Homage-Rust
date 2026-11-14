@@ -1,4 +1,4 @@
-//! Compiles the five widgets' skins into static Rust tables.
+//! Compiles the six widgets' skins into static Rust tables.
 //!
 //! The .ini files in `skins/` are the single source of truth for every
 //! pixel: each meter's position, shapes, colours, text options and mouse
@@ -505,13 +505,18 @@ fn dyn_weather(n: &str) -> bool {
     matches!(n, "TempNow" | "Condition" | "HighLowText" | "Lat" | "Lon")
 }
 
-const SKINS: [SkinDef; 5] = [
+fn dyn_disk(n: &str) -> bool {
+    matches!(n, "DriveKind" | "DriveName" | "UsedSize" | "UsedPct" | "FreeSize" | "FreePct" | "Capacity")
+}
+
+const SKINS: [SkinDef; 6] = [
     SkinDef { module: "datetime", file: "Win98DateTime.ini", dynamic: dyn_datetime },
     SkinDef { module: "resources", file: "Win98Resources.ini", dynamic: dyn_resources },
     SkinDef { module: "notes", file: "Win98Notes.ini", dynamic: dyn_notes },
     SkinDef { module: "weather", file: "Win98Weather.ini", dynamic: dyn_weather },
     // nothing in the rain's skin changes while it runs: rain.rs draws the one meter that moves
     SkinDef { module: "rain", file: "Win98Rain.ini", dynamic: |_| false },
+    SkinDef { module: "disk", file: "Win98Disk.ini", dynamic: dyn_disk },
 ];
 
 fn compile_skin(def: &SkinDef, root: &Path, fonts: &mut Vec<(String, bool)>, out: &mut String) {

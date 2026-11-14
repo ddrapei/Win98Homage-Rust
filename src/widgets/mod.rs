@@ -8,6 +8,7 @@
 pub mod widget;
 
 pub mod datetime;
+pub mod disk;
 pub mod notes;
 pub mod rain;
 pub mod resources;

@@ -20,6 +20,10 @@
 //!                                      do.notes2 and type.notes2 for it
 //!   weather=9.3,3,0,10.1,4.9,Place     temp, code, is_day, max, min, city
 //!   rain=2.5                           seconds into the shower (always the same one)
+//!   disk=C,3,Windows,511000000000,118000000000
+//!                                      letter, kind (2 removable, 3 fixed,
+//!                                      4 network, 5 disc), label, bytes in
+//!                                      all, bytes free
 //!   set.Notes.Created=30 Jul 2026      any settings.ini value
 //!   do.datetime=SetPage 1;Select 12    commands to run before drawing
 //!   type.notes=press 60 50;type milk;key Shift+Home
@@ -37,6 +41,7 @@ use std::path::{Path, PathBuf};
 use crate::canvas::Canvas;
 use crate::clock;
 use crate::datetime::DateTime;
+use crate::disk::Disk;
 use crate::keys::Key;
 use crate::notes::{self, Notes};
 use crate::rain::Rain;
@@ -216,6 +221,15 @@ pub fn run(args: &[String]) -> i32 {
         let mut w = Rain::new(&ctx);
         w.set_fixed(get("rain").and_then(|v| v.parse().ok()).unwrap_or(2.5));
         render(&w, &mut text, &dir.join("rain.bmp"));
+    }
+    {
+        // never this machine's drives: with no figures given, a drive that has none
+        let mut w = Disk::new(&ctx);
+        let p: Vec<&str> = get("disk").unwrap_or("C,3,,0,0").split(',').map(str::trim).collect();
+        let num = |i: usize| p.get(i).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let letter = p.first().and_then(|s| s.bytes().next()).unwrap_or(b'C');
+        w.set_fixed(letter, num(1) as u32, p.get(2).copied().unwrap_or(""), num(3), num(4));
+        render(&w, &mut text, &dir.join("disk.bmp"));
     }
     0
 }

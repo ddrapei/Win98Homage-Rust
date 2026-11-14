@@ -1,7 +1,7 @@
 # Win98 Widgets
 
-Five Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
-Weather and Rain Window — as one small Rust program. There is one of each, and as many
+Six Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
+Weather, Rain Window and Disk Space — as one small Rust program. There is one of each, and as many
 more Sticky Notes as you ask for.
 
 | | |
@@ -11,7 +11,7 @@ more Sticky Notes as you ask for.
 | run-time dependencies    | none |
 | program                  | one 700 KB .exe |
 
-Measured with the first four widgets showing, before Rain Window was added.
+Measured with the first four widgets showing, before Rain Window and Disk Space were added.
 
 ## Build and run
 
@@ -27,12 +27,12 @@ Run the .exe. Nothing is installed: it can live anywhere. Only one copy runs at 
 
 Each widget's layout is an `.ini` file in [`skins/`](skins): a `[Variables]` section for the
 palette and the layout figures, then one section per meter — a shape, a line of text or an
-image — in the order they are painted. `build.rs` compiles the five of them into static
+image — in the order they are painted. `build.rs` compiles the six of them into static
 tables — every meter's position, shapes, colours, text options and mouse actions — so
 **the `.ini` files are the single source of truth for the layout**. Change a colour or move
 a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
 runs: the logic behind each widget is plain Rust in `src/widgets/` (`datetime.rs`,
-`resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`), and a mouse action in a skin, such as
+`resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`), and a mouse action in a skin, such as
 `LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
 Text is laid out by DirectWrite and rasterised with aliased glyphs. Shapes are filled by a
@@ -100,6 +100,13 @@ window, the size of the Sticky Note, to be looked at. Right-click it for how har
 rains — *Light*, *Steady*, *Heavy* — and to *Pause* it; both are kept in `settings.ini`
 as `Rate` and `Paused`. Its colours are the `Rain*` variables in `skins/Win98Rain.ini`.
 
+**Disk Space** shows how full one drive is: the space used and free on it, its capacity,
+and the two as the pie from a drive's Properties page — the free space is the pale slice.
+The arrow buttons beside the drive's name step to the drive before and the one after, as
+does the wheel over the name; right-click has every drive by its letter. The choice is
+kept in `settings.ini` as `Drive`; with none made it is the drive Windows is on. The
+pie's colours are the `Pie*` variables in `skins/Win98Disk.ini`.
+
 **Position** (right-click → Position): *On desktop* (default) keeps the widgets behind
 every window; *Normal*; *Always on top*.
 
@@ -129,6 +136,10 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
   its pane only, from a timer that runs only while there is rain to show — not while it
   is paused or closed, nor while the workstation is locked. A frame takes about a fifth
   of a millisecond to draw.
+- **Disk Space** asks a drive on this machine for its figures every five seconds, and
+  repaints only when a figure it shows has changed. A network drive, a disc or a card can
+  take many seconds to answer, so those are asked every half minute from a thread that
+  lasts as long as the one question: no widget waits for a drive.
 - The note is wrapped by the widths DirectWrite gives for the font it is drawn in, and
   drawn by one piece of code whether or not it is being typed on, so nothing on the sheet
   moves when you click in.
@@ -137,7 +148,7 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 ## Layout of the source
 
 ```text
-skins/       the five layouts (.ini), the weather icons and the tray icon
+skins/       the six layouts (.ini), the weather icons and the tray icon
 build.rs     those .ini files compiled into static tables
 src/
   main.rs      the way in, and the list of modules
@@ -145,13 +156,14 @@ src/
                tray, the once-a-second tick, the frames in between
   tools/       for working on the program
     dump         off-screen rendering, for checking a change
-  widgets/     what a widget is, and the five there are
+  widgets/     what a widget is, and the six there are
     widget       the Widget trait: all the host knows about a widget
     datetime     Date/Time Properties
     resources    Resource Meter
     notes        Sticky Note (also: which sections of settings.ini are notes)
     weather      Weather (and the child that fetches it)
     rain         Rain Window (the one that is animated)
+    disk         Disk Space
   input/       typing
     keys         the window that holds the keyboard for a widget
     editor       a text and what the keys do to it: the note's, the city field's

@@ -432,6 +432,14 @@ pub const KEY_READ: u32 = 0x20019;
 pub const KEY_SET_VALUE: u32 = 0x0002;
 pub const REG_SZ: u32 = 1;
 
+pub const DRIVE_REMOVABLE: u32 = 2;
+pub const DRIVE_FIXED: u32 = 3;
+pub const DRIVE_REMOTE: u32 = 4;
+pub const DRIVE_CDROM: u32 = 5;
+pub const DRIVE_RAMDISK: u32 = 6;
+/// A drive with nothing in it fails the call, instead of asking the user for a disk.
+pub const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+
 pub const ERROR_ALREADY_EXISTS: u32 = 183;
 pub const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
 
@@ -553,6 +561,14 @@ unsafe extern "system" {
     pub fn GlobalLock(mem: HANDLE) -> *mut c_void;
     pub fn GlobalUnlock(mem: HANDLE) -> BOOL;
     pub fn GlobalSize(mem: HANDLE) -> usize;
+    pub fn GetLogicalDrives() -> u32;
+    pub fn GetDriveTypeW(root: PCWSTR) -> u32;
+    pub fn GetDiskFreeSpaceExW(root: PCWSTR, free_to_caller: *mut u64, total: *mut u64, free: *mut u64) -> BOOL;
+    pub fn GetVolumeInformationW(
+        root: PCWSTR, name: *mut u16, name_len: u32, serial: *mut u32,
+        max_component: *mut u32, flags: *mut u32, file_system: *mut u16, file_system_len: u32,
+    ) -> BOOL;
+    pub fn SetThreadErrorMode(mode: u32, old: *mut u32) -> BOOL;
 }
 
 #[link(name = "shell32")]

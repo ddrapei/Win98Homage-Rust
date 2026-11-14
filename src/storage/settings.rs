@@ -257,6 +257,11 @@ TempUnit={unit}
 ManualLat={lat}
 ManualLon={lon}
 ManualLocation={place}
+
+[Disk]
+Enabled=1
+; the drive shown: its letter.  Empty is the drive Windows is on
+Drive={drive}
 ",
         week_start = dt.var("WeekStart"),
         use24 = dt.var("Use24Hour"),
@@ -273,6 +278,7 @@ ManualLocation={place}
         lat = wx.var("ManualLat"),
         lon = wx.var("ManualLon"),
         place = wx.var("ManualLocation"),
+        drive = skin::disk::SKIN.var("Drive"),
     )
 }
 
