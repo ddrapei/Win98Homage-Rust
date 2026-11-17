@@ -42,6 +42,7 @@ use crate::keys::{self, Input, Key, Keys};
 use crate::notes::{self, Notes};
 use crate::rain::Rain;
 use crate::resources::Resources;
+use crate::screens::{self, work_area};
 use crate::settings::Settings;
 use crate::skin::{self, Act, Ev, Hooks, Skin};
 use crate::sys::*;
@@ -192,8 +193,16 @@ struct Slot {
     /// which no other window is given.
     deleted: bool,
     hwnd: HWND,
+    /// Where the window is.
     x: i32,
     y: i32,
+    /// Where it was put -- dragged to, or given when it was made -- and what
+    /// settings.ini says.  It is shown there whenever the monitors there are
+    /// show it whole there, and as near as they let it be when they do not.
+    /// Only putting it somewhere changes this; the monitors coming and going
+    /// never do, so a window comes back to its place with the monitor it was
+    /// on.
+    put: (i32, i32),
     /// The meter the pointer is over, if it is one that reacts to that.
     hover: Option<usize>,
     tracking: bool,
@@ -202,7 +211,7 @@ struct Slot {
 
 impl Slot {
     fn new(kind: Kind, section: &str, title: String) -> Slot {
-        Slot { kind, section: section.to_owned(), title, deleted: false, hwnd: 0, x: 0, y: 0, hover: None, tracking: false, seen: Vec::new() }
+        Slot { kind, section: section.to_owned(), title, deleted: false, hwnd: 0, x: 0, y: 0, put: (0, 0), hover: None, tracking: false, seen: Vec::new() }
     }
 }
 
@@ -315,25 +324,17 @@ fn register_session_notifications(wnd: HWND) {
     }
 }
 
-fn work_area(around: &RECT) -> RECT {
-    unsafe {
-        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, rcMonitor: RECT::default(), rcWork: RECT::default(), dwFlags: 0 };
-        GetMonitorInfoW(MonitorFromRect(around, MONITOR_DEFAULTTONEAREST), &mut info);
-        info.rcWork
-    }
+/// The window of a `kind` at (x, y), as a rectangle on the screens.
+fn window_rect(kind: Kind, x: i32, y: i32) -> RECT {
+    let skin = kind.skin();
+    RECT { left: x, top: y, right: x + skin.w, bottom: y + skin.h }
 }
 
-fn virtual_screen() -> RECT {
-    unsafe {
-        let (x, y) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
-        RECT { left: x, top: y, right: x + GetSystemMetrics(SM_CXVIRTUALSCREEN), bottom: y + GetSystemMetrics(SM_CYVIRTUALSCREEN) }
-    }
-}
-
-/// Keep a window of w x h wholly on the screens.
-fn clamp_to_screen(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
-    let v = virtual_screen();
-    (x.clamp(v.left, (v.right - w).max(v.left)), y.clamp(v.top, (v.bottom - h).max(v.top)))
+/// Where a window of a `kind` meant for (x, y) can go and be seen whole: there,
+/// or the least distance from there onto the monitors there are now.
+fn on_screen(kind: Kind, x: i32, y: i32) -> (i32, i32) {
+    let (dx, dy) = screens::keep_on(&window_rect(kind, x, y), &screens::work_areas());
+    (x + dx, y + dy)
 }
 
 fn autostart_command() -> String {
@@ -532,10 +533,10 @@ impl App {
             widget.tick(&mut ctx);
             widgets.0[i] = Some(widget);
         }
-        let skin = kind.skin();
-        let (x, y) = clamp_to_screen(self.slots[i].x, self.slots[i].y, skin.w, skin.h);
-        self.slots[i].x = x;
-        self.slots[i].y = y;
+        // Running now, so laid out with the others: where it was put, or
+        // where it can be seen.
+        self.lay_out();
+        let (skin, x, y) = (kind.skin(), self.slots[i].x, self.slots[i].y);
         unsafe {
             let wnd = CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -598,12 +599,38 @@ impl App {
         }
     }
 
-    /// Where a window sits, written down for the next run.
+    /// Where a window sits now is where it has been put: its place from now
+    /// on, written down for the next run.
     fn keep_place(&mut self, i: usize) {
-        let slot = &self.slots[i];
+        let slot = &mut self.slots[i];
+        slot.put = (slot.x, slot.y);
         if !slot.deleted {
-            self.settings.set_int(&slot.section, "X", slot.x);
-            self.settings.set_int(&slot.section, "Y", slot.y);
+            self.settings.set_int(&slot.section, "X", slot.put.0);
+            self.settings.set_int(&slot.section, "Y", slot.put.1);
+        }
+    }
+
+    /// Show every running widget where it was put -- or, where the monitors
+    /// there are now would lose it, the least distance from there that they
+    /// show it whole, together with any it was put against (see
+    /// `screens::settle`).  Where they were put is left as it was.
+    fn lay_out(&mut self) {
+        self.lay_out_on(&screens::work_areas());
+    }
+
+    fn lay_out_on(&mut self, work_areas: &[RECT]) {
+        let running: Vec<usize> = (0..self.slots.len()).filter(|&i| self.widgets.get(i).is_some()).collect();
+        let wanted: Vec<RECT> = running.iter().map(|&i| window_rect(self.slots[i].kind, self.slots[i].put.0, self.slots[i].put.1)).collect();
+        for (&i, (dx, dy)) in running.iter().zip(screens::settle(&wanted, work_areas)) {
+            let slot = &mut self.slots[i];
+            let (x, y) = (slot.put.0 + dx, slot.put.1 + dy);
+            if (x, y) == (slot.x, slot.y) {
+                continue;
+            }
+            (slot.x, slot.y) = (x, y);
+            if slot.hwnd != 0 {
+                unsafe { SetWindowPos(slot.hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+            }
         }
     }
 
@@ -617,7 +644,6 @@ impl App {
     /// touch, and one above the other they are APART, as when first laid out.
     fn room_beside(&self, b: usize) -> (i32, i32) {
         let base = &self.slots[b];
-        let skin = base.kind.skin();
         let own = frame(base.kind, base.x, base.y);
         let work = work_area(&RECT { left: own.x0, top: own.y0, right: own.x1, bottom: own.y1 });
         let free = |&(x, y): &(i32, i32)| {
@@ -630,7 +656,7 @@ impl App {
             .flat_map(|k| [(-k, 0), (k, 0), (0, k), (0, -k)])
             .map(|(i, j)| (base.x + i * dx, base.y + j * dy))
             .find(free)
-            .unwrap_or_else(|| clamp_to_screen(base.x + CASCADE, base.y + CASCADE, skin.w, skin.h))
+            .unwrap_or_else(|| on_screen(base.kind, base.x + CASCADE, base.y + CASCADE))
     }
 
     /// The notes there are: the first, then the others in the order of their
@@ -659,7 +685,8 @@ impl App {
         };
         // Something may have been put where it was since: it would come back
         // underneath that, and not be seen.  Then it goes where a new one would.
-        let own = frame(Kind::Notes, self.slots[closed].x, self.slots[closed].y);
+        let (x, y) = self.slots[closed].put;
+        let own = frame(Kind::Notes, x, y);
         if self.slots.iter().any(|s| s.hwnd != 0 && frame(s.kind, s.x, s.y).intersects(&own)) {
             let beside = self.note_to_close(from).unwrap_or(closed);
             (self.slots[closed].x, self.slots[closed].y) = self.room_beside(beside);
@@ -1117,23 +1144,8 @@ impl App {
             if near(x, work.right - w) { x = work.right - w }
             if near(y, work.bottom - h) { y = work.bottom - h }
         }
-        clamp_to_screen(x, y, w, h)
-    }
-
-    /// After the screens change: nothing may be left where it cannot be seen.
-    fn keep_on_screen(&mut self) {
-        for slot in &mut self.slots {
-            if slot.hwnd == 0 {
-                continue;
-            }
-            let skin = slot.kind.skin();
-            let (x, y) = clamp_to_screen(slot.x, slot.y, skin.w, skin.h);
-            if (x, y) != (slot.x, slot.y) {
-                slot.x = x;
-                slot.y = y;
-                unsafe { SetWindowPos(slot.hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
-            }
-        }
+        // Not dropped where no monitor shows it, nor half off one.
+        on_screen(self.slots[i].kind, x, y)
     }
 
     // ---- menus ---------------------------------------------------------------------
@@ -1327,6 +1339,7 @@ impl App {
             let placed = self.settings.get(section, "X").is_some();
             let (x, y) = (self.settings.int(section, "X", x), self.settings.int(section, "Y", y));
             (self.slots[i].x, self.slots[i].y) = (x, y);
+            self.slots[i].put = (x, y);
             if !placed {
                 self.keep_place(i);
             }
@@ -1621,6 +1634,8 @@ unsafe extern "system" fn main_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                         }
                     }
                     PBT_APMRESUMEAUTOMATIC => {
+                        // put to sleep at one desk and woken at another
+                        app.lay_out();
                         app.tick();
                         app.repaint_all();
                     }
@@ -1628,8 +1643,12 @@ unsafe extern "system" fn main_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 });
                 return 1;
             }
+            // A monitor plugged in, taken away, moved or rescaled, or the
+            // taskbar moved: lay the widgets out again for the monitors there
+            // are now, from where they were put -- so one that had to move
+            // goes back to its place once its monitor does.
             WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
-                with_app(|app| app.keep_on_screen());
+                with_app(|app| app.lay_out());
             }
             WM_QUERYENDSESSION => return 1,
             WM_ENDSESSION if wp != 0 => {
@@ -1773,9 +1792,9 @@ mod tests {
         app.menu(Some(i)).iter().any(|m| m.1 == label)
     }
 
-    /// As if slot `i` had a window, showing at (x, y).
+    /// As if slot `i` had a window, put at (x, y) and showing there.
     fn show(app: &mut App, i: usize, x: i32, y: i32) {
-        (app.slots[i].hwnd, app.slots[i].x, app.slots[i].y) = (1, x, y);
+        (app.slots[i].hwnd, app.slots[i].x, app.slots[i].y, app.slots[i].put) = (1, x, y, (x, y));
     }
 
     #[test]
@@ -1880,6 +1899,7 @@ mod tests {
         let (x, y) = ((work.left + work.right - skin.w) / 2, (work.top + work.bottom - skin.h) / 2);
         // where it was left, with nothing there
         (app.slots[NOTE].x, app.slots[NOTE].y) = (x, y);
+        app.keep_place(NOTE);
         app.more_notes(None);
         assert_eq!((app.slots[NOTE].x, app.slots[NOTE].y), (x, y));
         // the rain has been put there since: beside it, then
@@ -1909,6 +1929,53 @@ mod tests {
         // a widget that only reaches into that place is as much in the way
         show(&mut app, WEATHER, x + step + 40, y - 40);
         assert_ne!(app.room_beside(NOTE), (x + step, y));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn widgets_lost_with_a_monitor_are_shown_and_come_back_with_it() {
+        let (mut app, dir) = app("monitors");
+        let rect = |left, top, right, bottom| RECT { left, top, right, bottom };
+        // Where they were put: a laptop with a monitor to its left.  Where they
+        // went missing: the same laptop with two monitors above it, and
+        // nothing to its left.
+        let laptop = rect(0, 0, 960, 552);
+        let home = [laptop, rect(-1920, 0, 0, 1080)];
+        let away = [laptop, rect(-725, -864, 811, 0), rect(811, -864, 2347, 0)];
+
+        // two notes on the monitor at the left, frame against frame
+        app.new_note(Some(NOTE));
+        let (first, second) = (NOTE, FIXED.len());
+        app.set_enabled(first, true);
+        let skin = Kind::Notes.skin();
+        let step = skin.w - 2 * skin.int("Pad", 12);
+        let places = [(first, (-900, 400)), (second, (-900 + step, 400))];
+        for (i, (x, y)) in places {
+            (app.slots[i].x, app.slots[i].y) = (x, y);
+            app.keep_place(i);
+        }
+        let shown = |app: &App, i: usize| (app.slots[i].x, app.slots[i].y);
+        app.lay_out_on(&home);
+        assert!(places.iter().all(|&(i, put)| shown(&app, i) == put));
+
+        // away: each wholly on a monitor, side by side as they were put
+        app.lay_out_on(&away);
+        for (i, _) in places {
+            let (x, y) = shown(&app, i);
+            assert_eq!(screens::keep_on(&window_rect(Kind::Notes, x, y), &away), (0, 0), "slot {i} at {x},{y}");
+        }
+        let ((x1, y1), (x2, y2)) = (shown(&app, first), shown(&app, second));
+        assert_eq!((x2 - x1, y2 - y1), (step, 0));
+        // and where they were put is still where they were put
+        for (i, (x, y)) in places {
+            assert_eq!(app.slots[i].put, (x, y));
+            let section = &app.slots[i].section;
+            assert_eq!((app.settings.int(section, "X", 0), app.settings.int(section, "Y", 0)), (x, y));
+        }
+
+        // home again: back in their places
+        app.lay_out_on(&home);
+        assert!(places.iter().all(|&(i, put)| shown(&app, i) == put));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

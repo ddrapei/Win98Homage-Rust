@@ -27,6 +27,7 @@ pub type PCWSTR = *const u16;
 
 pub type WNDPROC = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
 pub type WINEVENTPROC = unsafe extern "system" fn(isize, u32, HWND, i32, i32, u32, u32);
+pub type MONITORENUMPROC = unsafe extern "system" fn(isize, HDC, *mut RECT, LPARAM) -> BOOL;
 
 #[repr(C)]
 pub struct WNDCLASSEXW {
@@ -396,10 +397,6 @@ pub const WHEEL_DELTA: i32 = 120;
 
 pub const SM_CXDRAG: i32 = 68;
 pub const SM_CYDRAG: i32 = 69;
-pub const SM_XVIRTUALSCREEN: i32 = 76;
-pub const SM_YVIRTUALSCREEN: i32 = 77;
-pub const SM_CXVIRTUALSCREEN: i32 = 78;
-pub const SM_CYVIRTUALSCREEN: i32 = 79;
 pub const MONITOR_DEFAULTTONEAREST: u32 = 2;
 
 pub const MF_STRING: u32 = 0x0000;
@@ -511,6 +508,7 @@ unsafe extern "system" {
     pub fn GetSystemMetrics(index: i32) -> i32;
     pub fn MonitorFromRect(rect: *const RECT, flags: u32) -> isize;
     pub fn GetMonitorInfoW(monitor: isize, info: *mut MONITORINFO) -> BOOL;
+    pub fn EnumDisplayMonitors(dc: HDC, clip: *const RECT, proc_: MONITORENUMPROC, data: LPARAM) -> BOOL;
     pub fn CreatePopupMenu() -> HMENU;
     pub fn AppendMenuW(menu: HMENU, flags: u32, id: usize, text: PCWSTR) -> BOOL;
     pub fn TrackPopupMenu(menu: HMENU, flags: u32, x: i32, y: i32, reserved: i32, wnd: HWND, rect: *const RECT) -> BOOL;

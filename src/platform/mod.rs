@@ -4,4 +4,5 @@
 //! The bottom of the program.  These depend on nothing above them.
 
 pub mod clock;
+pub mod screens;
 pub mod sys;

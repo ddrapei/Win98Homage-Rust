@@ -58,6 +58,12 @@ them).
 | tray icon | the same menu — this is how a closed widget is brought back |
 | `X` | closes that widget (it stops costing anything); `?` says what it does |
 
+Each widget stays where you put it, on whichever monitors you have. When a monitor is
+unplugged, moved or rescaled, any widget it would hide is moved to the nearest monitor,
+by as little as needed and together with the widgets touching it, so a layout arrives
+in one piece. Its saved place is left alone: when the monitor comes back, the widget
+goes back to that place.
+
 In the widgets themselves: tabs, month list, calendar selection, scroll to browse months,
 the 12/24-hour field, checkboxes, the scrollbar, the paper swatch and the ruled-paper
 button, typing on the note with save-as-you-type and a `.bak`, and the weather's city
@@ -176,6 +182,7 @@ src/
     text         DirectWrite text, rasterised into the canvas
   platform/    Windows
     sys          the Win32 declarations all of it uses
+    screens      the monitors, and keeping a widget on them
     clock        time and time zones
 ```
 
