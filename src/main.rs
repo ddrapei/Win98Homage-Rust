@@ -56,6 +56,8 @@
 //!   platform/      Windows
 //!     sys            the Win32 declarations all of it uses
 //!     screens        the monitors, and keeping a window on them
+//!     grid           the margin and the gap: snapping to them, and
+//!                    re-spacing a layout when they change
 //!     clock          time and time zones
 //! ```
 
@@ -77,7 +79,7 @@ mod widgets;
 use graphics::{canvas, skin, text};
 use input::{editor, keys};
 use net::{geocode, http};
-use platform::{clock, screens, sys};
+use platform::{clock, grid, screens, sys};
 use storage::{settings, usage};
 use tools::dump;
 use widgets::{datetime, disk, field, notes, rain, resources, weather, widget, world};

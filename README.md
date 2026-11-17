@@ -53,16 +53,29 @@ them).
 
 | | |
 |--|--|
-| drag anywhere | move a widget; it snaps to screen edges and to the others (hold Ctrl or Shift not to). The note's text is the exception: dragging there selects |
-| right-click | menu: the widget's own options, Position, Snap, Lock, Close, the list of widgets (with *Sticky Note +* and *−* for the notes), Start with Windows, settings, Exit |
+| drag anywhere | move a widget; it snaps onto the grid — the screen margin and the gap between widgets — and into line with the others (hold Ctrl or Shift not to). The note's text is the exception: dragging there selects |
+| right-click | menu: the widget's own options, Position, Snap, Screen margin, Gap between widgets, Lock, Close, the list of widgets (with *Sticky Note +* and *−* for the notes), Start with Windows, settings, Exit |
 | tray icon | the same menu — this is how a closed widget is brought back |
 | `X` | closes that widget (it stops costing anything); `?` says what it does |
 
 Each widget stays where you put it, on whichever monitors you have. When a monitor is
 unplugged, moved or rescaled, any widget it would hide is moved to the nearest monitor,
-by as little as needed and together with the widgets touching it, so a layout arrives
-in one piece. Its saved place is left alone: when the monitor comes back, the widget
-goes back to that place.
+by as little as needed and together with the widgets near it, so a layout arrives in
+one piece. Its saved place is left alone: when the monitor comes back, the widget goes
+back to that place.
+
+**The grid.** Widgets are laid out on two figures, both measured between the frames
+you see: the *screen margin*, bare screen between a widget and the edge of its monitor
+(12 px unless changed), and the *gap between widgets* (24 px). Right-click → *Screen
+margin* or *Gap between widgets* offers 0 to 32 px; any other figure, up to 200, can be
+written into `settings.ini` as `ScreenMargin=` and `WidgetGap=` under `[General]` and
+picked up with *Reload settings*. When one changes, the widgets on the grid move with
+it: a widget against the screen's edge stays against it, the ones beside it or under it
+follow on at the new gap, and ones lined up with each other stay lined up. "On the grid"
+means no further from the edge or the neighbour than the old figure and 10 px more, near
+enough to have been snapped there. A widget placed further away stays where it is, and
+so does a closed one. The first layout and a new note's place follow the same two
+figures. A widget is kept at least the margin inside the screen.
 
 In the widgets themselves: tabs, month list, calendar selection, scroll to browse months,
 the 12/24-hour field, checkboxes, the scrollbar, the paper swatch and the ruled-paper
@@ -183,6 +196,7 @@ src/
   platform/    Windows
     sys          the Win32 declarations all of it uses
     screens      the monitors, and keeping a widget on them
+    grid         the margin and the gap: snapping to them, and re-spacing a layout
     clock        time and time zones
 ```
 

@@ -298,6 +298,7 @@ pub const WM_SETCURSOR: u32 = 0x0020;
 pub const WM_MOUSEACTIVATE: u32 = 0x0021;
 pub const WM_SETFONT: u32 = 0x0030;
 pub const WM_WINDOWPOSCHANGING: u32 = 0x0046;
+pub const WM_NCHITTEST: u32 = 0x0084;
 pub const WM_DISPLAYCHANGE: u32 = 0x007E;
 pub const WM_NCDESTROY: u32 = 0x0082;
 pub const WM_KEYDOWN: u32 = 0x0100;
@@ -340,6 +341,7 @@ pub const VK_SHIFT: i32 = 0x10;
 pub const VK_MENU: i32 = 0x12;
 
 pub const HTCLIENT: i32 = 1;
+pub const HTTRANSPARENT: LRESULT = -1;
 pub const CF_UNICODETEXT: u32 = 13;
 pub const GMEM_MOVEABLE: u32 = 0x0002;
 

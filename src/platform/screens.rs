@@ -50,17 +50,18 @@ fn work_area_of(monitor: isize) -> Option<RECT> {
 /// One that is seen whole -- on one screen, or across several that meet --
 /// stays where it is: (0, 0).  The others are lost, in part or altogether,
 /// and are brought back the least distance that will do, in the groups they
-/// stand in: rectangles that touch or overlap move as one, so that what was
-/// laid out together arrives laid out the same.  A group goes to the nearest
-/// screen that has room for all of it; with no such screen it goes to the
-/// nearest, and each of its rectangles is then pushed inside that one.
+/// stand in: rectangles that touch or overlap, or stand no more than `near`
+/// apart, move as one, so that what was laid out together arrives laid out
+/// the same.  A group goes to the nearest screen that has room for all of
+/// it; with no such screen it goes to the nearest, and each of its
+/// rectangles is then pushed inside that one.
 ///
 /// With no screens at all there is nowhere to bring anything, and nothing
 /// moves.
-pub fn settle(wanted: &[RECT], screens: &[RECT]) -> Vec<(i32, i32)> {
+pub fn settle(wanted: &[RECT], screens: &[RECT], near: i32) -> Vec<(i32, i32)> {
     let mut moves = vec![(0, 0); wanted.len()];
     let lost: Vec<usize> = (0..wanted.len()).filter(|&i| !seen_whole(&wanted[i], screens)).collect();
-    for group in groups(&lost, wanted) {
+    for group in groups(&lost, wanted, near) {
         let Some(around) = group.iter().map(|&i| wanted[i]).reduce(|a, b| bounds(&a, &b)) else { continue };
         let Some((screen, (dx, dy))) = nearest(&around, screens) else { break };
         for i in group {
@@ -74,7 +75,7 @@ pub fn settle(wanted: &[RECT], screens: &[RECT]) -> Vec<(i32, i32)> {
 
 /// How far the one rectangle `wanted` has to move to be seen whole.
 pub fn keep_on(wanted: &RECT, screens: &[RECT]) -> (i32, i32) {
-    settle(core::slice::from_ref(wanted), screens)[0]
+    settle(core::slice::from_ref(wanted), screens, 0)[0]
 }
 
 /// Is every part of `r` on one screen or another?
@@ -103,12 +104,14 @@ fn outside(r: &RECT, screen: &RECT) -> Vec<RECT> {
 }
 
 /// `lost`, as the groups its rectangles stand in: each touches or overlaps
-/// another of its group, and none of any other.
-fn groups(lost: &[usize], rects: &[RECT]) -> Vec<Vec<usize>> {
+/// another of its group, or is no more than `near` from it, and none of any
+/// other.
+fn groups(lost: &[usize], rects: &[RECT], near: i32) -> Vec<Vec<usize>> {
+    let reach = |r: &RECT| RECT { left: r.left - near, top: r.top - near, right: r.right + near, bottom: r.bottom + near };
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for &i in lost {
         // whatever groups this one touches are one group, with it in
-        let (joined, mut apart): (Vec<_>, Vec<_>) = groups.into_iter().partition(|group| group.iter().any(|&j| meet(&rects[i], &rects[j])));
+        let (joined, mut apart): (Vec<_>, Vec<_>) = groups.into_iter().partition(|group| group.iter().any(|&j| meet(&reach(&rects[i]), &rects[j])));
         apart.push(joined.into_iter().flatten().chain([i]).collect());
         groups = apart;
     }
@@ -171,7 +174,7 @@ mod tests {
     }
 
     fn settled(wanted: &[RECT], screens: &[RECT]) -> Vec<RECT> {
-        wanted.iter().zip(settle(wanted, screens)).map(|(r, by)| at(r, by)).collect()
+        wanted.iter().zip(settle(wanted, screens, 0)).map(|(r, by)| at(r, by)).collect()
     }
 
     fn within(r: &RECT, screen: &RECT) -> bool {
@@ -184,7 +187,7 @@ mod tests {
         let across_two = rect(700, -100, 900, -20); // UP_LEFT into UP_RIGHT
         let down_a_join = rect(100, -100, 300, 100); // UP_LEFT into LAPTOP
         let filling_one = LAPTOP;
-        assert_eq!(settle(&[on_one, across_two, down_a_join, filling_one], &DESK), [(0, 0); 4]);
+        assert_eq!(settle(&[on_one, across_two, down_a_join, filling_one], &DESK, 0), [(0, 0); 4]);
     }
 
     #[test]
@@ -212,7 +215,7 @@ mod tests {
     fn what_was_laid_out_together_arrives_together() {
         // three in an L, touching, where a monitor to the left used to be
         let (a, b, c) = (rect(-960, 423, -556, 812), rect(-556, 423, -342, 667), rect(-960, 812, -746, 1026));
-        let moves = settle(&[a, b, c], &DESK);
+        let moves = settle(&[a, b, c], &DESK, 0);
         assert!(moves[0] != (0, 0) && moves.iter().all(|&by| by == moves[0]), "{moves:?}");
         // on the one screen with room for the three of them as they stood
         assert!(settled(&[a, b, c], &DESK).iter().all(|r| within(r, &UP_LEFT)));
@@ -222,10 +225,21 @@ mod tests {
     fn groups_that_stand_apart_move_apart() {
         // one just over the laptop's foot, one far off to the right
         let (near, far) = (rect(100, 500, 300, 600), rect(5000, -500, 5200, -300));
-        assert_eq!(settle(&[near, far], &DESK), [(0, -48), (-2853, 0)]);
+        assert_eq!(settle(&[near, far], &DESK, 0), [(0, -48), (-2853, 0)]);
         // and one that can be seen is not moved by a lost one touching it
         let (seen, lost) = (rect(0, 300, 200, 500), rect(-200, 300, 0, 500));
-        assert_eq!(settle(&[seen, lost], &DESK)[0], (0, 0));
+        assert_eq!(settle(&[seen, lost], &DESK, 0)[0], (0, 0));
+    }
+
+    #[test]
+    fn what_stands_near_enough_arrives_together_too() {
+        // two of the L, ten apart: alone, each to its own screen; as near as
+        // that, both to one
+        let (a, b) = (rect(-960, 423, -556, 812), rect(-546, 423, -342, 667));
+        let apart = settle(&[a, b], &DESK, 0);
+        assert_ne!(apart[0], apart[1]);
+        let together = settle(&[a, b], &DESK, 10);
+        assert!(together[0] != (0, 0) && together[0] == together[1], "{together:?}");
     }
 
     #[test]
@@ -251,7 +265,7 @@ mod tests {
         let wanted = [rect(-960, 423, -556, 812), rect(-556, 423, -342, 667), rect(3000, 3000, 3100, 3100), rect(10, 10, 60, 60)];
         for screens in [&DESK[..], &[LAPTOP], &[rect(0, 0, 300, 300)]] {
             let found = settled(&wanted, screens);
-            assert_eq!(settle(&found, screens), [(0, 0); 4], "{screens:?}");
+            assert_eq!(settle(&found, screens, 0), [(0, 0); 4], "{screens:?}");
         }
     }
 
@@ -266,7 +280,7 @@ mod tests {
 
     #[test]
     fn with_no_screen_nothing_moves() {
-        assert_eq!(settle(&[rect(-600, 200, -400, 400), rect(0, 0, 10, 10)], &[]), [(0, 0); 2]);
-        assert!(settle(&[], &DESK).is_empty());
+        assert_eq!(settle(&[rect(-600, 200, -400, 400), rect(0, 0, 10, 10)], &[], 0), [(0, 0); 2]);
+        assert!(settle(&[], &DESK, 0).is_empty());
     }
 }

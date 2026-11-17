@@ -38,6 +38,7 @@ use crate::canvas::{Canvas, Rect};
 use crate::clock;
 use crate::datetime::DateTime;
 use crate::disk::Disk;
+use crate::grid::{self, Spacing};
 use crate::keys::{self, Input, Key, Keys};
 use crate::notes::{self, Notes};
 use crate::rain::Rain;
@@ -108,10 +109,16 @@ const FRAME_TIMER: usize = 2;
 const WM_TRAY: u32 = WM_APP + 2;
 /// The tray's icon, the .ico file as it is on disk.
 static TRAY_ICO: &[u8] = include_bytes!("../skins/Icons/gears_tweakui_b.ico");
-/// Skins snap to each other and to the screen edge from this far away.
-const SNAP: i32 = 10;
-/// Px between the frames of two widgets laid out one above the other.
-const APART: i32 = 10;
+/// The grid's margin and gap until settings.ini says otherwise: where
+/// dragging left a widget before they could be chosen, when it snapped the
+/// window -- frame and the 12 px of nothing round it -- to the screen's
+/// edge and to the next window.
+const SPACING: Spacing = Spacing { margin: 12, gap: 24 };
+/// What the menu offers for the margin and for the gap, in px.  Any other
+/// figure can be written into settings.ini.
+const SPACINGS: [i32; 8] = [0, 4, 8, 10, 12, 16, 24, 32];
+/// No margin or gap is wider than this.
+const MOST_SPACE: i32 = 200;
 /// How many notes' widths, or heights, from a note room for a new one is
 /// looked for.
 const ROOM_STEPS: i32 = 8;
@@ -134,6 +141,9 @@ const CMD_AUTOSTART: usize = 50;
 const CMD_SETTINGS: usize = 51;
 const CMD_RELOAD: usize = 52;
 const CMD_EXIT: usize = 60;
+/// From here, the margin and the gap, by their place in the menu.
+const CMD_MARGIN: usize = 70;
+const CMD_GAP: usize = 80;
 /// From here up to CMD_TOGGLE: the widget's own entries.
 const CMD_WIDGET: usize = 100;
 /// From here up: show or close a window, by its number.
@@ -266,6 +276,8 @@ struct App {
     wheel: i32,
     position: Position,
     snap: bool,
+    /// The grid the widgets are laid out on.
+    spacing: Spacing,
     locked_in_place: bool,
     /// The workstation is locked: nothing is drawn, the log still runs.
     locked: bool,
@@ -324,17 +336,35 @@ fn register_session_notifications(wnd: HWND) {
     }
 }
 
-/// The window of a `kind` at (x, y), as a rectangle on the screens.
-fn window_rect(kind: Kind, x: i32, y: i32) -> RECT {
-    let skin = kind.skin();
-    RECT { left: x, top: y, right: x + skin.w, bottom: y + skin.h }
+/// A rectangle as the screens have them.
+fn on_screens(r: Rect) -> RECT {
+    RECT { left: r.x0, top: r.y0, right: r.x1, bottom: r.y1 }
 }
 
-/// Where a window of a `kind` meant for (x, y) can go and be seen whole: there,
-/// or the least distance from there onto the monitors there are now.
-fn on_screen(kind: Kind, x: i32, y: i32) -> (i32, i32) {
-    let (dx, dy) = screens::keep_on(&window_rect(kind, x, y), &screens::work_areas());
+/// What has to be on the monitors for a window of a `kind` at (x, y) to be
+/// seen whole: its frame, and a margin of bare screen round that.
+fn reach(kind: Kind, x: i32, y: i32, margin: i32) -> RECT {
+    let f = frame(kind, x, y);
+    RECT { left: f.x0 - margin, top: f.y0 - margin, right: f.x1 + margin, bottom: f.y1 + margin }
+}
+
+/// Where a window of a `kind` meant for (x, y) can go and be seen whole,
+/// `margin` in from the edge: there, or the least distance from there onto
+/// the monitors there are now.
+fn on_screen(kind: Kind, x: i32, y: i32, margin: i32) -> (i32, i32) {
+    let (dx, dy) = screens::keep_on(&reach(kind, x, y, margin), &screens::work_areas());
     (x + dx, y + dy)
+}
+
+/// What the menu offers for a margin or a gap that is `now`: the figures
+/// it always offers, and `now` in its place among them if it is not one.
+fn spacings(now: i32) -> Vec<i32> {
+    let mut all = SPACINGS.to_vec();
+    if !all.contains(&now) {
+        all.push(now);
+        all.sort();
+    }
+    all
 }
 
 fn autostart_command() -> String {
@@ -491,6 +521,7 @@ impl App {
             wheel: 0,
             position: Position::Desktop,
             snap: true,
+            spacing: SPACING,
             locked_in_place: false,
             locked,
             signed_in,
@@ -602,11 +633,18 @@ impl App {
     /// Where a window sits now is where it has been put: its place from now
     /// on, written down for the next run.
     fn keep_place(&mut self, i: usize) {
+        let (x, y) = (self.slots[i].x, self.slots[i].y);
+        self.put(i, x, y);
+    }
+
+    /// Window `i` is put at (x, y): its place from now on, written down for
+    /// the next run.  It is shown there when it is next laid out.
+    fn put(&mut self, i: usize, x: i32, y: i32) {
         let slot = &mut self.slots[i];
-        slot.put = (slot.x, slot.y);
+        slot.put = (x, y);
         if !slot.deleted {
-            self.settings.set_int(&slot.section, "X", slot.put.0);
-            self.settings.set_int(&slot.section, "Y", slot.put.1);
+            self.settings.set_int(&slot.section, "X", x);
+            self.settings.set_int(&slot.section, "Y", y);
         }
     }
 
@@ -619,9 +657,13 @@ impl App {
     }
 
     fn lay_out_on(&mut self, work_areas: &[RECT]) {
-        let running: Vec<usize> = (0..self.slots.len()).filter(|&i| self.widgets.get(i).is_some()).collect();
-        let wanted: Vec<RECT> = running.iter().map(|&i| window_rect(self.slots[i].kind, self.slots[i].put.0, self.slots[i].put.1)).collect();
-        for (&i, (dx, dy)) in running.iter().zip(screens::settle(&wanted, work_areas)) {
+        let Spacing { margin, gap } = self.spacing;
+        let running = self.running();
+        let wanted: Vec<RECT> = running.iter().map(|&i| reach(self.slots[i].kind, self.slots[i].put.0, self.slots[i].put.1, margin)).collect();
+        // Frames a gap apart are kept together.  With a margin round each,
+        // that is two margins nearer.
+        let near = (gap - 2 * margin).max(0);
+        for (&i, (dx, dy)) in running.iter().zip(screens::settle(&wanted, work_areas, near)) {
             let slot = &mut self.slots[i];
             let (x, y) = (slot.put.0 + dx, slot.put.1 + dy);
             if (x, y) == (slot.x, slot.y) {
@@ -634,29 +676,65 @@ impl App {
         }
     }
 
+    /// The windows whose widgets are running.
+    fn running(&self) -> Vec<usize> {
+        (0..self.slots.len()).filter(|&i| self.widgets.get(i).is_some()).collect()
+    }
+
+    // ---- the grid --------------------------------------------------------------
+
+    /// The margin and the gap from now on, written down for the next run,
+    /// and the widgets moved onto them.
+    fn set_spacing(&mut self, spacing: Spacing) {
+        let old = core::mem::replace(&mut self.spacing, spacing);
+        self.settings.set_int("General", "ScreenMargin", spacing.margin);
+        self.settings.set_int("General", "WidgetGap", spacing.gap);
+        if spacing != old {
+            self.respace(old);
+        }
+    }
+
+    /// Every running widget that stood on the grid of `old` -- against the
+    /// edge of its screen, beside another or in line with one -- put in its
+    /// place on the grid there is now, and shown there (see
+    /// `grid::respace`).  A widget that is closed is left where it was put,
+    /// and comes back there.
+    fn respace(&mut self, old: Spacing) {
+        let running = self.running();
+        let frames: Vec<RECT> = running.iter().map(|&i| on_screens(frame(self.slots[i].kind, self.slots[i].put.0, self.slots[i].put.1))).collect();
+        let moves = grid::respace(&frames, &screens::work_areas(), old, self.spacing);
+        for (&i, (dx, dy)) in running.iter().zip(moves) {
+            let (x, y) = self.slots[i].put;
+            self.put(i, x + dx, y + dy);
+        }
+        self.lay_out();
+    }
+
     // ---- more notes ------------------------------------------------------------
 
     /// Somewhere to put a window the size of slot `b`'s, next to it: the
-    /// nearest place to its left, its right, below or above it where the new
-    /// frame is on the same screen and on top of no widget that is showing.
-    /// (On the desktop a new window goes underneath the others: one that
-    /// overlapped would be made and not seen.)  Side by side the frames
-    /// touch, and one above the other they are APART, as when first laid out.
+    /// nearest place to its left, its right, below or above it, a gap from
+    /// it, where the new frame is on the same screen, inside the margin, and
+    /// no nearer than a gap to any widget that is showing.  (On the desktop
+    /// a new window goes underneath the others: one that overlapped would be
+    /// made and not seen.)
     fn room_beside(&self, b: usize) -> (i32, i32) {
         let base = &self.slots[b];
+        let Spacing { margin, gap } = self.spacing;
         let own = frame(base.kind, base.x, base.y);
-        let work = work_area(&RECT { left: own.x0, top: own.y0, right: own.x1, bottom: own.y1 });
+        let work = work_area(&on_screens(own));
         let free = |&(x, y): &(i32, i32)| {
             let f = frame(base.kind, x, y);
-            f.x0 >= work.left && f.y0 >= work.top && f.x1 <= work.right && f.y1 <= work.bottom
-                && !self.slots.iter().any(|s| s.hwnd != 0 && frame(s.kind, s.x, s.y).intersects(&f))
+            let room = Rect::new(f.x0 - gap, f.y0 - gap, f.x1 + gap, f.y1 + gap);
+            f.x0 >= work.left + margin && f.y0 >= work.top + margin && f.x1 <= work.right - margin && f.y1 <= work.bottom - margin
+                && !self.slots.iter().any(|s| s.hwnd != 0 && frame(s.kind, s.x, s.y).intersects(&room))
         };
-        let (dx, dy) = (own.x1 - own.x0, own.y1 - own.y0 + APART);
+        let (dx, dy) = (own.x1 - own.x0 + gap, own.y1 - own.y0 + gap);
         (1..=ROOM_STEPS)
             .flat_map(|k| [(-k, 0), (k, 0), (0, k), (0, -k)])
             .map(|(i, j)| (base.x + i * dx, base.y + j * dy))
             .find(free)
-            .unwrap_or_else(|| on_screen(base.kind, base.x + CASCADE, base.y + CASCADE))
+            .unwrap_or_else(|| on_screen(base.kind, base.x + CASCADE, base.y + CASCADE, margin))
     }
 
     /// The notes there are: the first, then the others in the order of their
@@ -1111,41 +1189,32 @@ impl App {
         later
     }
 
-    /// Where a dragged window lands: pulled onto the edges of the other
-    /// widgets and of the screen when it comes within SNAP of them, unless
-    /// Ctrl or Shift is held.
+    /// Where a dragged window lands: pulled onto the grid -- the margin
+    /// inside the screen's edge, the gap beside another widget, in line with
+    /// one -- when its frame comes within a snap of it, unless Ctrl or Shift
+    /// is held.
     fn snapped(&self, i: usize, mut x: i32, mut y: i32) -> (i32, i32) {
-        let skin = self.slots[i].kind.skin();
-        let (w, h) = (skin.w, skin.h);
+        let kind = self.slots[i].kind;
         let held = |key: i32| unsafe { GetKeyState(key) } < 0;
         if self.snap && !held(VK_CONTROL) && !held(VK_SHIFT) {
-            let near = |a: i32, b: i32| (a - b).abs() < SNAP;
-            for (j, other) in self.slots.iter().enumerate() {
-                if j == i || other.hwnd == 0 {
-                    continue;
-                }
-                let (ox, oy, ow, oh) = (other.x, other.y, other.kind.skin().w, other.kind.skin().h);
-                if y < oy + oh && y + h > oy {
-                    if near(x, ox) { x = ox }
-                    if near(x, ox + ow) { x = ox + ow }
-                    if near(x + w, ox) { x = ox - w }
-                    if near(x + w, ox + ow) { x = ox + ow - w }
-                }
-                if x < ox + ow && x + w > ox {
-                    if near(y, oy) { y = oy }
-                    if near(y, oy + oh) { y = oy + oh }
-                    if near(y + h, oy) { y = oy - h }
-                    if near(y + h, oy + oh) { y = oy + oh - h }
-                }
-            }
-            let work = work_area(&RECT { left: x, top: y, right: x + w, bottom: y + h });
-            if near(x, work.left) { x = work.left }
-            if near(y, work.top) { y = work.top }
-            if near(x, work.right - w) { x = work.right - w }
-            if near(y, work.bottom - h) { y = work.bottom - h }
+            let f = on_screens(frame(kind, x, y));
+            let others: Vec<RECT> = (self.slots.iter().enumerate())
+                .filter(|&(j, other)| j != i && other.hwnd != 0)
+                .map(|(_, other)| on_screens(frame(other.kind, other.x, other.y)))
+                .collect();
+            let (dx, dy) = grid::snap(&f, &others, &work_area(&f), self.spacing);
+            (x, y) = (x + dx, y + dy);
         }
         // Not dropped where no monitor shows it, nor half off one.
-        on_screen(self.slots[i].kind, x, y)
+        on_screen(kind, x, y, self.spacing.margin)
+    }
+
+    /// Is (x, y) on the screen in the margin round window `i`'s frame, and
+    /// over another widget's frame?  A press there is for that one.
+    fn over_another(&self, i: usize, x: i32, y: i32) -> bool {
+        let own = &self.slots[i];
+        !frame(own.kind, own.x, own.y).contains(x, y)
+            && (self.slots.iter().enumerate()).any(|(j, other)| j != i && other.hwnd != 0 && frame(other.kind, other.x, other.y).contains(x, y))
     }
 
     // ---- menus ---------------------------------------------------------------------
@@ -1179,6 +1248,13 @@ impl App {
         m.push((CMD_TOPMOST, String::from("Always on top"), self.position == Position::Topmost));
         m.push((SUB, String::new(), false));
         m.push((CMD_SNAP, String::from("Snap to edges"), self.snap));
+        for (title, base, now) in [("Screen margin", CMD_MARGIN, self.spacing.margin), ("Gap between widgets", CMD_GAP, self.spacing.gap)] {
+            m.push((SUB, String::from(title), false));
+            for (k, px) in spacings(now).into_iter().enumerate() {
+                m.push((base + k, format!("{px} px"), px == now));
+            }
+            m.push((SUB, String::new(), false));
+        }
         m.push((CMD_LOCK, String::from("Lock position"), self.locked_in_place));
         if let Some(i) = i {
             m.push((CMD_CLOSE, format!("Close {}", self.slots[i].title), false));
@@ -1220,6 +1296,16 @@ impl App {
             CMD_LOCK => {
                 self.locked_in_place = !self.locked_in_place;
                 self.settings.set_int("General", "LockPosition", self.locked_in_place as i32);
+            }
+            c if (CMD_MARGIN..CMD_GAP).contains(&c) => {
+                if let Some(&margin) = spacings(self.spacing.margin).get(c - CMD_MARGIN) {
+                    self.set_spacing(Spacing { margin, ..self.spacing });
+                }
+            }
+            c if (CMD_GAP..CMD_WIDGET).contains(&c) => {
+                if let Some(&gap) = spacings(self.spacing.gap).get(c - CMD_GAP) {
+                    self.set_spacing(Spacing { gap, ..self.spacing });
+                }
             }
             CMD_CLOSE => {
                 if let Some(i) = i {
@@ -1275,10 +1361,15 @@ impl App {
         for i in 0..self.slots.len() {
             self.stop(i);
         }
+        let old = self.spacing;
         self.settings = Settings::load();
         self.read_general();
         self.read_slots();
         self.start_enabled();
+        // a margin or a gap written in by hand is as good as one chosen
+        if self.spacing != old {
+            self.respace(old);
+        }
         self.settings.save();
     }
 
@@ -1290,16 +1381,20 @@ impl App {
         };
         POSITION.store(self.position as u8, Relaxed);
         self.snap = self.settings.flag("General", "SnapEdges", true);
+        let margin = self.settings.int("General", "ScreenMargin", SPACING.margin).clamp(0, MOST_SPACE);
+        let gap = self.settings.int("General", "WidgetGap", SPACING.gap).clamp(0, MOST_SPACE);
+        self.spacing = Spacing { margin, gap };
         self.locked_in_place = self.settings.flag("General", "LockPosition", false);
     }
 
     /// Which windows there are -- the seven, and a note for every other
     /// section of settings.ini that is a note's -- and where each sits: where
-    /// it was left, or -- the first time -- in a column down the right-hand
-    /// side of the screen, frames ten pixels apart, the note and the weather
-    /// side by side at the foot, the rain to the left of the note and the disk
-    /// to the left of the rain, frame against frame; the world clock heads a
-    /// second column, to the left of the date and time.  Called with every window shut: at the start, and when
+    /// it was left, or -- the first time -- on the grid, in a column down the
+    /// right-hand side of the screen: the date and time in the top corner,
+    /// the resource meter under it, and under that the weather, the note to
+    /// its left, the rain to the left of the note and the disk to the left
+    /// of the rain; the world clock heads a second column, to the left of the
+    /// date and time.  Called with every window shut: at the start, and when
     /// settings.ini is read again.
     fn read_slots(&mut self) {
         self.slots = FIXED.iter().map(|&(kind, section, title)| Slot::new(kind, section, title.to_owned())).collect();
@@ -1313,19 +1408,25 @@ impl App {
         let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
         let size = |i: usize| (FIXED[i].0.skin().w, FIXED[i].0.skin().h);
         let pad = FIXED[DATETIME].0.skin().int("Pad", 12);
-        let overlap = 2 * pad - APART;
-        let x0 = work.right - size(DATETIME).0 - 4;
-        let y0 = work.top + 4;
-        let y1 = y0 + size(DATETIME).1 - overlap;
-        let y2 = y1 + size(1).1 - overlap;
+        let Spacing { margin, gap } = self.spacing;
+        // From one window to the next, past the first's size: the two pads
+        // of nothing between the frames are taken back and the gap put in.
+        let step = gap - 2 * pad;
+        let x0 = work.right - margin + pad - size(DATETIME).0;
+        let y0 = work.top + margin - pad;
+        let y1 = y0 + size(DATETIME).1 + step;
+        let y2 = y1 + size(1).1 + step;
+        let weather = x0 + size(DATETIME).0 - size(WEATHER).0;
+        let note = weather - step - size(NOTE).0;
+        let rain = note - step - size(RAIN).0;
         let defaults = [
             (x0, y0),
             (x0, y1),
-            (x0, y2),
-            (x0 + size(DATETIME).0 - size(WEATHER).0, y2),
-            (x0 - size(RAIN).0 + 2 * pad, y2),
-            (x0 - size(RAIN).0 - size(DISK).0 + 4 * pad, y2),
-            (x0 - size(WORLD).0 + 2 * pad, y0),
+            (note, y2),
+            (weather, y2),
+            (rain, y2),
+            (rain - step - size(DISK).0, y2),
+            (x0 - step - size(WORLD).0, y0),
         ];
         for i in 0..self.slots.len() {
             // A note after the first was put somewhere when it was made.  One
@@ -1518,6 +1619,15 @@ unsafe extern "system" fn widget_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                     (*(lp as *mut WINDOWPOS)).flags |= SWP_NOZORDER;
                 }
                 return 0;
+            }
+            // The margin of nothing round a frame is there to drag the widget
+            // by; but where a gap narrower than it lays it over the frame of
+            // the next widget, the press is for that widget and not this one.
+            WM_NCHITTEST => {
+                if with_app(|app| app.over_another(i, x_of(lp), y_of(lp))).unwrap_or(false) {
+                    return HTTRANSPARENT;
+                }
+                return DefWindowProcW(wnd, msg, wp, lp);
             }
             // Over text the pointer is the one for text.
             WM_SETCURSOR if lo_word(lp as usize) == HTCLIENT => {
@@ -1920,8 +2030,8 @@ mod tests {
         let skin = Kind::Notes.skin();
         let (x, y) = ((work.left + work.right - skin.w) / 2, (work.top + work.bottom - skin.h) / 2);
         show(&mut app, NOTE, x, y);
-        // to its left, frame against frame
-        let step = skin.w - 2 * skin.int("Pad", 12);
+        // to its left, the gap from it
+        let step = skin.w - 2 * skin.int("Pad", 12) + app.spacing.gap;
         assert_eq!(app.room_beside(NOTE), (x - step, y));
         // the rain is there: to its right, then
         show(&mut app, RAIN, x - step, y);
@@ -1962,7 +2072,7 @@ mod tests {
         app.lay_out_on(&away);
         for (i, _) in places {
             let (x, y) = shown(&app, i);
-            assert_eq!(screens::keep_on(&window_rect(Kind::Notes, x, y), &away), (0, 0), "slot {i} at {x},{y}");
+            assert_eq!(screens::keep_on(&reach(Kind::Notes, x, y, app.spacing.margin), &away), (0, 0), "slot {i} at {x},{y}");
         }
         let ((x1, y1), (x2, y2)) = (shown(&app, first), shown(&app, second));
         assert_eq!((x2 - x1, y2 - y1), (step, 0));
@@ -1976,6 +2086,115 @@ mod tests {
         // home again: back in their places
         app.lay_out_on(&home);
         assert!(places.iter().all(|&(i, put)| shown(&app, i) == put));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The frame of slot `i` where it is put.
+    fn put_frame(app: &App, i: usize) -> Rect {
+        frame(app.slots[i].kind, app.slots[i].put.0, app.slots[i].put.1)
+    }
+
+    /// Slot `i` put with the top left corner of its frame at (x, y).
+    fn put_frame_at(app: &mut App, i: usize, x: i32, y: i32) {
+        let pad = app.slots[i].kind.skin().int("Pad", 12);
+        app.put(i, x - pad, y - pad);
+    }
+
+    /// The menu's command for `px` in the margin's list (`CMD_MARGIN`) or
+    /// the gap's (`CMD_GAP`).
+    fn pick(app: &App, base: usize, px: i32) -> usize {
+        let now = if base == CMD_MARGIN { app.spacing.margin } else { app.spacing.gap };
+        base + spacings(now).iter().position(|&p| p == px).unwrap()
+    }
+
+    /// What the margin's or the gap's list in the menu has ticked.
+    fn ticked(app: &App, base: usize) -> Vec<String> {
+        app.menu(None).into_iter().filter(|m| (base..base + 10).contains(&m.0) && m.2).map(|m| m.1).collect()
+    }
+
+    #[test]
+    fn the_first_layout_stands_on_the_grid() {
+        let (app, dir) = app("first");
+        let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
+        let Spacing { margin, gap } = app.spacing;
+        let at = |i: usize| put_frame(&app, i);
+        assert_eq!((at(DATETIME).x1, at(DATETIME).y0), (work.right - margin, work.top + margin));
+        // down the column, a gap apart
+        assert_eq!((at(1).y0 - at(DATETIME).y1, at(WEATHER).y0 - at(1).y1), (gap, gap));
+        assert_eq!((at(1).x1, at(WEATHER).x1), (at(DATETIME).x1, at(DATETIME).x1));
+        // along the foot and along the top, a gap apart
+        for (left, right) in [(NOTE, WEATHER), (RAIN, NOTE), (DISK, RAIN), (WORLD, DATETIME)] {
+            assert_eq!((at(right).x0 - at(left).x1, at(right).y0), (gap, at(left).y0), "slot {left} to slot {right}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_margin_and_the_gap_come_from_the_menu_and_the_layout_follows() {
+        let (mut app, dir) = app("spacing");
+        // three notes running: two down the right-hand side of the main
+        // screen, on the grid there is, and one on its own
+        app.new_note(Some(NOTE));
+        app.new_note(Some(NOTE));
+        let (top, under, alone) = (NOTE, FIXED.len(), FIXED.len() + 1);
+        app.set_enabled(top, true);
+        let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
+        let Spacing { margin, gap } = app.spacing;
+        let size = frame(Kind::Notes, 0, 0);
+        let (w, h) = (size.x1 - size.x0, size.y1 - size.y0);
+        put_frame_at(&mut app, top, work.right - margin - w, work.top + margin);
+        put_frame_at(&mut app, under, work.right - margin - w, work.top + margin + h + gap);
+        put_frame_at(&mut app, alone, work.left + 100, work.top + 100);
+        app.lay_out();
+        let apart = put_frame(&app, alone);
+
+        // a gap of 8: the one under closes up, the one on its own stays
+        app.menu_command(Some(top), pick(&app, CMD_GAP, 8));
+        assert_eq!(app.spacing, Spacing { margin, gap: 8 });
+        assert_eq!(app.settings.int("General", "WidgetGap", 0), 8);
+        let (a, b) = (put_frame(&app, top), put_frame(&app, under));
+        assert_eq!((a.x1, a.y0), (work.right - margin, work.top + margin));
+        assert_eq!((b.x1, b.y0 - a.y1), (a.x1, 8));
+        assert_eq!(put_frame(&app, alone), apart);
+        // written down for the next run, and shown where it was put
+        assert_eq!(app.settings.int(&app.slots[under].section, "Y", 0), app.slots[under].put.1);
+        assert_eq!((app.slots[under].x, app.slots[under].y), app.slots[under].put);
+
+        // no margin: the column goes into the corner, the gap kept
+        app.menu_command(None, pick(&app, CMD_MARGIN, 0));
+        let (a, b) = (put_frame(&app, top), put_frame(&app, under));
+        assert_eq!((a.x1, a.y0, b.x1, b.y0 - a.y1), (work.right, work.top, work.right, 8));
+        assert_eq!(put_frame(&app, alone), apart);
+        assert_eq!((ticked(&app, CMD_MARGIN), ticked(&app, CMD_GAP)), (vec![String::from("0 px")], vec![String::from("8 px")]));
+
+        // a figure written in by hand is offered in its place among the others
+        app.settings.set_int("General", "WidgetGap", 7);
+        app.read_general();
+        let gaps: Vec<String> = app.menu(None).into_iter().filter(|m| (CMD_GAP..CMD_WIDGET).contains(&m.0)).map(|m| m.1).collect();
+        assert_eq!(gaps, ["0 px", "4 px", "7 px", "8 px", "10 px", "12 px", "16 px", "24 px", "32 px"]);
+        assert_eq!(ticked(&app, CMD_GAP), ["7 px"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_press_in_the_margin_round_a_frame_is_for_the_frame_under_it() {
+        let (mut app, dir) = app("press");
+        let pad = Kind::Notes.skin().int("Pad", 12);
+        let size = frame(Kind::Notes, 0, 0);
+        let w = size.x1 - size.x0;
+        // two notes frame against frame: the first's margin lies over the
+        // second's frame
+        app.new_note(Some(NOTE));
+        let second = FIXED.len();
+        show(&mut app, NOTE, 100, 100);
+        show(&mut app, second, 100 + w, 100);
+        let (edge, y) = (100 + pad + w, 100 + pad + 50);
+        assert!(app.over_another(NOTE, edge + 3, y));
+        // but not for the second there, nor for the first on its own frame,
+        // nor in its margin where there is nothing under it
+        assert!(!app.over_another(second, edge + 3, y));
+        assert!(!app.over_another(NOTE, edge - 3, y));
+        assert!(!app.over_another(NOTE, 102, y));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
