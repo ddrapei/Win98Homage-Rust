@@ -78,9 +78,20 @@ so does a closed one. The first layout and a new note's place follow the same tw
 figures. A widget is kept at least the margin inside the screen.
 
 In the widgets themselves: tabs, month list, calendar selection, scroll to browse months,
-the 12/24-hour field, checkboxes, the scrollbar, the paper swatch and the ruled-paper
-button, typing on the note with save-as-you-type and a `.bak`, and the weather's city
-field.
+the 12/24-hour field, scroll along the usage graph's hours, checkboxes, the scrollbar,
+the paper swatch and the ruled-paper button, typing on the note with save-as-you-type and
+a `.bak`, and the weather's city field.
+
+**The usage graph.** The Date/Time graph shows part of the day, 07:00 to 21:00 unless
+`GraphFrom=` and `GraphTo=` under `[DateTime]` in `settings.ini` say otherwise. The wheel
+over it moves those hours along the day, an hour a notch — up for earlier, down for later,
+and sideways too, with a tilting wheel or a touchpad: left for earlier, right for later —
+as far as midnight at either end, and a double-click brings the usual hours back. Under
+the blocks is a ruler: a mark where each hour begins, with the hour's figure under it in
+small pixel figures — `07`, or `7A` on the 12-hour clock — and a shorter mark at each
+half past. The hours in
+view stay put while other days are picked in the calendar; a restart starts from the
+usual ones again.
 
 **Typing on the note.** Click the text and type: the caret goes where you clicked, and
 the note looks the same as it did before you clicked — same line breaks, checkboxes still

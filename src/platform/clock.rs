@@ -122,19 +122,23 @@ pub fn days_in_month(year: i32, month: i32) -> i32 {
     }
 }
 
-/// Local wall-clock time to a timestamp, like mktime in C: a day past the end
-/// of the month rolls into the next, which is how "tomorrow at midnight" is
-/// asked for without adding 86400 to anything.
+/// Local wall-clock time to a timestamp, like mktime in C: a field past its
+/// end rolls into the next -- a day past the end of the month into the next
+/// month, hour 24 into the next day -- which is how "tomorrow at midnight" is
+/// asked for without adding 86400 to anything.  Windows itself takes only
+/// hours 0..23, and the rest must not reach it.
 pub fn mktime(year: i32, month: i32, day: i32, hour: i32, min: i32, sec: i32) -> i64 {
-    let (y, m, d) = civil_from_days(days_from_civil(year, month, 1) + (day - 1) as i64);
+    let time = hour as i64 * 3600 + min as i64 * 60 + sec as i64;
+    let (days, time) = (time.div_euclid(86_400), time.rem_euclid(86_400));
+    let (y, m, d) = civil_from_days(days_from_civil(year, month, 1) + (day - 1) as i64 + days);
     let local = sys::SYSTEMTIME {
         wYear: y as u16,
         wMonth: m as u16,
         wDayOfWeek: 0,
         wDay: d as u16,
-        wHour: hour as u16,
-        wMinute: min as u16,
-        wSecond: sec as u16,
+        wHour: (time / 3600) as u16,
+        wMinute: (time % 3600 / 60) as u16,
+        wSecond: (time % 60) as u16,
         wMilliseconds: 0,
     };
     let mut utc_time = sys::SYSTEMTIME::default();
@@ -265,4 +269,24 @@ pub fn parse_local(s: &str) -> Option<i64> {
     let mut d = date.split('-').map(|p| p.parse::<i32>().ok());
     let mut t = time.split(':').map(|p| p.parse::<i32>().ok());
     Some(mktime(d.next()??, d.next()??, d.next()??, t.next()??, t.next()??, t.next()??))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mktime_rolls_a_time_past_its_end_into_the_next_day() {
+        // hour 24 is the midnight that ends the day: the end of a graph that
+        // runs to the end of the day is asked for that way
+        assert_eq!(mktime(2026, 11, 18, 24, 0, 0), mktime(2026, 11, 19, 0, 0, 0));
+        assert_eq!(mktime(2026, 12, 31, 24, 0, 0), mktime(2027, 1, 1, 0, 0, 0));
+        assert_eq!(mktime(2026, 11, 18, 25, 90, 61), mktime(2026, 11, 19, 2, 31, 1));
+        // and back, before the day began
+        assert_eq!(mktime(2026, 11, 18, -1, 0, 0), mktime(2026, 11, 17, 23, 0, 0));
+        assert_eq!(mktime(2026, 11, 18, 0, 0, -1), mktime(2026, 11, 17, 23, 59, 59));
+        // what Windows is handed stays the same for a time that needs no rolling
+        let t = local(mktime(2026, 11, 18, 23, 59, 59));
+        assert_eq!((t.year, t.month, t.day, t.hour, t.min, t.sec), (2026, 11, 18, 23, 59, 59));
+    }
 }

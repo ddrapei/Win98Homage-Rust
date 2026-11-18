@@ -57,14 +57,22 @@ pub enum Input {
     Char(char),
 }
 
+/// Which way a wheel turns: upright, the ordinary way, or sideways -- a
+/// wheel tilted, a touchpad swiped.  Up and right are the positive turns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    Upright,
+    Sideways,
+}
+
 /// What a message to the window comes to.
 pub enum Event {
     Input(Input),
     /// The caret's timer.
     Pulse,
-    /// The wheel, by this much: where wheels turn whatever has the keyboard
+    /// A wheel, turned this much: where wheels turn whatever has the keyboard
     /// rather than whatever is under the pointer, that is this window.
-    Wheel(i32),
+    Wheel(Axis, i32),
     /// The keyboard has gone elsewhere, or the window was told to close.
     Leave,
     /// Dealt with here; the window procedure's answer.
@@ -214,7 +222,8 @@ pub fn read(wnd: HWND, msg: u32, wp: WPARAM) -> Event {
         // Alt-F4 lands here, and would otherwise destroy the window.
         WM_LEAVE | WM_CLOSE => Event::Leave,
         WM_TIMER if wp == PULSE_TIMER => Event::Pulse,
-        WM_MOUSEWHEEL => Event::Wheel(hi_word(wp) as i16 as i32),
+        WM_MOUSEWHEEL => Event::Wheel(Axis::Upright, hi_word(wp) as i16 as i32),
+        WM_MOUSEHWHEEL => Event::Wheel(Axis::Sideways, hi_word(wp) as i16 as i32),
         WM_KEYDOWN => {
             let (shift, ctrl) = (held(VK_SHIFT), held(VK_CONTROL));
             // AltGr is Ctrl and Alt together, and types a character
@@ -334,7 +343,7 @@ mod tests {
             Event::Input(Input::Char(c)) => format!("char {c}"),
             Event::Input(Input::Key { key, .. }) => format!("key {key:?}"),
             Event::Leave => String::from("leave"),
-            Event::Wheel(by) => format!("wheel {by}"),
+            Event::Wheel(axis, by) => format!("wheel {axis:?} {by}"),
             Event::Pulse => return 0,
             Event::Done(result) => return result,
             Event::Other => return unsafe { DefWindowProcW(wnd, msg, wp, lp) },
@@ -362,6 +371,7 @@ mod tests {
             PostMessageW(wnd, WM_KEYDOWN, VK_LEFT, 0);
             PostMessageW(wnd, WM_CHAR, 0x0D, 0);
             PostMessageW(wnd, WM_MOUSEWHEEL, (-120i16 as u16 as usize) << 16, 0);
+            PostMessageW(wnd, WM_MOUSEHWHEEL, 40 << 16, 0);
             // what Windows sends when another window takes the keyboard
             SendMessageW(wnd, WM_ACTIVATE, WA_INACTIVE, 0);
             let mut msg = MSG::default();
@@ -370,7 +380,7 @@ mod tests {
                 DispatchMessageW(&msg);
             }
         }
-        assert_eq!(*HEARD.lock().unwrap(), ["char h", "key Left", "wheel -120", "leave"]);
+        assert_eq!(*HEARD.lock().unwrap(), ["char h", "key Left", "wheel Upright -120", "wheel Sideways 40", "leave"]);
         assert!(keys.close());
         assert!(!keys.close());
         keys.destroy();

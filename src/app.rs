@@ -39,7 +39,7 @@ use crate::clock;
 use crate::datetime::DateTime;
 use crate::disk::Disk;
 use crate::grid::{self, Spacing};
-use crate::keys::{self, Input, Key, Keys};
+use crate::keys::{self, Axis, Input, Key, Keys};
 use crate::notes::{self, Notes};
 use crate::rain::Rain;
 use crate::resources::Resources;
@@ -194,6 +194,23 @@ fn frame(kind: Kind, x: i32, y: i32) -> Rect {
     Rect::new(x + pad, y + pad, x + skin.w - pad, y + skin.h - pad)
 }
 
+/// A wheel turned `delta` on top of the part of a notch it had turned
+/// already, `rest`: the skin's event for that way, and how many whole notches
+/// to fire it for.  What is short of a notch stays in `rest` -- a touchpad
+/// turns a little at a time.
+fn notches(rest: &mut i32, axis: Axis, delta: i32) -> (Ev, u32) {
+    *rest += delta;
+    let whole = *rest / WHEEL_DELTA;
+    *rest -= whole * WHEEL_DELTA;
+    let ev = match (axis, whole > 0) {
+        (Axis::Upright, true) => Ev::WheelUp,
+        (Axis::Upright, false) => Ev::WheelDown,
+        (Axis::Sideways, true) => Ev::WheelRight,
+        (Axis::Sideways, false) => Ev::WheelLeft,
+    };
+    (ev, whole.unsigned_abs())
+}
+
 struct Slot {
     kind: Kind,
     /// Its section of settings.ini, and what the menus call it.
@@ -273,7 +290,10 @@ struct App {
     keys: Keys,
     typing: Option<usize>,
     press: Option<Press>,
+    /// What the wheels have turned short of a whole notch, upright and
+    /// sideways.
     wheel: i32,
+    sideways: i32,
     position: Position,
     snap: bool,
     /// The grid the widgets are laid out on.
@@ -519,6 +539,7 @@ impl App {
             typing: None,
             press: None,
             wheel: 0,
+            sideways: 0,
             position: Position::Desktop,
             snap: true,
             spacing: SPACING,
@@ -1174,14 +1195,19 @@ impl App {
         self.fire(i, Ev::Up, x, y).unwrap_or(Later::Nothing)
     }
 
-    fn mouse_wheel(&mut self, i: usize, wnd: HWND, screen_x: i32, screen_y: i32, delta: i32) -> Later {
+    /// A wheel turned over window `i`: a skin's wheel action for every whole
+    /// notch.  Each way a wheel turns keeps its own part of a notch, so a
+    /// touchpad swiped on the slant does not have the two cancel out.
+    fn mouse_wheel(&mut self, i: usize, wnd: HWND, screen_x: i32, screen_y: i32, axis: Axis, delta: i32) -> Later {
         let mut p = POINT { x: screen_x, y: screen_y };
         unsafe { ScreenToClient(wnd, &mut p) };
-        self.wheel += delta;
+        let rest = match axis {
+            Axis::Upright => &mut self.wheel,
+            Axis::Sideways => &mut self.sideways,
+        };
+        let (ev, count) = notches(rest, axis, delta);
         let mut later = Later::Nothing;
-        while self.wheel.abs() >= WHEEL_DELTA {
-            let ev = if self.wheel > 0 { Ev::WheelUp } else { Ev::WheelDown };
-            self.wheel -= WHEEL_DELTA * self.wheel.signum();
+        for _ in 0..count {
             if let Some(l) = self.fire(i, ev, p.x, p.y) {
                 later = l;
             }
@@ -1642,7 +1668,8 @@ unsafe extern "system" fn widget_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             WM_LBUTTONDBLCLK => with_app(|app| app.mouse_down(i, wnd, x_of(lp), y_of(lp), true)),
             WM_MOUSEMOVE => with_app(|app| app.mouse_move(i, wnd, x_of(lp), y_of(lp), wp & 1 != 0)),
             WM_LBUTTONUP => with_app(|app| app.mouse_up(i, x_of(lp), y_of(lp))),
-            WM_MOUSEWHEEL => with_app(|app| app.mouse_wheel(i, wnd, x_of(lp), y_of(lp), hi_word(wp) as i16 as i32)),
+            WM_MOUSEWHEEL => with_app(|app| app.mouse_wheel(i, wnd, x_of(lp), y_of(lp), Axis::Upright, hi_word(wp) as i16 as i32)),
+            WM_MOUSEHWHEEL => with_app(|app| app.mouse_wheel(i, wnd, x_of(lp), y_of(lp), Axis::Sideways, hi_word(wp) as i16 as i32)),
             WM_RBUTTONUP => {
                 with_app(|app| app.leave_editor());
                 Some(Later::Menu(Some(i)))
@@ -1688,9 +1715,9 @@ unsafe extern "system" fn keys_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             0
         }
         // the wheel turns what is being typed on
-        keys::Event::Wheel(delta) => {
+        keys::Event::Wheel(axis, delta) => {
             let later = with_app(|app| match app.typing {
-                Some(i) => app.mouse_wheel(i, app.slots[i].hwnd, x_of(lp), y_of(lp), delta),
+                Some(i) => app.mouse_wheel(i, app.slots[i].hwnd, x_of(lp), y_of(lp), axis, delta),
                 None => Later::Nothing,
             });
             run_later(later.unwrap_or(Later::Nothing));
@@ -2196,6 +2223,23 @@ mod tests {
         assert!(!app.over_another(NOTE, edge - 3, y));
         assert!(!app.over_another(NOTE, 102, y));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_wheel_fires_once_a_notch_whichever_way_it_turns() {
+        let mut rest = 0;
+        assert_eq!(notches(&mut rest, Axis::Upright, 120), (Ev::WheelUp, 1));
+        assert_eq!(notches(&mut rest, Axis::Upright, -360), (Ev::WheelDown, 3));
+        // a positive turn sideways is to the right
+        assert_eq!(notches(&mut rest, Axis::Sideways, 240), (Ev::WheelRight, 2));
+        assert_eq!(notches(&mut rest, Axis::Sideways, -120), (Ev::WheelLeft, 1));
+        assert_eq!(rest, 0);
+
+        // a touchpad's little turns add up to a notch, and what is over is kept
+        let fired: Vec<u32> = [50, 50, 50, 50].map(|d| notches(&mut rest, Axis::Sideways, d).1).into();
+        assert_eq!((fired, rest), (vec![0, 0, 1, 0], 80));
+        // turning back takes from what was kept first
+        assert_eq!((notches(&mut rest, Axis::Sideways, -90).1, rest), (0, -10));
     }
 
     #[test]

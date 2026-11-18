@@ -87,6 +87,9 @@ pub enum Ev {
     Dbl,
     WheelUp,
     WheelDown,
+    /// A wheel tilted, or a touchpad swiped, sideways.
+    WheelLeft,
+    WheelRight,
     Over,
     Leave,
 }

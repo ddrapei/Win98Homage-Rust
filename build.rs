@@ -448,11 +448,13 @@ fn action(v: &str) -> Option<(String, i32)> {
     is_name.then(|| (cmd.to_string(), arg))
 }
 
-const EVENTS: [(&str, &str); 6] = [
+const EVENTS: [(&str, &str); 8] = [
     ("leftmouseupaction", "Ev::Up"),
     ("leftmousedoubleclickaction", "Ev::Dbl"),
     ("mousescrollupaction", "Ev::WheelUp"),
     ("mousescrolldownaction", "Ev::WheelDown"),
+    ("mousescrollleftaction", "Ev::WheelLeft"),
+    ("mousescrollrightaction", "Ev::WheelRight"),
     ("mouseoveraction", "Ev::Over"),
     ("mouseleaveaction", "Ev::Leave"),
 ];
