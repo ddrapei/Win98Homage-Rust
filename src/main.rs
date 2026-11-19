@@ -53,6 +53,8 @@
 //!     canvas         the software canvas they are drawn on
 //!     text           DirectWrite text, rasterised into the canvas
 //!     figures        3x5 pixel figures, for a ruler's numbers
+//!     tint           the colour the user picked, and every colour turned
+//!                    to it
 //!
 //!   platform/      Windows
 //!     sys            the Win32 declarations all of it uses
@@ -77,7 +79,7 @@ mod widgets;
 // says `crate::canvas`, not `crate::graphics::canvas`.  Which folder a file
 // is in says what it is for; moving one changes these lines and nothing in
 // the file, or in any file that uses it.
-use graphics::{canvas, figures, skin, text};
+use graphics::{canvas, figures, skin, text, tint};
 use input::{editor, keys};
 use net::{geocode, http};
 use platform::{clock, grid, screens, sys};

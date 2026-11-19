@@ -2,7 +2,8 @@
 //! hand, so the crate has no run-time dependencies and builds in seconds:
 //! every one of these is a stable, documented ABI.
 //!
-//! Only user32, gdi32, kernel32, shell32 and advapi32 are imported outright.
+//! Only user32, gdi32, kernel32, comdlg32, shell32 and advapi32 are imported
+//! outright.
 //! DirectWrite, the session API and the DPI functions (which older Windows
 //! does not have) are found with GetProcAddress, and WinHTTP
 //! is only ever loaded by the short-lived child that fetches the weather.
@@ -172,6 +173,40 @@ pub struct NOTIFYICONDATAW {
     pub dwInfoFlags: u32,
     pub guidItem: GUID,
     pub hBalloonIcon: HICON,
+}
+
+/// The colour dialog's.  (commdlg.h packs to a byte on 32-bit Windows, which
+/// changes nothing here: every field there is four bytes.)
+#[repr(C)]
+pub struct CHOOSECOLORW {
+    pub lStructSize: u32,
+    pub hwndOwner: HWND,
+    pub hInstance: HWND,
+    /// 0x00BBGGRR: where the dialog starts, and what was picked in it.
+    pub rgbResult: u32,
+    /// The dialog's sixteen custom colours, 0x00BBGGRR, kept between calls.
+    pub lpCustColors: *mut u32,
+    pub Flags: u32,
+    pub lCustData: LPARAM,
+    /// A hook procedure; none here.
+    pub lpfnHook: isize,
+    pub lpTemplateName: PCWSTR,
+}
+
+#[repr(C)]
+pub struct MENUITEMINFOW {
+    pub cbSize: u32,
+    pub fMask: u32,
+    pub fType: u32,
+    pub fState: u32,
+    pub wID: u32,
+    pub hSubMenu: HMENU,
+    pub hbmpChecked: HGDIOBJ,
+    pub hbmpUnchecked: HGDIOBJ,
+    pub dwItemData: usize,
+    pub dwTypeData: *mut u16,
+    pub cch: u32,
+    pub hbmpItem: HGDIOBJ,
 }
 
 /// shellapi.h packs its structures to a byte on 32-bit Windows, and only there.
@@ -402,6 +437,8 @@ pub const WHEEL_DELTA: i32 = 120;
 
 pub const SM_CXDRAG: i32 = 68;
 pub const SM_CYDRAG: i32 = 69;
+pub const SM_CXMENUCHECK: i32 = 71;
+pub const SM_CYMENUCHECK: i32 = 72;
 pub const MONITOR_DEFAULTTONEAREST: u32 = 2;
 
 pub const MF_STRING: u32 = 0x0000;
@@ -409,6 +446,10 @@ pub const MF_GRAYED: u32 = 0x0001;
 pub const MF_CHECKED: u32 = 0x0008;
 pub const MF_POPUP: u32 = 0x0010;
 pub const MF_SEPARATOR: u32 = 0x0800;
+pub const MIIM_BITMAP: u32 = 0x0080;
+pub const CC_RGBINIT: u32 = 0x0001;
+pub const CC_FULLOPEN: u32 = 0x0002;
+pub const CC_ANYCOLOR: u32 = 0x0100;
 pub const TPM_RIGHTBUTTON: u32 = 0x0002;
 pub const TPM_RETURNCMD: u32 = 0x0100;
 pub const TPM_NONOTIFY: u32 = 0x0080;
@@ -521,6 +562,7 @@ unsafe extern "system" {
     pub fn EnumDisplayMonitors(dc: HDC, clip: *const RECT, proc_: MONITORENUMPROC, data: LPARAM) -> BOOL;
     pub fn CreatePopupMenu() -> HMENU;
     pub fn AppendMenuW(menu: HMENU, flags: u32, id: usize, text: PCWSTR) -> BOOL;
+    pub fn SetMenuItemInfoW(menu: HMENU, item: u32, by_position: BOOL, info: *const MENUITEMINFOW) -> BOOL;
     pub fn TrackPopupMenu(menu: HMENU, flags: u32, x: i32, y: i32, reserved: i32, wnd: HWND, rect: *const RECT) -> BOOL;
     pub fn DestroyMenu(menu: HMENU) -> BOOL;
     pub fn MessageBoxW(wnd: HWND, text: PCWSTR, caption: PCWSTR, kind: u32) -> i32;
@@ -592,6 +634,11 @@ unsafe extern "system" {
         max_component: *mut u32, flags: *mut u32, file_system: *mut u16, file_system_len: u32,
     ) -> BOOL;
     pub fn SetThreadErrorMode(mode: u32, old: *mut u32) -> BOOL;
+}
+
+#[link(name = "comdlg32")]
+unsafe extern "system" {
+    pub fn ChooseColorW(cc: *mut CHOOSECOLORW) -> BOOL;
 }
 
 #[link(name = "shell32")]

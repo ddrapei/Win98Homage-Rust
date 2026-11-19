@@ -173,4 +173,9 @@ impl Widget for Resources {
             _ => Outcome::none(),
         }
     }
+
+    fn retint(&mut self) {
+        // the one colour it draws in itself: what covers the empty blocks
+        self.field = SKIN.colour("FieldBg");
+    }
 }

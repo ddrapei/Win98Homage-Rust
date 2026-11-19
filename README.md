@@ -62,7 +62,7 @@ them).
 | | |
 |--|--|
 | drag anywhere | move a widget; it snaps onto the grid — the screen margin and the gap between widgets — and into line with the others (hold Ctrl or Shift not to). The note's text is the exception: dragging there selects |
-| right-click | menu: the widget's own options, Position, Snap, Screen margin, Gap between widgets, Lock, Close, the list of widgets (with *Sticky Note +* and *−* for the notes), Start with Windows, settings, Exit |
+| right-click | menu: the widget's own options, Position, Snap, Screen margin, Gap between widgets, Colour, Lock, Close, the list of widgets (with *Sticky Note +* and *−* for the notes), Start with Windows, settings, Exit |
 | tray icon | the same menu — this is how a closed widget is brought back |
 | `X` | closes that widget (it stops costing anything); `?` says what it does |
 
@@ -86,6 +86,24 @@ so does a closed one. The first layout and a new note's place follow the same tw
 figures. A widget is kept at least the margin inside the screen. Both figures are in the
 widgets' own pixels: on a monitor where they are drawn at 2x, a 12 px margin is 24 of the
 screen's.
+
+**Colour.** The widgets are drawn in rust and gold unless another colour is picked:
+right-click → *Colour* has the warm Rust, Brick, Orange, Mustard, Olive, Mauve and Taupe,
+then the cool Navy, Teal, Slate and Graphite, each with a swatch, and *Custom...*, which
+opens the Windows colour dialog for any other. Every
+widget changes at once, and the choice is kept in `settings.ini` as `Tint=` under
+`[General]` — `R,G,B` or `#RRGGBB`, written there by hand if you like and picked up with
+*Reload settings*; empty is the rust. The colour is the accents': the title bars, the
+calendar's heading and the selected day, the clocks' hands and dots, the usage bars, the
+used part of the disk pie, the rain. The greys and whites of the windows themselves —
+faces, bevels, fields — and the text stay exactly as they are, and so do the note's
+papers with the red margin printed on them, and the weather's icons. An accent takes the
+colour's hue and how colourful it is, but keeps its own lightness, so the white text on
+a title bar stays as readable as it was; a very pale or very dark colour therefore comes
+out in between (navy gives a title bar that runs from navy to blue). The swatches show
+the colour as the widgets will have it. The skins' accents are all drawn around one
+colour, the `Tint` variable in each `skins/*.ini`, and what a skin keeps as it is is
+listed there as `Untinted=`.
 
 In the widgets themselves: tabs, month list, calendar selection, scroll to browse months,
 the 12/24-hour field, scroll along the usage graph's hours, checkboxes, the scrollbar,
@@ -135,8 +153,8 @@ the forecast to it; Escape leaves things as they were; an empty field goes back 
 place your public IP address gives. The pin is kept in `settings.ini` as `ManualLat`,
 `ManualLon` and `ManualLocation`, which can also be written by hand.
 
-**Rain Window** does nothing: it is rain the colour of rust falling past a small dark
-window, the size of the Sticky Note, to be looked at. Right-click it for how hard it
+**Rain Window** does nothing: it is rain the colour of rust (or of the colour picked)
+falling past a small dark window, the size of the Sticky Note, to be looked at. Right-click it for how hard it
 rains — *Light*, *Steady*, *Heavy* — and to *Pause* it; both are kept in `settings.ini`
 as `Rate` and `Paused`. Its colours are the `Rain*` variables in `skins/Win98Rain.ini`.
 
@@ -214,6 +232,7 @@ src/
     skin         the compiled tables, and drawing and hit-testing them
     canvas       the software canvas they are drawn on
     text         DirectWrite text, rasterised into the canvas
+    tint         the colour picked, and every colour turned to it
   platform/    Windows
     sys          the Win32 declarations all of it uses
     screens      the monitors, and keeping a widget on them

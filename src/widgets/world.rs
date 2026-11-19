@@ -461,6 +461,12 @@ impl Widget for World {
         }
     }
 
+    fn retint(&mut self) {
+        for face in &mut self.faces {
+            face.field.retint();
+        }
+    }
+
     fn shutdown(&mut self, _ctx: &mut Ctx) {
         self.stop_child();
     }

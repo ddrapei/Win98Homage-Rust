@@ -13,6 +13,12 @@
 //! them.  A meter whose *geometry* depends on one (the clock hands, the usage
 //! bars, the scrollbar thumb) is emitted as `Kind::Custom` and drawn by hand.
 //!
+//! Colours are drawn in the tint the user picks, which turns each by how far
+//! the skins' own `Tint=` is from it -- so every skin has to give the same
+//! one, and a colour is emitted as `Col::S`, for the tint to turn, unless it
+//! came from a variable the skin names in `Untinted=`: then it is `Col::F`,
+//! and left alone.
+//!
 //! The weather icons are decoded here as well, into premultiplied BGRA, so the
 
 use std::collections::HashMap;
@@ -72,18 +78,42 @@ fn parse_ini(text: &str) -> Vec<Section> {
 //  Variables and formulas
 // ---------------------------------------------------------------------------
 
+/// Put in front of what an untinted variable stands for, wherever it is put
+/// in: a colour that has one is drawn as it is, whatever the tint.  Only a
+/// colour can be untinted (`compile_skin` makes sure), so the mark is only
+/// ever met where a colour is read.
+const FIXED_MARK: char = '\u{1}';
+
 struct Ctx<'a> {
     vars: HashMap<String, String>,
     dynamic: &'a dyn Fn(&str) -> bool,
+    /// The colours the skin's `Untinted=` names, lower-cased.
+    untinted: Vec<String>,
+}
+
+/// Whether `name` is one of `patterns` (lower-cased; a trailing `*` matches
+/// any ending).
+fn matches_any(patterns: &[String], name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    patterns.iter().any(|p| match p.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => *p == name,
+    })
 }
 
 impl Ctx<'_> {
     /// Replace every `#Name#` that has a fixed value; leave the rest in place.
     fn resolve(&self, s: &str) -> String {
-        self.resolve_depth(s, 0)
+        self.resolve_depth(s, 0, true)
     }
 
-    fn resolve_depth(&self, s: &str, depth: u32) -> String {
+    /// The same, without the mark of an untinted colour: a variable's value
+    /// as the table of variables has it.
+    fn resolve_plain(&self, s: &str) -> String {
+        self.resolve_depth(s, 0, false)
+    }
+
+    fn resolve_depth(&self, s: &str, depth: u32, mark: bool) -> String {
         let mut out = String::with_capacity(s.len());
         let mut rest = s;
         while let Some(start) = rest.find('#') {
@@ -104,7 +134,10 @@ impl Ctx<'_> {
             }
             match self.vars.get(&name.to_ascii_lowercase()) {
                 Some(v) if !(self.dynamic)(name) && depth < 8 => {
-                    out.push_str(&self.resolve_depth(v, depth + 1));
+                    if mark && self.untinted.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                        out.push(FIXED_MARK);
+                    }
+                    out.push_str(&self.resolve_depth(v, depth + 1, mark));
                 }
                 _ => {
                     out.push('#');
@@ -234,7 +267,9 @@ fn parse_colour(s: &str) -> Option<u32> {
     }
 }
 
-/// A colour option as Rust: fixed, or the name of the variable that holds it.
+/// A colour option as Rust: one the tint turns (`Col::S`), one it leaves as
+/// it is because it came from an untinted variable (`Col::F`), or the name of
+/// the variable the program answers for (`Col::V`).
 fn colour_code(resolved: &str) -> Option<String> {
     let s = resolved.trim();
     if let Some(inner) = s.strip_prefix('#').and_then(|r| r.strip_suffix('#')) {
@@ -242,7 +277,9 @@ fn colour_code(resolved: &str) -> Option<String> {
             return Some(format!("Col::V({inner:?})"));
         }
     }
-    parse_colour(s).map(|c| format!("Col::S(0x{c:08X})"))
+    let fixed = s.contains(FIXED_MARK);
+    let c = parse_colour(&s.replace(FIXED_MARK, ""))?;
+    Some(if fixed { format!("Col::F(0x{c:08X})") } else { format!("Col::S(0x{c:08X})") })
 }
 
 // ---------------------------------------------------------------------------
@@ -387,9 +424,9 @@ fn shape_code(val: &str, opts: &[(String, String)], ctx: &Ctx, b: &mut Bounds) -
                 let stops: Vec<&str> = def.split('|').map(str::trim).collect();
                 let angle = eval(stops[0])?;
                 assert!(angle == 180.0 && stops.len() == 3, "only a two-stop 180 degree gradient is supported");
-                let c0 = parse_colour(stops[1].split(';').next()?)?;
-                let c1 = parse_colour(stops[2].split(';').next()?)?;
-                return Some(format!("Sh::Grad({},{},{},{},0x{c0:08X},0x{c1:08X})", x as i32, y as i32, w as i32, h as i32));
+                let c0 = colour_code(stops[1].split(';').next()?)?;
+                let c1 = colour_code(stops[2].split(';').next()?)?;
+                return Some(format!("Sh::Grad({},{},{},{},{c0},{c1})", x as i32, y as i32, w as i32, h as i32));
             }
             Some(format!("Sh::Rect({},{},{},{},{})", x as i32, y as i32, w as i32, h as i32, colour_code(&fill)?))
         }
@@ -526,7 +563,9 @@ const SKINS: [SkinDef; 7] = [
     SkinDef { module: "world", file: "Win98World.ini", dynamic: dyn_world },
 ];
 
-fn compile_skin(def: &SkinDef, root: &Path, fonts: &mut Vec<(String, bool)>, out: &mut String) {
+/// Compile one skin into `out`; its `Tint` -- the colour its palette is drawn
+/// around -- as 0xRRGGBB.
+fn compile_skin(def: &SkinDef, root: &Path, fonts: &mut Vec<(String, bool)>, out: &mut String) -> u32 {
     let path = root.join(def.file);
     println!("cargo:rerun-if-changed={}", path.display());
     let sections = parse_ini(&read_text(&path));
@@ -548,7 +587,52 @@ fn compile_skin(def: &SkinDef, root: &Path, fonts: &mut Vec<(String, bool)>, out
             var_order.push((spelled, k.clone()));
         }
     }
-    let ctx = Ctx { vars, dynamic: &def.dynamic };
+    let mut ctx = Ctx { vars, dynamic: &def.dynamic, untinted: Vec::new() };
+
+    // The colours a tint leaves alone: each name in Untinted=, or each
+    // colour whose name starts with one that ends in `*` (Paper* is the
+    // papers, not PaperX).  A name that is no colour of the skin's stops the
+    // build, rather than quietly tinting what it meant to keep -- and so does
+    // a second Untinted= line, which the reader would otherwise drop.
+    let lists = read_text(&path)
+        .lines()
+        .filter(|l| l.split_once('=').is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("untinted")))
+        .count();
+    assert!(lists <= 1, "{}: {lists} Untinted= lines; the names all go on one", def.file);
+    let untinted_list = ctx.vars.get("untinted").cloned().unwrap_or_default();
+    let mut untinted: Vec<String> = Vec::new();
+    for pattern in untinted_list.split(|c: char| c.is_whitespace() || c == '|').filter(|p| !p.is_empty()) {
+        let wild = pattern.ends_with('*');
+        let mut found = false;
+        for (spelled, key) in &var_order {
+            if !matches_any(&[pattern.to_ascii_lowercase()], key) {
+                continue;
+            }
+            let value = ctx.resolve_plain(&ctx.vars[key]);
+            if parse_colour(&value).is_some() {
+                found = true;
+                untinted.push(spelled.clone());
+            } else {
+                assert!(wild, "{}: Untinted= names {spelled}, which is not a colour ({value})", def.file);
+            }
+        }
+        assert!(found, "{}: Untinted= names {pattern}, which is no colour of the skin's", def.file);
+    }
+    ctx.untinted = untinted.iter().map(|n| n.to_ascii_lowercase()).collect();
+    // ...and a colour written as one of them (NoteRule=#Light#) is left
+    // alone too: in the tables that follows from the mark, and the program,
+    // which asks for it by name, is told it here.
+    for (spelled, key) in &var_order {
+        let value = ctx.resolve(&ctx.vars[key]);
+        if value.contains(FIXED_MARK) && parse_colour(&value.replace(FIXED_MARK, "")).is_some() && !untinted.contains(spelled) {
+            untinted.push(spelled.clone());
+        }
+    }
+    let tint = ctx
+        .vars
+        .get("tint")
+        .and_then(|v| parse_colour(&ctx.resolve_plain(v)))
+        .unwrap_or_else(|| panic!("{}: no Tint= colour in [Variables]", def.file));
 
     let mut meters = String::new();
     let mut size = (0, 0);
@@ -681,13 +765,23 @@ fn compile_skin(def: &SkinDef, root: &Path, fonts: &mut Vec<(String, bool)>, out
 
     writeln!(out, "pub mod {} {{", def.module).unwrap();
     writeln!(out, "    use super::*;").unwrap();
-    writeln!(out, "    pub static SKIN: Skin = Skin {{ w: {}, h: {}, meters: METERS, acts: &[{skin_acts}], vars: VARS }};", size.0, size.1).unwrap();
+    // the untinted colours by name, as the file spells them, for Skin::colour
+    let fixed: Vec<String> = untinted.iter().map(|n| format!("{n:?}")).collect();
+    writeln!(
+        out,
+        "    pub static SKIN: Skin = Skin {{ w: {}, h: {}, meters: METERS, acts: &[{skin_acts}], vars: VARS, fixed: &[{}] }};",
+        size.0,
+        size.1,
+        fixed.join(", ")
+    )
+    .unwrap();
     writeln!(out, "    static METERS: &[Meter] = &[\n{meters}    ];").unwrap();
     writeln!(out, "    static VARS: &[(&str, &str)] = &[").unwrap();
     for (spelled, key) in &var_order {
-        writeln!(out, "        ({spelled:?}, {:?}),", ctx.resolve(&ctx.vars[key])).unwrap();
+        writeln!(out, "        ({spelled:?}, {:?}),", ctx.resolve_plain(&ctx.vars[key])).unwrap();
     }
     writeln!(out, "    ];\n}}\n").unwrap();
+    tint & 0x00FF_FFFF
 }
 
 // ---------------------------------------------------------------------------
@@ -945,9 +1039,18 @@ fn main() {
 
     let mut out = String::from("// Generated by build.rs from the skins' .ini files.  Do not edit.\n\n");
     let mut fonts: Vec<(String, bool)> = Vec::new();
+    let mut tints = Vec::new();
     for def in &SKINS {
-        compile_skin(def, &root, &mut fonts, &mut out);
+        tints.push((def.file, compile_skin(def, &root, &mut fonts, &mut out)));
     }
+    // One tint is chosen for every widget, so every palette has to be drawn
+    // around the same colour for it to turn them all alike.
+    let (first, tint) = tints[0];
+    for &(file, other) in &tints[1..] {
+        assert!(other == tint, "{file}: Tint= is {other:06X}, but {first} has {tint:06X}: every skin's has to be the same");
+    }
+    writeln!(out, "/// The colour every skin's accents are drawn around (their `Tint=`), as 0xRRGGBB.").unwrap();
+    writeln!(out, "pub const TINT: u32 = 0x{tint:06X};\n").unwrap();
     writeln!(out, "/// (size in points, bold) for every font a String meter asks for.").unwrap();
     writeln!(out, "pub static FONTS: &[(f32, bool)] = &[").unwrap();
     for (size, bold) in &fonts {

@@ -56,6 +56,7 @@ use crate::settings::Settings;
 use crate::skin::{self, Act, Ev, Hooks, Skin};
 use crate::sys::*;
 use crate::text::Text;
+use crate::tint;
 use crate::weather::Weather;
 use crate::widget::{Ctx, Dirty, Outcome, Pressed, Request, Widget};
 use crate::world::World;
@@ -155,10 +156,21 @@ const CMD_EXIT: usize = 60;
 /// From here, the margin and the gap, by their place in the menu.
 const CMD_MARGIN: usize = 70;
 const CMD_GAP: usize = 80;
-/// From here up to CMD_TOGGLE: the widget's own entries.
+/// From here up to CMD_TINT: the widget's own entries.
 const CMD_WIDGET: usize = 100;
+/// From here, the tints the Colour menu names, by their place in it.
+const CMD_TINT: usize = 900;
+/// The Colour menu's last entry: any colour, from the colour dialog.
+const CMD_TINT_CUSTOM: usize = 999;
 /// From here up: show or close a window, by its number.
 const CMD_TOGGLE: usize = 1000;
+// Each list of numbers ends before the next begins: the margin's and the
+// gap's each the figures always offered and one more, then the widgets'
+// own, then the tints.
+const _: () = assert!(CMD_MARGIN + SPACINGS.len() + 1 <= CMD_GAP);
+const _: () = assert!(CMD_GAP + SPACINGS.len() + 1 <= CMD_WIDGET);
+const _: () = assert!(CMD_TINT + tint::PRESETS.len() <= CMD_TINT_CUSTOM);
+const _: () = assert!(CMD_TINT_CUSTOM < CMD_TOGGLE);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Position {
@@ -196,6 +208,9 @@ enum Later {
     /// come and go while the question is on the screen.  With it, the title
     /// and the text of the question, for a note that has something on it.
     Delete(String, Option<(String, String)>),
+    /// The colour dialog, starting from this tint (0xRRGGBB): what is picked
+    /// in it is the tint from then on.
+    PickColour(u32),
     Quit,
 }
 
@@ -777,6 +792,27 @@ impl App {
     /// The windows whose widgets are running.
     fn running(&self) -> Vec<usize> {
         (0..self.slots.len()).filter(|&i| self.widgets.get(i).is_some()).collect()
+    }
+
+    // ---- the colour ------------------------------------------------------------
+
+    /// Draw every widget in `rgb` (0xRRGGBB) from now on, and write it down
+    /// for the next run.  The widgets running are given it where they stand:
+    /// each reads its colours again and is drawn afresh, and nothing else of
+    /// it changes.
+    fn set_tint(&mut self, rgb: u32) {
+        let rgb = rgb & 0xFF_FFFF;
+        self.settings.set_tint(rgb);
+        if rgb == tint::current() {
+            return;
+        }
+        tint::set(rgb);
+        for i in self.running() {
+            if let Some(w) = self.widgets.get_mut(i) {
+                w.retint();
+            }
+            self.redraw(i);
+        }
     }
 
     // ---- the grid --------------------------------------------------------------
@@ -1408,6 +1444,16 @@ impl App {
             }
             m.push((SUB, String::new(), false));
         }
+        // The colours by name, each with a swatch of what it comes to (see
+        // show_menu), and any other from the colour dialog.
+        let now = tint::current();
+        m.push((SUB, String::from("Colour"), false));
+        for (k, (name, rgb)) in tint::PRESETS.iter().enumerate() {
+            m.push((CMD_TINT + k, String::from(*name), *rgb == now));
+        }
+        m.push((0, String::new(), false));
+        m.push((CMD_TINT_CUSTOM, String::from("Custom..."), tint::preset_name(now).is_none()));
+        m.push((SUB, String::new(), false));
         m.push((CMD_LOCK, String::from("Lock position"), self.locked_in_place));
         if let Some(i) = i {
             m.push((CMD_CLOSE, format!("Close {}", self.slots[i].title), false));
@@ -1460,6 +1506,12 @@ impl App {
                     self.set_spacing(Spacing { gap, ..self.spacing });
                 }
             }
+            CMD_TINT_CUSTOM => return Later::PickColour(tint::current()),
+            c if (CMD_TINT..CMD_TINT_CUSTOM).contains(&c) => {
+                if let Some(&(_, rgb)) = tint::PRESETS.get(c - CMD_TINT) {
+                    self.set_tint(rgb);
+                }
+            }
             CMD_CLOSE => {
                 if let Some(i) = i {
                     self.set_enabled(i, false);
@@ -1492,7 +1544,7 @@ impl App {
                     self.set_enabled(j, self.slots[j].hwnd == 0);
                 }
             }
-            c if c >= CMD_WIDGET => {
+            c if (CMD_WIDGET..CMD_TINT).contains(&c) => {
                 let Some(i) = i else { return Later::Nothing };
                 let outcome = {
                     let (mut ctx, widgets) = self.ctx();
@@ -1538,6 +1590,8 @@ impl App {
         let gap = self.settings.int("General", "WidgetGap", SPACING.gap).clamp(0, MOST_SPACE);
         self.spacing = Spacing { margin, gap };
         self.locked_in_place = self.settings.flag("General", "LockPosition", false);
+        // read before any widget is made, so that each is made in it
+        tint::set(self.settings.tint());
     }
 
     /// Which windows there are -- the seven, and a note for every other
@@ -1713,6 +1767,15 @@ fn run_later(mut later: Later) {
                 }
                 Later::Nothing
             }
+            Later::PickColour(now) => {
+                if let Some(rgb) = pick_colour(now) {
+                    with_app(|app| {
+                        app.set_tint(rgb);
+                        app.settings.save();
+                    });
+                }
+                Later::Nothing
+            }
             Later::Quit => {
                 unsafe { DestroyWindow(MAIN.load(Relaxed)) };
                 return;
@@ -1748,9 +1811,94 @@ fn recycle(files: &[PathBuf]) {
     unsafe { SHFileOperationW(&mut op) };
 }
 
+/// 0xRRGGBB as a COLORREF, 0x00BBGGRR -- and back again, the same way.
+const fn colorref(c: u32) -> u32 {
+    (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16 & 0xFF)
+}
+
+thread_local! {
+    /// The colour dialog's sixteen custom colours, as it last left them: the
+    /// presets to begin with, the rest white.
+    static CUSTOM_COLOURS: core::cell::Cell<[u32; 16]> = const {
+        let mut all = [0x00FF_FFFF; 16];
+        let mut k = 0;
+        while k < tint::PRESETS.len() {
+            all[k] = colorref(tint::PRESETS[k].1);
+            k += 1;
+        }
+        core::cell::Cell::new(all)
+    };
+}
+
+/// The Windows colour dialog, open at `rgb`: the colour picked in it, or
+/// None if it was cancelled.
+fn pick_colour(rgb: u32) -> Option<u32> {
+    let mut custom = CUSTOM_COLOURS.get();
+    let mut cc = CHOOSECOLORW {
+        lStructSize: size_of::<CHOOSECOLORW>() as u32,
+        hwndOwner: 0,
+        hInstance: 0,
+        rgbResult: colorref(rgb),
+        lpCustColors: custom.as_mut_ptr(),
+        Flags: CC_RGBINIT | CC_FULLOPEN | CC_ANYCOLOR,
+        lCustData: 0,
+        lpfnHook: 0,
+        lpTemplateName: null(),
+    };
+    let picked = unsafe { ChooseColorW(&mut cc) } != 0;
+    CUSTOM_COLOURS.set(custom);
+    picked.then(|| colorref(cc.rgbResult))
+}
+
+/// What a Colour menu entry's swatch shows: the accent as that tint will
+/// make it -- light and dark kept, so not always the colour of that name --
+/// or None for an entry without one.
+fn swatch_colour(id: usize) -> Option<u32> {
+    let accent = 0xFF00_0000 | tint::BASE;
+    match id {
+        CMD_TINT_CUSTOM => tint::preset_name(tint::current()).is_none().then(|| tint::apply_with(tint::current(), accent)),
+        c if (CMD_TINT..CMD_TINT_CUSTOM).contains(&c) => tint::PRESETS.get(c - CMD_TINT).map(|p| tint::apply_with(p.1, accent)),
+        _ => None,
+    }
+}
+
+/// A menu entry's swatch of `argb`, the size of a check mark: the colour in a
+/// dark frame.  The caller deletes it.
+fn swatch(argb: u32) -> HGDIOBJ {
+    let (w, h) = unsafe { (GetSystemMetrics(SM_CXMENUCHECK).max(8), GetSystemMetrics(SM_CYMENUCHECK).max(8)) };
+    let header = BITMAPINFOHEADER {
+        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: w,
+        biHeight: -h, // top-down
+        biPlanes: 1,
+        biBitCount: 32,
+        ..Default::default()
+    };
+    let mut bits: *mut c_void = null_mut();
+    let bitmap = unsafe { CreateDIBSection(0, &header, DIB_RGB_COLORS, &mut bits, 0, 0) };
+    if bitmap == 0 || bits.is_null() {
+        return 0;
+    }
+    // SAFETY: the DIB is w x h 32-bit pixels.
+    let px = unsafe { core::slice::from_raw_parts_mut(bits as *mut u32, (w * h) as usize) };
+    for y in 0..h {
+        for x in 0..w {
+            // a pixel of nothing round it, then the frame, then the colour
+            let ring = x.min(y).min(w - 1 - x).min(h - 1 - y);
+            px[(y * w + x) as usize] = match ring {
+                0 => 0,
+                1 => 0xFF40_4040,
+                _ => 0xFF00_0000 | argb,
+            };
+        }
+    }
+    bitmap
+}
+
 fn show_menu(i: Option<usize>) -> Later {
     let Some(model) = with_app(|app| app.menu(i)) else { return Later::Nothing };
     let main = MAIN.load(Relaxed);
+    let mut swatches: Vec<HGDIOBJ> = Vec::new();
     let chosen = unsafe {
         let root = CreatePopupMenu();
         let mut stack = vec![root];
@@ -1771,6 +1919,24 @@ fn show_menu(i: Option<usize>) -> Later {
                 AppendMenuW(menu, MF_SEPARATOR, 0, null());
             } else {
                 AppendMenuW(menu, MF_STRING | if *checked { MF_CHECKED } else { 0 }, *id, wide(label).as_ptr());
+                if let Some(bitmap) = swatch_colour(*id).map(swatch).filter(|&b| b != 0) {
+                    let info = MENUITEMINFOW {
+                        cbSize: size_of::<MENUITEMINFOW>() as u32,
+                        fMask: MIIM_BITMAP,
+                        fType: 0,
+                        fState: 0,
+                        wID: 0,
+                        hSubMenu: 0,
+                        hbmpChecked: 0,
+                        hbmpUnchecked: 0,
+                        dwItemData: 0,
+                        dwTypeData: null_mut(),
+                        cch: 0,
+                        hbmpItem: bitmap,
+                    };
+                    SetMenuItemInfoW(menu, *id as u32, 0, &info);
+                    swatches.push(bitmap);
+                }
             }
         }
         let mut at = POINT::default();
@@ -1780,6 +1946,10 @@ fn show_menu(i: Option<usize>) -> Later {
         let chosen = TrackPopupMenu(root, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, at.x, at.y, 0, main, null());
         PostMessageW(main, WM_NULL, 0, 0);
         DestroyMenu(root);
+        // a menu does not own its bitmaps
+        for bitmap in swatches {
+            DeleteObject(bitmap);
+        }
         chosen as usize
     };
     if chosen == 0 {
@@ -2383,6 +2553,45 @@ mod tests {
     }
 
     #[test]
+    fn a_colour_from_the_menu_is_drawn_in_kept_and_ticked() {
+        let (mut app, dir) = app("tint");
+        // what the Colour menu has ticked
+        let ticked = |app: &App| -> Vec<String> {
+            app.menu(None).into_iter().filter(|m| (CMD_TINT..=CMD_TINT_CUSTOM).contains(&m.0) && m.2).map(|m| m.1).collect()
+        };
+        assert_eq!((tint::current(), ticked(&app)), (tint::BASE, vec![String::from("Rust")]));
+
+        // a preset, with a widget running to be given it
+        app.set_enabled(NOTE, true);
+        let navy = tint::PRESETS.iter().position(|p| p.0 == "Navy").unwrap();
+        app.menu_command(Some(NOTE), CMD_TINT + navy);
+        assert_eq!(tint::current(), 0x00_0080);
+        assert_eq!(ticked(&app), ["Navy"]);
+        let written = std::fs::read_to_string(dir.join("settings.ini")).unwrap();
+        assert!(written.lines().any(|l| l == "Tint=0,0,128"), "{written}");
+
+        // any other is the dialog's, which is opened once the App is let go
+        assert!(matches!(app.menu_command(None, CMD_TINT_CUSTOM), Later::PickColour(0x00_0080)));
+        app.set_tint(0x33_6699);
+        assert_eq!(ticked(&app), ["Custom..."]);
+        assert_eq!(app.settings.get("General", "Tint"), Some("51,102,153"));
+
+        // written in by hand and read again, as Reload settings does
+        app.settings.set("General", "Tint", "#123456");
+        app.read_general();
+        assert_eq!(tint::current(), 0x12_3456);
+        app.settings.set("General", "Tint", "nonsense");
+        app.read_general();
+        assert_eq!(tint::current(), tint::BASE);
+
+        // the skins' own is kept as nothing at all
+        app.menu_command(None, CMD_TINT + navy);
+        app.menu_command(None, CMD_TINT);
+        assert_eq!((tint::current(), app.settings.get("General", "Tint")), (tint::BASE, Some("")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_press_in_the_margin_round_a_frame_is_for_the_frame_under_it() {
         let (mut app, dir) = app("press");
         let pad = Kind::Notes.skin().int("Pad", 12);
@@ -2447,5 +2656,31 @@ mod tests {
         let icon = App::make_icon();
         assert_ne!(icon, 0, "Windows would not take skins/Icons/gears_tweakui_b.ico");
         unsafe { DestroyIcon(icon) };
+    }
+
+    #[test]
+    fn the_colour_dialog_and_the_swatches_are_handed_what_windows_expects() {
+        // the structures' sizes as the SDK's headers make them
+        let wide = cfg!(target_pointer_width = "64");
+        assert_eq!(size_of::<CHOOSECOLORW>(), if wide { 72 } else { 36 });
+        assert_eq!(size_of::<MENUITEMINFOW>(), if wide { 80 } else { 48 });
+        // a COLORREF is the other way round, and turning it back is the same
+        assert_eq!(colorref(0x12_3456), 0x56_3412);
+        assert_eq!(colorref(colorref(0x12_3456)), 0x12_3456);
+
+        // a swatch for every preset, of the accent it makes; one for Custom...
+        // only while the tint is none of them; none for anything else
+        let accent = 0xFF00_0000 | tint::BASE;
+        for (k, (_, rgb)) in tint::PRESETS.iter().enumerate() {
+            assert_eq!(swatch_colour(CMD_TINT + k), Some(tint::apply_with(*rgb, accent)));
+        }
+        assert_eq!(swatch_colour(CMD_TINT_CUSTOM), None);
+        tint::set(0x33_6699);
+        assert_eq!(swatch_colour(CMD_TINT_CUSTOM), Some(tint::apply_with(0x33_6699, accent)));
+        tint::set(tint::BASE);
+        assert_eq!(swatch_colour(CMD_LOCK), None);
+        let bitmap = swatch(0x00_0080);
+        assert_ne!(bitmap, 0);
+        unsafe { DeleteObject(bitmap) };
     }
 }

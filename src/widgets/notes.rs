@@ -292,7 +292,19 @@ fn show(chars: &[char], out: &mut String) {
 /// as there is a next one.  A note's `Colour` in settings.ini is the number.
 fn papers() -> Vec<u32> {
     let found: Vec<u32> = (1..).map_while(|i| skin::parse_colour(SKIN.var(&format!("Paper{i}")))).collect();
-    if found.is_empty() { vec![SKIN.colour("FieldBg")] } else { found }
+    // the paper is the pad's own colour, whatever the tint (Untinted=)
+    if found.is_empty() { vec![skin::parse_colour(SKIN.var("FieldBg")).unwrap_or(0xFFFF_FFFF)] } else { found }
+}
+
+/// The colours the note draws in by hand, in the tint: its ink, the ink of
+/// what cannot be used now, what is selected and the ink on it; then the
+/// scrollbar thumb's face, hilite, dark shadow, light and shadow.  One place,
+/// for the start and for every change of tint.
+fn colours() -> ([u32; 4], [u32; 5]) {
+    (
+        ["Ink", "Shadow", "SelectBg", "SelectInk"].map(|c| SKIN.colour(c)),
+        ["Face", "Hilite", "DkShadow", "Light", "Shadow"].map(|c| SKIN.colour(c)),
+    )
 }
 
 /// A fractional x as the pixel column it falls on.
@@ -408,6 +420,7 @@ impl Notes {
         let points = SKIN.num("FontSize", 8.0) as f32;
         let (paper_x, paper_y) = (n("PaperX", 8), n("PaperY", 29));
         let (trough_y, trough_h) = (n("TroughY", 40), n("TroughH", 136));
+        let ([ink, faded, select_bg, select_ink], palette) = colours();
         let mut notes = Notes {
             pad: n("Pad", 12),
             rows_shown: n("Rows", 12).max(1),
@@ -420,12 +433,12 @@ impl Notes {
             trough_x: n("TroughX", 171),
             trough_y,
             trough_h,
-            ink: SKIN.colour("Ink"),
-            faded: SKIN.colour("Shadow"),
-            select_bg: SKIN.colour("SelectBg"),
-            select_ink: SKIN.colour("SelectInk"),
+            ink,
+            faded,
+            select_bg,
+            select_ink,
             papers,
-            palette: ["Face", "Hilite", "DkShadow", "Light", "Shadow"].map(|c| SKIN.colour(c)),
+            palette,
             font: skin::FONTS.iter().position(|&(pt, bold)| pt == points && !bold).unwrap_or(0),
             autosave_ms: n("AutoSave", 1000).max(0) as u32,
             box_meter: SKIN.meter("MeterBox"),
@@ -1129,6 +1142,11 @@ impl Widget for Notes {
         self.bak_due = false;
         self.refresh();
         Dirty::All
+    }
+
+    fn retint(&mut self) {
+        // the papers are the pad's own colours: they stay as they are
+        ([self.ink, self.faded, self.select_bg, self.select_ink], self.palette) = colours();
     }
 
     fn menu(&self, items: &mut Vec<MenuItem>) {

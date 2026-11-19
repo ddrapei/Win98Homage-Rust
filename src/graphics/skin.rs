@@ -6,9 +6,14 @@
 //! moving one sits -- is asked of the widget through [`Hooks`], and the
 //! widget answers from plain fields.  Meters whose geometry itself is
 //! computed (`Kind::Custom`) are handed to the widget whole.
+//!
+//! Every colour is drawn in the tint the user picked (`tint`), but for those
+//! the skin names in `Untinted=`: the tables mark each of those `Col::F`, and
+//! [`Skin::colour`] knows them by name.
 
 use crate::canvas::{Canvas, Rect};
 use crate::text::{Spec, Text};
+use crate::tint;
 
 pub struct Skin {
     pub w: i32,
@@ -18,6 +23,9 @@ pub struct Skin {
     /// meter claims it.
     pub acts: &'static [Act],
     pub vars: &'static [(&'static str, &'static str)],
+    /// The colour variables a tint leaves alone, every one by name: what the
+    /// skin's `Untinted=` comes to.
+    pub fixed: &'static [&'static str],
 }
 
 pub struct Meter {
@@ -46,7 +54,7 @@ pub enum Sh {
     /// x, y, w, h
     Rect(i32, i32, i32, i32, Col),
     /// x, y, w, h, left colour, right colour
-    Grad(i32, i32, i32, i32, u32, u32),
+    Grad(i32, i32, i32, i32, Col, Col),
     /// x0, y, x1, width, colour, dash on, dash off
     Line(f32, f32, f32, f32, Col, f32, f32),
     /// cx, cy, rx, ry
@@ -58,9 +66,11 @@ pub enum Sh {
 
 #[derive(Clone, Copy)]
 pub enum Col {
-    /// 0xAARRGGBB
+    /// 0xAARRGGBB, drawn in the tint.
     S(u32),
-    /// The widget knows.
+    /// 0xAARRGGBB, drawn as it is whatever the tint: an untinted variable's.
+    F(u32),
+    /// The widget knows -- and answers in the tint, or not, itself.
     V(&'static str),
 }
 
@@ -116,9 +126,16 @@ impl Skin {
         self.num(name, default as f64) as i32
     }
 
-    /// An "R,G,B[,A]" variable as 0xAARRGGBB.
+    /// An "R,G,B[,A]" variable as 0xAARRGGBB, in the current tint unless the
+    /// skin says it is untinted.
     pub fn colour(&self, name: &str) -> u32 {
-        parse_colour(self.var(name)).unwrap_or(0xFF00_0000)
+        let c = parse_colour(self.var(name)).unwrap_or(0xFF00_0000);
+        if self.is_fixed(name) { c } else { tint::apply(c) }
+    }
+
+    /// Whether this is one of the colours `Untinted=` names.
+    pub fn is_fixed(&self, name: &str) -> bool {
+        self.fixed.iter().any(|n| n.eq_ignore_ascii_case(name))
     }
 
     pub fn meter(&self, name: &str) -> Option<&'static Meter> {
@@ -156,7 +173,8 @@ pub trait Hooks {
 
 fn colour(c: Col, hooks: &dyn Hooks) -> u32 {
     match c {
-        Col::S(v) => v,
+        Col::S(v) => tint::apply(v),
+        Col::F(v) => v,
         Col::V(name) => hooks.colour(name),
     }
 }
@@ -216,7 +234,9 @@ pub fn draw_meter(m: &Meter, x: i32, y: i32, hooks: &dyn Hooks, canvas: &mut Can
                 for s in *shapes {
                     match *s {
                         Sh::Rect(sx, sy, w, h, c) => canvas.fill(x + sx, y + sy, w, h, colour(c, hooks)),
-                        Sh::Grad(sx, sy, w, h, c0, c1) => canvas.hgrad(x + sx, y + sy, w, h, c0, c1),
+                        Sh::Grad(sx, sy, w, h, c0, c1) => {
+                            canvas.hgrad(x + sx, y + sy, w, h, colour(c0, hooks), colour(c1, hooks))
+                        }
                         Sh::Line(x0, ly, x1, width, c, on, off) => {
                             canvas.hline(x as f32 + x0, y as f32 + ly, x as f32 + x1, width, on, off, colour(c, hooks))
                         }

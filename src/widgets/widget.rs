@@ -163,6 +163,12 @@ pub trait Widget: Hooks {
         Dirty::None
     }
 
+    /// The tint has changed: read again every colour taken from the skin,
+    /// and make again whatever was drawn from them.  The host redraws the
+    /// whole window after.  (The skin's own tables need nothing: they are
+    /// tinted as they are drawn.)
+    fn retint(&mut self) {}
+
     /// Its own entries for the right-click menu.
     fn menu(&self, _items: &mut Vec<MenuItem>) {}
     fn menu_command(&mut self, _id: u32, _ctx: &mut Ctx) -> Outcome {

@@ -198,6 +198,13 @@ pub struct DateTime {
     grid_key: (Tm, i32, Option<(i32, i32)>, Option<(i32, i32, i32)>, u32),
 }
 
+/// The colours the widget draws in by hand, in the tint: the ink, the
+/// blocks' front, top and side, and the ruler's two marks.  One place, for
+/// the start and for every change of tint.
+fn colours() -> [u32; 6] {
+    ["Ink", "UseInk", "UseTop", "UseSide", "Shadow", "Light"].map(|c| SKIN.colour(c))
+}
+
 impl DateTime {
     pub fn new(ctx: &Ctx, journal: Option<Option<PathBuf>>) -> DateTime {
         let s = &*ctx.settings;
@@ -207,6 +214,7 @@ impl DateTime {
             Some(path) => Usage::at(path),
             None => Usage::open(&s.dir()),
         };
+        let [ink, use_ink, use_top, use_side, shadow, light] = colours();
         DateTime {
             week_start: if var("WeekStart") == 0 { 0 } else { 1 },
             use24: var("Use24Hour") != 0,
@@ -216,12 +224,12 @@ impl DateTime {
             bar: (SKIN.int("BarX", 29), SKIN.int("BarY", 293), SKIN.int("BarW", 322), SKIN.int("BarH", 40)),
             hours,
             home_hours: hours,
-            ink: SKIN.colour("Ink"),
-            use_ink: SKIN.colour("UseInk"),
-            use_top: SKIN.colour("UseTop"),
-            use_side: SKIN.colour("UseSide"),
-            shadow: SKIN.colour("Shadow"),
-            light: SKIN.colour("Light"),
+            ink,
+            use_ink,
+            use_top,
+            use_side,
+            shadow,
+            light,
             page: 0,
             list_open: false,
             hovered: 0,
@@ -781,6 +789,10 @@ impl Widget for DateTime {
             "Close" => Outcome::request(Request::Close),
             _ => Outcome::none(),
         }
+    }
+
+    fn retint(&mut self) {
+        [self.ink, self.use_ink, self.use_top, self.use_side, self.shadow, self.light] = colours();
     }
 
     fn menu(&self, items: &mut Vec<MenuItem>) {

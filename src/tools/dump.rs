@@ -28,6 +28,7 @@
 //!                                      4 network, 5 disc), label, bytes in
 //!                                      all, bytes free
 //!   set.Notes.Created=30 Jul 2026      any settings.ini value
+//!   set.General.Tint=0,0,128           among them the widgets' colour
 //!   do.datetime=SetPage 1;Select 12    commands to run before drawing
 //!   type.notes=press 60 50;type milk;key Shift+Home
 //!                                      the note typed on, a step at a time:
@@ -57,6 +58,7 @@ use crate::resources::Resources;
 use crate::settings::Settings;
 use crate::skin::{self, Hooks};
 use crate::text::Text;
+use crate::tint;
 use crate::weather::Weather;
 use crate::widget::{Ctx, Widget};
 use crate::world::World;
@@ -80,16 +82,24 @@ fn write_bmp(path: &Path, w: i32, h: i32, px: &[u32]) -> std::io::Result<()> {
     std::fs::write(path, out)
 }
 
-fn render(widget: &dyn Widget, text: &mut Text, path: &Path, n: i32) {
+/// The widget drawn whole, as its window shows it at a scale of `n`: its
+/// skin's width times n pixels a row.
+fn picture(widget: &dyn Widget, text: &mut Text, n: i32) -> Vec<u32> {
     let skin = widget.skin();
     let mut px = vec![0u32; (skin.w * skin.h) as usize];
     // SAFETY: the canvas is exactly the vector.
     let mut canvas = unsafe { Canvas::new(px.as_mut_ptr(), skin.w, skin.w, skin.h) };
     skin::draw(skin, widget as &dyn Hooks, &mut canvas, text, &mut Vec::new());
+    drop(canvas);
     // put up as the window is, at the scale asked for
     let mut out = vec![0u32; px.len() * (n * n) as usize];
     canvas::scale_into(&px, skin.w as usize, Rect::new(0, 0, skin.w, skin.h), &mut out, (skin.w * n) as usize, n);
-    let _ = write_bmp(path, skin.w * n, skin.h * n, &out);
+    out
+}
+
+fn render(widget: &dyn Widget, text: &mut Text, path: &Path, n: i32) {
+    let skin = widget.skin();
+    let _ = write_bmp(path, skin.w * n, skin.h * n, &picture(widget, text, n));
 }
 
 /// "SetPage 1;Click 30 40": each command with its argument, or its point.
@@ -183,6 +193,8 @@ pub fn run(args: &[String]) -> i32 {
             settings.set(section, name, value);
         }
     }
+    // in the colour settings.ini would have them in: set.General.Tint=0,0,128
+    tint::set(settings.tint());
     let Some(mut text) = Text::new(skin::datetime::SKIN.var("Font"), skin::FONTS) else { return 1 };
     let mut ctx = Ctx { now, settings: &mut settings, locked: false, signed_in: None };
 
@@ -254,4 +266,136 @@ pub fn run(args: &[String]) -> i32 {
         render(&w, &mut text, &dir.join("world.bmp"));
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One of every kind of widget, made as `--dump` makes them, showing the
+    /// same thing whenever it is made: in whatever tint is set.
+    fn every_widget(ctx: &mut Ctx, note: &Path) -> Vec<Box<dyn Widget>> {
+        let mut datetime = DateTime::new(ctx, Some(None));
+        datetime.tick(ctx);
+        perform(&mut datetime, "Select 12", ctx);
+        let mut resources = Resources::new();
+        resources.set_fixed(0.44, 0.95);
+        resources.tick(ctx);
+        let notes = Notes::new(ctx, notes::FIRST, Some(note.to_path_buf()));
+        let mut weather = Weather::new(ctx);
+        weather.set_fixed(9.3, 3, false, 10.1, 4.9, "Lviv");
+        // something selected in the city field, for its colours too
+        type_on(&mut weather, "double 107 167");
+        let mut rain = Rain::new(ctx);
+        rain.set_fixed(2.5);
+        let mut disk = Disk::new(ctx);
+        disk.set_fixed(b'C', 3, "Windows", 511_000_000_000, 118_000_000_000);
+        let mut world = World::new(ctx);
+        world.set_fixed();
+        vec![
+            Box::new(datetime),
+            Box::new(resources),
+            Box::new(notes),
+            Box::new(weather),
+            Box::new(rain),
+            Box::new(disk),
+            Box::new(world),
+        ]
+    }
+
+    #[test]
+    fn a_widget_given_another_tint_is_drawn_as_one_made_in_it() {
+        let dir = std::env::temp_dir().join(format!("win98-dump-test-{}-tint", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let note = dir.join("Notes.txt");
+        std::fs::write(&note, "Buy milk\r\n[ ] call home\r\n[x] done\r\n").unwrap();
+        let mut text = Text::new(skin::datetime::SKIN.var("Font"), skin::FONTS).unwrap();
+        let mut settings = Settings::in_memory();
+        settings.set("Notes", "Ruled", "1");
+        settings.set("Notes", "Created", "30 Jul 2026");
+        let now = clock::parse_local("2026-11-11 17:30:45").unwrap();
+        let mut ctx = Ctx { now, settings: &mut settings, locked: false, signed_in: None };
+
+        tint::set(tint::BASE);
+        let mut widgets = every_widget(&mut ctx, &note);
+        let before: Vec<Vec<u32>> = widgets.iter().map(|w| picture(w.as_ref(), &mut text, 1)).collect();
+
+        let navy = tint::PRESETS.iter().find(|p| p.0 == "Navy").unwrap().1;
+        tint::set(navy);
+        for w in &mut widgets {
+            w.retint();
+        }
+        let fresh = every_widget(&mut ctx, &note);
+        for ((w, made), before) in widgets.iter().zip(&fresh).zip(&before) {
+            let skin = w.skin();
+            let name = w.about().lines().next().unwrap_or("?");
+            let after = picture(w.as_ref(), &mut text, 1);
+            let want = picture(made.as_ref(), &mut text, 1);
+            if let Some(at) = after.iter().zip(&want).position(|(a, b)| a != b) {
+                let (x, y) = (at as i32 % skin.w, at as i32 / skin.w);
+                panic!("{name} ({}x{}): retinted, {x},{y} is {:08X}; made in the tint, {:08X}", skin.w, skin.h, after[at], want[at]);
+            }
+            assert_ne!(&after, before, "{name}: the tint changed nothing");
+            // nothing left over in the skins' own accent or title bar
+            for var in ["Accent2", "TitleB"] {
+                let old = skin::parse_colour(skin.var(var)).unwrap();
+                assert!(!after.contains(&old), "{name}: still has {var} ({old:08X}) somewhere");
+            }
+        }
+
+        // And what the tint leaves alone it has left alone: every pixel that
+        // was one of the skin's untinted colours -- the chrome's greys and
+        // whites, the inks on the accents, the note's paper, the weather's
+        // earth -- is still that colour.  Nearly: one of them is within 1
+        // (the sheet lies under the note's click target, black at 1/255),
+        // and stays within 3, for the edge of an accent that touches a
+        // pixel of the chrome by a hair turns with the accent.  A colour the
+        // tint had turned would be tens out.
+        let within = |d: i32| move |p: u32, c: u32| p >> 24 == c >> 24 && (0..3).all(|k| ((p >> (8 * k) & 255) as i32 - (c >> (8 * k) & 255) as i32).abs() <= d);
+        let (near, close) = (within(1), within(3));
+        let own = |skin: &skin::Skin, vars: &[&str]| -> Vec<u32> { vars.iter().filter_map(|v| skin::parse_colour(skin.var(v))).collect() };
+        for (i, w) in widgets.iter().enumerate() {
+            let (skin, name) = (w.skin(), w.about().lines().next().unwrap_or("?"));
+            let kept = own(skin, skin.fixed);
+            let after = picture(w.as_ref(), &mut text, 1);
+            let mut seen = 0;
+            for (at, (&was, &is)) in before[i].iter().zip(&after).enumerate() {
+                if let Some(&c) = kept.iter().find(|&&c| near(was, c)) {
+                    let (x, y) = (at as i32 % skin.w, at as i32 / skin.w);
+                    assert!(close(is, c), "{name}: {x},{y} was {was:08X}, untinted {c:08X}, and the tint made it {is:08X}");
+                    seen += 1;
+                }
+            }
+            // the chrome is a good part of every window
+            assert!(seen > 1000, "{name} shows next to nothing of its untinted colours ({seen} px)");
+        }
+        // among them the paper and its margin, and the earth
+        for (i, vars) in [(2, &["Paper1", "NoteMargin"][..]), (3, &["IcoOutline", "IcoLand", "IcoRain", "IcoIce"][..])] {
+            let colours = own(widgets[i].skin(), vars);
+            let seen = before[i].iter().filter(|&&p| colours.iter().any(|&c| near(p, c))).count();
+            assert!(seen > 20, "window {i} shows next to nothing of {vars:?}");
+        }
+
+        // Back to the skins' own -- from the tint they were given, and from
+        // one they were made in -- is exactly what there was before any tint,
+        // pixel for pixel.
+        let same_as_before = |widgets: &mut Vec<Box<dyn Widget>>, text: &mut Text, from: &str| {
+            tint::set(tint::BASE);
+            for (w, before) in widgets.iter_mut().zip(&before) {
+                w.retint();
+                let name = w.about().lines().next().unwrap_or("?");
+                assert!(picture(w.as_ref(), text, 1) == *before, "{name}: back from {from}, not as it was");
+            }
+        };
+        same_as_before(&mut widgets, &mut text, "Navy");
+        for (name, rgb) in &tint::PRESETS[1..] {
+            tint::set(*rgb);
+            let mut made = every_widget(&mut ctx, &note);
+            same_as_before(&mut made, &mut text, name);
+        }
+
+        tint::set(tint::BASE);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

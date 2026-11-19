@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::skin;
+use crate::{skin, tint};
 
 pub struct Settings {
     path: PathBuf,
@@ -163,6 +163,19 @@ impl Settings {
         self.set(section, key, &value.to_string());
     }
 
+    /// The colour the widgets are drawn in, as 0xRRGGBB: `Tint` under
+    /// [General], or -- empty, missing, or not a colour -- the skins' own.
+    pub fn tint(&self) -> u32 {
+        self.get("General", "Tint").and_then(tint::parse).unwrap_or(tint::BASE)
+    }
+
+    /// Keep `rgb` as the widgets' colour.  The skins' own is kept as nothing
+    /// at all, so that it stays whatever they say it is.
+    pub fn set_tint(&mut self, rgb: u32) {
+        let value = if rgb & 0xFF_FFFF == tint::BASE { String::new() } else { tint::format(rgb) };
+        self.set("General", "Tint", &value);
+    }
+
     /// The name of every section, in the order the file has them.
     pub fn sections(&self) -> impl Iterator<Item = &str> {
         self.lines.iter().filter_map(|l| header(l))
@@ -207,8 +220,9 @@ fn default_file() -> String {
         "\
 ; Win98 Widgets -- settings.
 ; Edit while the program is not running, or use \"Reload settings\" in the tray
-; menu afterwards.  Positions, the paper colour, the 12/24-hour choice and the
-; weather's city are written back here by the program; everything else is yours.
+; menu afterwards.  Positions, the paper colour, the 12/24-hour choice, the
+; weather's city and the widgets' colour are written back here by the program;
+; everything else is yours.
 
 [General]
 ; desktop = behind every window, on the desktop itself
@@ -217,6 +231,11 @@ fn default_file() -> String {
 Position=desktop
 SnapEdges=1
 LockPosition=0
+; the widgets' accent colour (right-click, Colour): R,G,B or #RRGGBB.  Title
+; bars, clock hands and the like take its hue and how colourful it is, but
+; keep their own lightness, so a very pale or very dark colour comes out in
+; between; the greys and whites stay as they are.  Empty is the skins' own rust
+Tint=
 
 [DateTime]
 Enabled=1
@@ -320,6 +339,23 @@ mod tests {
         s.remove_section("B");
         assert_eq!(s.lines, ["[A]", "x=1"]);
         assert!(s.dirty);
+    }
+
+    #[test]
+    fn the_tint_is_kept_under_general_and_the_skins_own_is_kept_as_nothing() {
+        let mut s = Settings::in_memory();
+        assert_eq!((s.get("General", "Tint"), s.tint()), (Some(""), tint::BASE));
+        s.set_tint(0x00_0080);
+        assert_eq!((s.get("General", "Tint"), s.tint()), (Some("0,0,128"), 0x00_0080));
+        s.set_tint(tint::BASE);
+        assert_eq!((s.get("General", "Tint"), s.tint()), (Some(""), tint::BASE));
+        // written by hand: either way of writing it, or anything else at all
+        for (written, read) in [("#336699", 0x33_6699), ("51, 102, 153", 0x33_6699), ("blue", tint::BASE), ("300,0,0", tint::BASE)] {
+            s.set("General", "Tint", written);
+            assert_eq!(s.tint(), read, "{written}");
+        }
+        // a settings.ini from before there was a tint
+        assert_eq!(of("[General]\nPosition=desktop").tint(), tint::BASE);
     }
 
     #[test]

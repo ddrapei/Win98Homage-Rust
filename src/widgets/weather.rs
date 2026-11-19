@@ -604,6 +604,11 @@ impl Widget for Weather {
         }
     }
 
+    fn retint(&mut self) {
+        // the icons are pictures, and keep their own colours
+        self.field.retint();
+    }
+
     fn menu(&self, items: &mut Vec<MenuItem>) {
         items.push(MenuItem { id: 1, label: "Refresh now", checked: false });
         items.push(MenuItem { id: 2, label: "Fahrenheit", checked: self.unit == "fahrenheit" });

@@ -243,6 +243,14 @@ pub struct Disk {
     frozen: bool,
 }
 
+/// A colour for each part of the pie, by its number (OUT is never drawn), in
+/// the tint.  The picture holds the parts, not the colours: a change of tint
+/// needs only these read again.
+fn colours() -> [u32; 8] {
+    let c = |name: &str| SKIN.colour(name);
+    [0, c("Ink"), c("PieUsed"), c("PieUsedSide"), c("PieFree"), c("PieFreeSide"), c("PieNone"), c("PieNoneSide")]
+}
+
 impl Disk {
     pub fn new(ctx: &Ctx) -> Disk {
         let (w, h) = (SKIN.int("PieW", 104).max(2), SKIN.int("PieH", 54).max(2));
@@ -258,16 +266,7 @@ impl Disk {
             w,
             h,
             depth: SKIN.int("PieDepth", 10).clamp(0, h - 1),
-            colours: [
-                0,
-                SKIN.colour("Ink"),
-                SKIN.colour("PieUsed"),
-                SKIN.colour("PieUsedSide"),
-                SKIN.colour("PieFree"),
-                SKIN.colour("PieFreeSide"),
-                SKIN.colour("PieNone"),
-                SKIN.colour("PieNoneSide"),
-            ],
+            colours: colours(),
             pie: Vec::new(),
             frozen: false,
         };
@@ -497,6 +496,10 @@ impl Widget for Disk {
             "Close" => Outcome::request(Request::Close),
             _ => Outcome::none(),
         }
+    }
+
+    fn retint(&mut self) {
+        self.colours = colours();
     }
 
     fn menu(&self, items: &mut Vec<MenuItem>) {

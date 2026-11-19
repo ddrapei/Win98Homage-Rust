@@ -57,6 +57,12 @@ fn stops(text: Option<&mut Text>, font: usize, s: &str) -> Vec<f32> {
     out
 }
 
+/// The colours a field draws in, from its skin, in the tint: the ink, and
+/// what is selected with the ink on it.
+fn colours(skin: &Skin) -> [u32; 3] {
+    ["Ink", "SelectBg", "SelectInk"].map(|c| skin.colour(c))
+}
+
 /// One city field.  It draws whatever name it is handed while nobody is
 /// typing, and its own text while somebody is -- by the same code, from the
 /// same x, so the one turns into the other without a pixel moving.
@@ -67,6 +73,9 @@ pub struct Field {
     inset: i32,
     /// Px from its top to the top of the name's line.
     down: i32,
+    /// The skin it is part of, and the colours it draws in from it: the ink,
+    /// and what is selected with the ink on it.
+    skin: &'static Skin,
     ink: u32,
     select_bg: u32,
     select_ink: u32,
@@ -105,14 +114,16 @@ impl Field {
     /// The field whose inside is the meter of this name in `skin`.
     pub fn new(skin: &'static Skin, meter: &str) -> Field {
         let points = skin.num("FontSize", 8.0) as f32;
+        let [ink, select_bg, select_ink] = colours(skin);
         Field {
             // the meter is the inside of the box; its bounds are its place
             rect: skin.meter(meter).map_or(Rect::EMPTY, |m| Rect::new(m.b[0], m.b[1], m.b[2], m.b[3])),
             inset: skin.int("CityInset", 2),
             down: skin.int("CityDrop", 3) + skin.int("TextDY", 0),
-            ink: skin.colour("Ink"),
-            select_bg: skin.colour("SelectBg"),
-            select_ink: skin.colour("SelectInk"),
+            skin,
+            ink,
+            select_bg,
+            select_ink,
             face: skin.var("Font"),
             font: skin::FONTS.iter().position(|&(pt, bold)| pt == points && !bold).unwrap_or(0),
             points,
@@ -129,6 +140,11 @@ impl Field {
             fits: true,
             left: 0.0,
         }
+    }
+
+    /// The tint has changed: its colours again, from its skin.
+    pub fn retint(&mut self) {
+        [self.ink, self.select_bg, self.select_ink] = colours(self.skin);
     }
 
     /// The column the name is centred in: its left edge in the window, and

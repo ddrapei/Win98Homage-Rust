@@ -129,10 +129,34 @@ impl Rain {
     pub fn new(ctx: &Ctx) -> Rain {
         let (w, h) = (SKIN.int("PaneW", 174), SKIN.int("PaneH", 183));
         let horizon = (h - SKIN.int("GroundH", 16)).max(1);
+        let mut rain = Rain {
+            w,
+            h,
+            horizon,
+            // all three from the skin's colours, just below
+            rows: Vec::new(),
+            ink: [0; 3],
+            glint: 0,
+            rate: ctx.settings.int(SECTION, "Rate", SKIN.int("Rate", 2)).clamp(1, 3) as usize,
+            paused: ctx.settings.flag(SECTION, "Paused", SKIN.int("Paused", 0) != 0),
+            drops: Vec::new(),
+            splashes: Vec::new(),
+            // never zero, which xorshift cannot leave
+            rng: Rng(ctx.now as u32 | 1),
+        };
+        rain.read_colours();
+        rain.fill();
+        rain
+    }
+
+    /// The picture behind the rain and the rain's own colours, from the
+    /// skin's, in the tint: at the start, and again for every change of tint.
+    fn read_colours(&mut self) {
+        let (h, horizon) = (self.h, self.horizon);
         let (sky1, sky2, ground) = (SKIN.colour("RainSky1"), SKIN.colour("RainSky2"), SKIN.colour("RainGround"));
         // The dusk lightens down to the horizon; the wet ground under it
         // takes up a little of that light and loses it again towards the foot.
-        let rows = (0..h)
+        self.rows = (0..h)
             .map(|row| {
                 if row < horizon {
                     mix(sky1, sky2, row as f32 / (horizon - 1).max(1) as f32)
@@ -141,22 +165,8 @@ impl Rain {
                 }
             })
             .collect();
-        let mut rain = Rain {
-            w,
-            h,
-            horizon,
-            rows,
-            ink: [SKIN.colour("RainFar"), SKIN.colour("RainMid"), SKIN.colour("RainNear")],
-            glint: SKIN.colour("RainGlint"),
-            rate: ctx.settings.int(SECTION, "Rate", SKIN.int("Rate", 2)).clamp(1, 3) as usize,
-            paused: ctx.settings.flag(SECTION, "Paused", SKIN.int("Paused", 0) != 0),
-            drops: Vec::new(),
-            splashes: Vec::new(),
-            // never zero, which xorshift cannot leave
-            rng: Rng(ctx.now as u32 | 1),
-        };
-        rain.fill();
-        rain
+        self.ink = [SKIN.colour("RainFar"), SKIN.colour("RainMid"), SKIN.colour("RainNear")];
+        self.glint = SKIN.colour("RainGlint");
     }
 
     /// For the test harness: the same shower every time, `seconds` in.
@@ -347,6 +357,10 @@ impl Widget for Rain {
             "Close" => Outcome::request(Request::Close),
             _ => Outcome::none(),
         }
+    }
+
+    fn retint(&mut self) {
+        self.read_colours();
     }
 
     fn menu(&self, items: &mut Vec<MenuItem>) {
