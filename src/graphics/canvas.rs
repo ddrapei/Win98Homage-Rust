@@ -68,6 +68,30 @@ impl Rect {
     }
 }
 
+/// The part `rect` of a picture, `n` times the size: each pixel of `src`
+/// (rows `src_stride` apart) is an n x n block of `dst` (rows `dst_stride`
+/// apart), at n times its place.  This is how a widget drawn at its own size
+/// is put on a monitor with a scale of 2 or more: block by block, so that it
+/// is as sharp there as at 1.
+pub fn scale_into(src: &[u32], src_stride: usize, rect: Rect, dst: &mut [u32], dst_stride: usize, n: i32) {
+    if rect.is_empty() {
+        return;
+    }
+    let n = n.max(1) as usize;
+    let (x0, x1) = (rect.x0.max(0) as usize, rect.x1.max(0) as usize);
+    let wide = (x1 - x0) * n;
+    for y in rect.y0.max(0) as usize..rect.y1.max(0) as usize {
+        let from = &src[y * src_stride + x0..y * src_stride + x1];
+        let first = y * n * dst_stride + x0 * n;
+        for (block, &p) in dst[first..first + wide].chunks_exact_mut(n).zip(from) {
+            block.fill(p);
+        }
+        for k in 1..n {
+            dst.copy_within(first..first + wide, first + k * dst_stride);
+        }
+    }
+}
+
 /// `argb` (straight alpha) at coverage `cov`, over a premultiplied pixel.
 #[inline]
 fn blend(dst: u32, argb: u32, cov: f32) -> u32 {
@@ -360,5 +384,34 @@ fn edge(acc: &mut [f32], aw: usize, ah: usize, x0: f32, y0: f32, x1: f32, y1: f3
             line[at(xbi)] += d * am;
         }
         x = xnext;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_part_scaled_up_is_whole_blocks_and_nothing_else() {
+        // a 3 x 2 picture, rows 4 apart, of which the right-hand 2 x 2 is put
+        // up at 3 into a buffer 10 wide that was all 9s
+        let src = [1, 2, 3, 0, 4, 5, 6, 0];
+        let mut dst = vec![9u32; 10 * 6];
+        scale_into(&src, 4, Rect::new(1, 0, 3, 2), &mut dst, 10, 3);
+        let rows: Vec<&[u32]> = dst.chunks(10).collect();
+        for row in &rows[0..3] {
+            assert_eq!(*row, [9, 9, 9, 2, 2, 2, 3, 3, 3, 9]);
+        }
+        for row in &rows[3..6] {
+            assert_eq!(*row, [9, 9, 9, 5, 5, 5, 6, 6, 6, 9]);
+        }
+    }
+
+    #[test]
+    fn at_a_scale_of_one_it_is_a_copy() {
+        let src: Vec<u32> = (0..12).collect();
+        let mut dst = vec![0u32; 12];
+        scale_into(&src, 4, Rect::new(0, 0, 4, 3), &mut dst, 4, 1);
+        assert_eq!(dst, src);
     }
 }

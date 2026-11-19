@@ -9,6 +9,9 @@
 //! The state file is `key=value` lines:
 //!
 //!   now=2026-11-11 17:30:45            the moment to draw
+//!   scale=2                            each widget as a monitor at that
+//!                                      scale shows it: every pixel a 2 x 2
+//!                                      block (1 if not given)
 //!   usage_log=C:\path\Usage.log        the journal to read (never written)
 //!   live_start=2026-11-11 17:27:35     when the running interval began
 //!   panel_at=2026-11-11 17:30:00       when the usage panel was last redrawn
@@ -43,7 +46,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::canvas::Canvas;
+use crate::canvas::{self, Canvas, Rect};
 use crate::clock;
 use crate::datetime::DateTime;
 use crate::disk::Disk;
@@ -77,13 +80,16 @@ fn write_bmp(path: &Path, w: i32, h: i32, px: &[u32]) -> std::io::Result<()> {
     std::fs::write(path, out)
 }
 
-fn render(widget: &dyn Widget, text: &mut Text, path: &Path) {
+fn render(widget: &dyn Widget, text: &mut Text, path: &Path, n: i32) {
     let skin = widget.skin();
     let mut px = vec![0u32; (skin.w * skin.h) as usize];
     // SAFETY: the canvas is exactly the vector.
     let mut canvas = unsafe { Canvas::new(px.as_mut_ptr(), skin.w, skin.w, skin.h) };
     skin::draw(skin, widget as &dyn Hooks, &mut canvas, text, &mut Vec::new());
-    let _ = write_bmp(path, skin.w, skin.h, &px);
+    // put up as the window is, at the scale asked for
+    let mut out = vec![0u32; px.len() * (n * n) as usize];
+    canvas::scale_into(&px, skin.w as usize, Rect::new(0, 0, skin.w, skin.h), &mut out, (skin.w * n) as usize, n);
+    let _ = write_bmp(path, skin.w * n, skin.h * n, &out);
 }
 
 /// "SetPage 1;Click 30 40": each command with its argument, or its point.
@@ -169,6 +175,8 @@ pub fn run(args: &[String]) -> i32 {
     let get = |key: &str| state.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
 
     let now = get("now").and_then(clock::parse_local).unwrap_or_else(clock::now);
+    let n = get("scale").and_then(|v| v.parse::<i32>().ok()).unwrap_or(1).clamp(1, 8);
+    let render = |w: &dyn Widget, text: &mut Text, path: &Path| render(w, text, path, n);
     let mut settings = Settings::in_memory();
     for (key, value) in &state {
         if let Some((section, name)) = key.strip_prefix("set.").and_then(|k| k.split_once('.')) {

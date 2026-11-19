@@ -3,7 +3,8 @@
 //! every one of these is a stable, documented ABI.
 //!
 //! Only user32, gdi32, kernel32, shell32 and advapi32 are imported outright.
-//! DirectWrite and the session API are found with GetProcAddress, and WinHTTP
+//! DirectWrite, the session API and the DPI functions (which older Windows
+//! does not have) are found with GetProcAddress, and WinHTTP
 //! is only ever loaded by the short-lived child that fetches the weather.
 
 #![allow(non_snake_case, non_camel_case_types, clippy::upper_case_acronyms, dead_code)]
@@ -300,6 +301,7 @@ pub const WM_SETFONT: u32 = 0x0030;
 pub const WM_WINDOWPOSCHANGING: u32 = 0x0046;
 pub const WM_NCHITTEST: u32 = 0x0084;
 pub const WM_DISPLAYCHANGE: u32 = 0x007E;
+pub const WM_DPICHANGED: u32 = 0x02E0;
 pub const WM_NCDESTROY: u32 = 0x0082;
 pub const WM_KEYDOWN: u32 = 0x0100;
 pub const WM_CHAR: u32 = 0x0102;
@@ -458,8 +460,12 @@ pub const SEM_FAILCRITICALERRORS: u32 = 0x0001;
 pub const ERROR_ALREADY_EXISTS: u32 = 183;
 pub const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
 
+/// DPI_AWARENESS_CONTEXT_UNAWARE
+pub const DPI_UNAWARE: isize = -1;
 /// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
 pub const DPI_PER_MONITOR_V2: isize = -4;
+/// MDT_EFFECTIVE_DPI: the DPI the user's scale setting gives a monitor.
+pub const MDT_EFFECTIVE_DPI: i32 = 0;
 
 // ---- functions --------------------------------------------------------------
 
@@ -510,6 +516,7 @@ unsafe extern "system" {
     pub fn TrackMouseEvent(tme: *mut TRACKMOUSEEVENT) -> BOOL;
     pub fn GetSystemMetrics(index: i32) -> i32;
     pub fn MonitorFromRect(rect: *const RECT, flags: u32) -> isize;
+    pub fn MonitorFromPoint(point: POINT, flags: u32) -> isize;
     pub fn GetMonitorInfoW(monitor: isize, info: *mut MONITORINFO) -> BOOL;
     pub fn EnumDisplayMonitors(dc: HDC, clip: *const RECT, proc_: MONITORENUMPROC, data: LPARAM) -> BOOL;
     pub fn CreatePopupMenu() -> HMENU;
@@ -632,15 +639,38 @@ pub unsafe fn proc_address(dll: &str, name: &'static [u8]) -> Option<*const c_vo
     }
 }
 
-/// Runs `f` with this thread's windows per-monitor DPI aware, so that a menu
-/// or a message box it puts up is drawn sharp instead of stretched.  The
-/// widgets themselves stay unaware on purpose -- see `host`.
-pub fn with_sharp_dpi<R>(f: impl FnOnce() -> R) -> R {
+static DPI_AWARE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Make the whole process per-monitor DPI aware: from here on Windows does
+/// not stretch its windows, every coordinate is in the monitor's own pixels,
+/// and the program scales the widgets itself (see `screens::scale_of`).
+/// Done before the first window is made.  False where Windows is too old to
+/// be asked; the program is then left unaware, and draws everything at 1x as
+/// Windows stretches it.
+pub fn make_dpi_aware() -> bool {
+    type SetCtx = unsafe extern "system" fn(isize) -> BOOL;
+    let aware = unsafe {
+        proc_address("user32.dll", b"SetProcessDpiAwarenessContext\0")
+            .is_some_and(|p| core::mem::transmute::<*const c_void, SetCtx>(p)(DPI_PER_MONITOR_V2) != 0)
+    };
+    DPI_AWARE.store(aware, core::sync::atomic::Ordering::Relaxed);
+    aware
+}
+
+/// Whether `make_dpi_aware` succeeded.  Never, in tests and in `--dump`.
+pub fn dpi_aware() -> bool {
+    DPI_AWARE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Runs `f` with this thread seeing the screens as a process with the DPI
+/// awareness `context` (a DPI_AWARENESS_CONTEXT) would, then puts back what
+/// it was.  Where that cannot be asked for, `f` runs as things are.
+pub fn with_dpi_context<R>(context: isize, f: impl FnOnce() -> R) -> R {
     type SetCtx = unsafe extern "system" fn(isize) -> isize;
     unsafe {
         let set: Option<SetCtx> = proc_address("user32.dll", b"SetThreadDpiAwarenessContext\0")
             .map(|p| core::mem::transmute::<*const c_void, SetCtx>(p));
-        let old = set.map(|s| s(DPI_PER_MONITOR_V2)).unwrap_or(0);
+        let old = set.map(|s| s(context)).unwrap_or(0);
         let r = f();
         if let (Some(s), true) = (set, old != 0) {
             s(old);

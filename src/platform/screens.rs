@@ -16,6 +16,9 @@
 //! now; asked again with the same, it answers the same.  So whoever calls it
 //! keeps where a window was *put* apart from where it *is*, and loses
 //! nothing to a monitor that is unplugged for an hour.
+//!
+//! The process is DPI aware, so every rectangle here is in the monitors' own
+//! pixels.  How large a widget is drawn on each monitor is `scale_of`.
 
 use core::ptr::null;
 
@@ -43,6 +46,135 @@ fn work_area_of(monitor: isize) -> Option<RECT> {
     let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, rcMonitor: RECT::default(), rcWork: RECT::default(), dwFlags: 0 };
     let known = unsafe { GetMonitorInfoW(monitor, &mut info) } != 0;
     (known && !is_empty(&info.rcWork)).then_some(info.rcWork)
+}
+
+// ---------------------------------------------------------------------------
+//  Scale
+// ---------------------------------------------------------------------------
+
+/// How many times its own size a widget is drawn at on the monitor most of
+/// `around` is on (or the nearest): that monitor's scale setting, rounded to
+/// a whole number, so that every pixel of a skin is a square block of the
+/// monitor's own -- 2 at 175%, 200% and 225%, 1 at 100% and 125%.  A
+/// stretch by anything else would have to blur them.  Always 1 in a
+/// process that is not DPI aware, which Windows stretches instead.
+pub fn scale_of(around: &RECT) -> i32 {
+    scale_of_monitor(unsafe { MonitorFromRect(around, MONITOR_DEFAULTTONEAREST) })
+}
+
+/// The same for the monitor at (or nearest) a point of the screen.
+pub fn scale_at(x: i32, y: i32) -> i32 {
+    scale_of_monitor(unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) })
+}
+
+/// A DPI as the whole number of times 96 nearest to it, half up, and at
+/// least 1.
+pub fn scale_for(dpi: u32) -> i32 {
+    ((dpi as i32 + 48) / 96).max(1)
+}
+
+fn scale_of_monitor(monitor: isize) -> i32 {
+    if dpi_aware() { scale_for(dpi_of(monitor)) } else { 1 }
+}
+
+/// The monitor's DPI, from its scale setting; 96 where it cannot be asked.
+fn dpi_of(monitor: isize) -> u32 {
+    type GetDpi = unsafe extern "system" fn(isize, i32, *mut u32, *mut u32) -> HRESULT;
+    unsafe {
+        let Some(get) = proc_address("shcore.dll", b"GetDpiForMonitor\0") else { return 96 };
+        let get: GetDpi = core::mem::transmute(get);
+        let (mut x, mut y) = (0u32, 0u32);
+        if get(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y) == 0 && x > 0 { x } else { 96 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Places written down before the program was DPI aware
+// ---------------------------------------------------------------------------
+
+/// A monitor's work area as a process that is not DPI aware is shown it --
+/// where a build of this program from before it was aware wrote its widgets'
+/// places -- and as it really is, and the scale the widgets are drawn at
+/// there now.
+#[derive(Clone, Copy, Debug)]
+pub struct Monitor {
+    pub was: RECT,
+    pub is: RECT,
+    pub n: i32,
+}
+
+/// Every monitor there is, both ways.
+pub fn monitors_both_ways() -> Vec<Monitor> {
+    unsafe extern "system" fn add(monitor: isize, _dc: HDC, _rect: *mut RECT, list: LPARAM) -> BOOL {
+        // SAFETY: `list` is the Vec below, which outlives the enumeration.
+        unsafe { (*(list as *mut Vec<isize>)).push(monitor) };
+        1 // and the next
+    }
+    let mut handles: Vec<isize> = Vec::new();
+    unsafe { EnumDisplayMonitors(0, null(), add, (&raw mut handles) as LPARAM) };
+    handles
+        .into_iter()
+        .filter_map(|m| {
+            let is = work_area_of(m)?;
+            let was = with_dpi_context(DPI_UNAWARE, || work_area_of(m))?;
+            Some(Monitor { was, is, n: scale_of_monitor(m) })
+        })
+        .collect()
+}
+
+/// Where frames that were placed in the coordinates an unaware process is
+/// shown (`frames`, each as it was then: a skin's own size) go now, on
+/// monitors that are DPI aware: the top left corner of each, and the scale
+/// it is drawn at.
+///
+/// Each frame goes with the monitor it was on (most of it, or the nearest),
+/// and stays where it was on that monitor, drawn at the monitor's scale.
+/// Where that scale is not the monitor's own setting -- 2 on a monitor at
+/// 225% -- the widgets come out smaller than Windows stretched them, and
+/// cannot stand both where they were and as close to one another as they
+/// were.  So the frames that stood together (no further apart than `near`)
+/// stay together, scaled by as much as each of them is, and the group keeps
+/// its distance, scaled by as much, from the nearer edge of its monitor on
+/// each axis: a column down the right-hand side stays down it, and a margin
+/// stays a margin.  Where the scale is the monitor's setting -- 200% -- that
+/// is exactly where they were.
+pub fn from_unaware(frames: &[RECT], monitors: &[Monitor], near: i32) -> Vec<((i32, i32), i32)> {
+    let mut out: Vec<((i32, i32), i32)> = frames.iter().map(|f| ((f.left, f.top), 1)).collect();
+    if monitors.is_empty() {
+        return out;
+    }
+    let was: Vec<RECT> = monitors.iter().map(|m| m.was).collect();
+    let home: Vec<usize> = frames.iter().map(|f| monitor_of(f, &was)).collect();
+    for (m, monitor) in monitors.iter().enumerate() {
+        let here: Vec<usize> = (0..frames.len()).filter(|&i| home[i] == m).collect();
+        let Monitor { was, is, n } = *monitor;
+        for group in groups(&here, frames, near) {
+            let Some(b) = group.iter().map(|&i| frames[i]).reduce(|a, b| bounds(&a, &b)) else { continue };
+            // the group's first edge along an axis, from the nearer edge of the monitor
+            let from_nearer = |b0: i32, b1: i32, w0: i32, w1: i32, i0: i32, i1: i32| {
+                if b0 - w0 <= w1 - b1 { i0 + (b0 - w0) * n } else { i1 - (w1 - b1) * n - (b1 - b0) * n }
+            };
+            let x = from_nearer(b.left, b.right, was.left, was.right, is.left, is.right);
+            let y = from_nearer(b.top, b.bottom, was.top, was.bottom, is.top, is.bottom);
+            for i in group {
+                out[i] = ((x + (frames[i].left - b.left) * n, y + (frames[i].top - b.top) * n), n);
+            }
+        }
+    }
+    out
+}
+
+/// Which of `screens` most of `r` is on; with none of it on any, the nearest.
+fn monitor_of(r: &RECT, screens: &[RECT]) -> usize {
+    let shared = |s: &RECT| {
+        let o = overlap(r, s);
+        if is_empty(&o) { 0 } else { i64::from(o.right - o.left) * i64::from(o.bottom - o.top) }
+    };
+    let distance = |s: &RECT| {
+        let (dx, dy) = pull(r, s);
+        i64::from(dx).pow(2) + i64::from(dy).pow(2)
+    };
+    (0..screens.len()).max_by_key(|&k| (shared(&screens[k]), -distance(&screens[k]))).unwrap_or(0)
 }
 
 /// How far each of `wanted` has to move to be seen whole on `screens`.
@@ -276,6 +408,59 @@ mod tests {
         let main = work_area(&rect(0, 0, 1, 1));
         assert!(!is_empty(&main) && areas.contains(&main), "{main:?} not in {areas:?}");
         assert!(areas.iter().all(|area| !is_empty(area)));
+    }
+
+    #[test]
+    fn a_scale_is_a_whole_number() {
+        let scales: Vec<i32> = [0, 96, 120, 144, 168, 192, 216, 240, 288].map(scale_for).into();
+        assert_eq!(scales, [1, 1, 1, 2, 2, 2, 2, 3, 3]);
+    }
+
+    // A laptop at 200% to the left of a 4K monitor at 225%, and a second 4K
+    // monitor at 225% standing on end to the right of that: work areas as a
+    // process that is not DPI aware is shown them, and as they are.
+    const LAPTOP_THEN_AND_NOW: Monitor = Monitor { was: rect(-960, 423, 0, 1023), is: rect(-1920, 846, 0, 2046), n: 2 };
+    const MAIN_THEN_AND_NOW: Monitor = Monitor { was: rect(0, 0, 1707, 912), is: rect(0, 0, 3840, 2052), n: 2 };
+    const TALL_THEN_AND_NOW: Monitor = Monitor { was: rect(1920, -259, 2880, 1448), is: rect(3840, -517, 6000, 3323), n: 2 };
+    const THREE: [Monitor; 3] = [LAPTOP_THEN_AND_NOW, MAIN_THEN_AND_NOW, TALL_THEN_AND_NOW];
+
+    #[test]
+    fn at_a_scale_of_its_own_setting_a_place_is_where_it_was() {
+        // on the laptop, Windows stretched by exactly 2: wherever they were,
+        // in the left half or the right, together or apart
+        let frames = [rect(-948, 435, -544, 824), rect(-532, 435, -342, 625), rect(-948, 836, -758, 1011), rect(-200, 800, -12, 1011)];
+        let (was, is) = (LAPTOP_THEN_AND_NOW.was, LAPTOP_THEN_AND_NOW.is);
+        let exactly: Vec<((i32, i32), i32)> = frames.iter().map(|f| ((is.left + (f.left - was.left) * 2, is.top + (f.top - was.top) * 2), 2)).collect();
+        assert_eq!(from_unaware(&frames, &THREE, 34), exactly);
+    }
+
+    #[test]
+    fn a_column_down_the_right_stays_down_it_on_a_grid_twice_the_size() {
+        // at 225% drawn at 2: a column 12 in from the right-hand edge, 24
+        // apart, and one on its own near the top left
+        let (top, under, alone) = (rect(1291, 12, 1695, 401), rect(1291, 425, 1695, 539), rect(100, 50, 290, 240));
+        let found = from_unaware(&[top, under, alone], &THREE, 34);
+        let size = |f: &RECT| (f.right - f.left, f.bottom - f.top);
+        let right = |k: usize, f: &RECT| found[k].0.0 + size(f).0 * 2;
+        assert_eq!((right(0, &top), found[0].0.1), (3840 - 24, 24));
+        assert_eq!((right(1, &under), found[1].0.1 - (found[0].0.1 + size(&top).1 * 2)), (3840 - 24, 48));
+        assert_eq!(found[2], ((200, 100), 2));
+    }
+
+    #[test]
+    fn a_place_on_no_monitor_goes_by_the_nearest() {
+        // above the monitor standing on end
+        let found = from_unaware(&[rect(2121, -852, 2311, -632)], &THREE, 34);
+        assert_eq!(found, [((3840 + 201 * 2, -517 - 593 * 2), 2)]);
+        // and with no monitors at all, nothing moves
+        assert_eq!(from_unaware(&[rect(5, 6, 7, 8)], &[], 34), [((5, 6), 1)]);
+    }
+
+    #[test]
+    fn windows_is_asked_for_every_monitor_both_ways() {
+        let monitors = monitors_both_ways();
+        assert!(!monitors.is_empty());
+        assert!(monitors.iter().all(|m| !is_empty(&m.was) && !is_empty(&m.is) && m.n >= 1), "{monitors:?}");
     }
 
     #[test]

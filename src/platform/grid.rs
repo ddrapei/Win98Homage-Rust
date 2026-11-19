@@ -9,6 +9,11 @@
 //!
 //! Like `screens`, this is arithmetic on plain rectangles, which is what the
 //! tests at the foot give it, and it remembers nothing.
+//!
+//! The rectangles are in the monitors' own pixels; the figures -- the margin,
+//! the gap and SNAP -- are in a widget's, and each function is told the
+//! scale `n` the frames it is given are drawn at (see `screens::scale_of`).
+//! A margin of 12 is 24 pixels of the screen round a widget drawn at 2.
 
 use crate::sys::RECT;
 
@@ -24,14 +29,23 @@ pub struct Spacing {
     pub gap: i32,
 }
 
+impl Spacing {
+    /// The two in the screen's pixels, round widgets drawn at `n` times
+    /// their own size.
+    pub fn times(self, n: i32) -> Spacing {
+        Spacing { margin: self.margin * n, gap: self.gap * n }
+    }
+}
+
 /// How far the frame `f`, dragged to where it is, is pulled along each
 /// axis: onto the margin inside an edge of `work`, onto the gap beside a
 /// frame in `others`, or into line with one -- whichever is nearest, if it
 /// is less than SNAP away.  With nothing in reach, (0, 0).
-pub fn snap(f: &RECT, others: &[RECT], work: &RECT, sp: Spacing) -> (i32, i32) {
+pub fn snap(f: &RECT, others: &[RECT], work: &RECT, sp: Spacing, n: i32) -> (i32, i32) {
+    let (sp, within) = (sp.times(n), SNAP * n);
     // Another frame is reached for only from within a gap and a snap of it:
     // beside it, or above or below it, and not across the screen.
-    let reach = sp.gap + SNAP;
+    let reach = sp.gap + within;
     let mut xs = vec![(f.left, work.left + sp.margin), (f.right, work.right - sp.margin)];
     let mut ys = vec![(f.top, work.top + sp.margin), (f.bottom, work.bottom - sp.margin)];
     for o in others {
@@ -42,13 +56,13 @@ pub fn snap(f: &RECT, others: &[RECT], work: &RECT, sp: Spacing) -> (i32, i32) {
             ys.extend([(f.top, o.top), (f.top, o.bottom + sp.gap), (f.bottom, o.top - sp.gap), (f.bottom, o.bottom)]);
         }
     }
-    (pull(&xs), pull(&ys))
+    (pull(&xs, within), pull(&ys, within))
 }
 
 /// Of the moves that take an edge onto a line, (edge, line), the shortest
-/// that is less than SNAP; or none.
-fn pull(edges_to_lines: &[(i32, i32)]) -> i32 {
-    edges_to_lines.iter().map(|&(edge, line)| line - edge).filter(|d| d.abs() < SNAP).min_by_key(|d| d.abs()).unwrap_or(0)
+/// that is less than `within`; or none.
+fn pull(edges_to_lines: &[(i32, i32)], within: i32) -> i32 {
+    edges_to_lines.iter().map(|&(edge, line)| line - edge).filter(|d| d.abs() < within).min_by_key(|d| d.abs()).unwrap_or(0)
 }
 
 /// How far each of `frames` moves when the spacing goes from `old` to `new`.
@@ -69,7 +83,9 @@ fn pull(edges_to_lines: &[(i32, i32)]) -> i32 {
 /// nearest to one, and by a gap before a line.  Frames tied to no edge are
 /// placed from the first of them from the left (or the top), which stays
 /// where it is; one tied to nothing at all stays where it is.
-pub fn respace(frames: &[RECT], screens: &[RECT], old: Spacing, new: Spacing) -> Vec<(i32, i32)> {
+///
+/// `frames` are all drawn at the scale `n`.
+pub fn respace(frames: &[RECT], screens: &[RECT], old: Spacing, new: Spacing, n: i32) -> Vec<(i32, i32)> {
     fn x(r: &RECT) -> (i32, i32) {
         (r.left, r.right)
     }
@@ -80,8 +96,9 @@ pub fn respace(frames: &[RECT], screens: &[RECT], old: Spacing, new: Spacing) ->
     let spans = |along: fn(&RECT) -> (i32, i32), across: fn(&RECT) -> (i32, i32)| -> Vec<Span> {
         frames.iter().zip(&on).map(|(f, screen)| Span { at: along(f), across: across(f), screen: screen.map(along) }).collect()
     };
-    let dx = respace_along(&spans(x, y), old, new);
-    let dy = respace_along(&spans(y, x), old, new);
+    let (old, new, within) = (old.times(n), new.times(n), SNAP * n);
+    let dx = respace_along(&spans(x, y), old, new, within);
+    let dy = respace_along(&spans(y, x), old, new, within);
     dx.into_iter().zip(dy).collect()
 }
 
@@ -112,12 +129,13 @@ enum Tie {
     Ends,
 }
 
-/// `respace` along one axis: how far each span moves.
-fn respace_along(spans: &[Span], old: Spacing, new: Spacing) -> Vec<i32> {
+/// `respace` along one axis: how far each span moves.  Spacings and
+/// `within`, the snap, are in the screen's pixels.
+fn respace_along(spans: &[Span], old: Spacing, new: Spacing, within: i32) -> Vec<i32> {
     // the figure that changed is the new one; the other is as it was found
     let margin = |d: i32| if new.margin != old.margin { new.margin } else { d };
     let gap = |d: i32| if new.gap != old.gap { new.gap } else { d };
-    let near = |d: i32, was: i32| (0..was + SNAP).contains(&d);
+    let near = |d: i32, was: i32| (0..was + within).contains(&d);
 
     // Where each starts now: first, those against an edge of their screen.
     let mut at: Vec<Option<i32>> = spans
@@ -142,7 +160,7 @@ fn respace_along(spans: &[Span], old: Spacing, new: Spacing) -> Vec<i32> {
             if placed[i].is_some() {
                 continue;
             }
-            let ties = spans.iter().enumerate().filter_map(|(j, o)| Some((o, placed[j]?, tie(s, o, old.gap)?)));
+            let ties = spans.iter().enumerate().filter_map(|(j, o)| Some((o, placed[j]?, tie(s, o, old.gap, within)?)));
             let Some((o, from, tie)) = ties.min_by_key(|t| matches!(t.2, Tie::Starts | Tie::Ends)) else { continue };
             at[i] = Some(match tie {
                 Tie::After(d) => from + o.len() + gap(d),
@@ -163,8 +181,8 @@ fn respace_along(spans: &[Span], old: Spacing, new: Spacing) -> Vec<i32> {
 }
 
 /// How `s` is placed by `o` on a grid with a gap of `gap`, if it is.
-fn tie(s: &Span, o: &Span, gap: i32) -> Option<Tie> {
-    let near = |d: i32| (0..gap + SNAP).contains(&d);
+fn tie(s: &Span, o: &Span, gap: i32, within: i32) -> Option<Tie> {
+    let near = |d: i32| (0..gap + within).contains(&d);
     // side by side: the two overlap across the axis
     let beside = s.across.0 < o.across.1 && o.across.0 < s.across.1;
     if beside && near(s.at.0 - o.at.1) {
@@ -206,7 +224,7 @@ mod tests {
     }
 
     fn respaced(frames: &[RECT], old: Spacing, new: Spacing) -> Vec<RECT> {
-        frames.iter().zip(respace(frames, &[SCREEN], old, new)).map(|(f, by)| at(f, by)).collect()
+        frames.iter().zip(respace(frames, &[SCREEN], old, new, 1)).map(|(f, by)| at(f, by)).collect()
     }
 
     const SCREEN: RECT = rect(0, 0, 1600, 900);
@@ -222,21 +240,21 @@ mod tests {
         let sp = Spacing { margin: 8, gap: 6 };
         // near the top right corner: onto the margin inside both edges
         let f = rect(1400, 5, 1595, 200);
-        assert_eq!(snap(&f, &[], &SCREEN, sp), (-3, 3));
+        assert_eq!(snap(&f, &[], &SCREEN, sp, 1), (-3, 3));
         // near another's right side: the gap from it, its top in line
         let other = rect(100, 100, 300, 300);
-        assert_eq!(snap(&rect(310, 104, 500, 280), &[other], &SCREEN, sp), (-4, -4));
+        assert_eq!(snap(&rect(310, 104, 500, 280), &[other], &SCREEN, sp, 1), (-4, -4));
         // a little under it: the gap below it, its left in line
-        assert_eq!(snap(&rect(103, 302, 290, 400), &[other], &SCREEN, sp), (-3, 4));
+        assert_eq!(snap(&rect(103, 302, 290, 400), &[other], &SCREEN, sp, 1), (-3, 4));
     }
 
     #[test]
     fn nothing_in_reach_is_no_pull() {
         let sp = Spacing { margin: 8, gap: 6 };
         let other = rect(100, 100, 300, 300);
-        assert_eq!(snap(&rect(700, 400, 900, 600), &[other], &SCREEN, sp), (0, 0));
+        assert_eq!(snap(&rect(700, 400, 900, 600), &[other], &SCREEN, sp, 1), (0, 0));
         // in line with another, but far below it: not lined up with it
-        assert_eq!(snap(&rect(103, 600, 300, 700), &[other], &SCREEN, sp), (0, 0));
+        assert_eq!(snap(&rect(103, 600, 300, 700), &[other], &SCREEN, sp, 1), (0, 0));
     }
 
     #[test]
@@ -244,7 +262,7 @@ mod tests {
         let sp = Spacing { margin: 0, gap: 0 };
         // 4 from the screen's left, 3 from the other's right
         let other = rect(0, 0, 7, 50);
-        assert_eq!(snap(&rect(4, 10, 100, 40), &[other], &SCREEN, sp).0, 3);
+        assert_eq!(snap(&rect(4, 10, 100, 40), &[other], &SCREEN, sp, 1).0, 3);
     }
 
     #[test]
@@ -333,7 +351,22 @@ mod tests {
         let found = respaced(&respaced(&layout, WAS, there), there, WAS);
         assert_eq!(found, layout);
         // and the same spacing moves nothing
-        assert_eq!(respace(&layout, &[SCREEN], WAS, WAS), [(0, 0); 5]);
+        assert_eq!(respace(&layout, &[SCREEN], WAS, WAS, 1), [(0, 0); 5]);
+    }
+
+    #[test]
+    fn at_twice_the_size_the_figures_are_twice_as_wide() {
+        let sp = Spacing { margin: 8, gap: 6 };
+        // 19 from the right-hand edge: within a snap of a margin of 16, and
+        // pulled onto it
+        assert_eq!(snap(&rect(1200, 400, 1581, 600), &[], &SCREEN, sp, 2), (3, 0));
+        // 19 to the right of another: onto a gap of 12
+        let other = rect(100, 100, 300, 300);
+        assert_eq!(snap(&rect(319, 100, 500, 280), &[other], &SCREEN, sp, 2).0, -7);
+        // a column 24 in from the edge and 48 apart closes up to 16 apart
+        let column = [from_right(1576, 24, 760, 730), from_right(1576, 802, 760, 30)];
+        let moves = respace(&column, &[SCREEN], WAS, Spacing { margin: 12, gap: 8 }, 2);
+        assert_eq!(moves, [(0, 0), (0, -32)]);
     }
 
     #[test]

@@ -42,8 +42,16 @@ small software canvas.
 file (which can ask for more than one note), and writes it out as a BMP — for comparing
 before and after a change (see `src/tools/dump.rs`).
 
-The program is deliberately not DPI aware, so on a scaled display Windows stretches the
-widgets as a whole.
+**Scaled displays.** The skins are laid out in whole pixels, and stretching them by 225% would
+blur every edge. So the program draws each widget itself at a whole number of times its
+size: its monitor's scale setting rounded to the nearest whole number. That is 1 at 100% and
+125%, 2 at 150% to 225%, and 3 at 250% to 300%. Every pixel of a skin becomes a square block
+of the screen's. On a monitor whose setting is not a whole number, the widgets come out a
+little smaller or larger than the rest of what is on it (at 225%, 2/2.25 of the size). A
+widget dragged onto a monitor with another scale takes that scale. A `settings.ini` from a
+build before this one, which was not DPI aware, has its places converted once, keeping each
+widget where it was on its monitor, and then gets `DevicePixels=1` under `[General]`. Add
+`scale=2` to a `--dump` state file to see the widgets as a monitor at 2x shows them.
 
 ## Using them
 
@@ -75,7 +83,9 @@ follow on at the new gap, and ones lined up with each other stay lined up. "On t
 means no further from the edge or the neighbour than the old figure and 10 px more, near
 enough to have been snapped there. A widget placed further away stays where it is, and
 so does a closed one. The first layout and a new note's place follow the same two
-figures. A widget is kept at least the margin inside the screen.
+figures. A widget is kept at least the margin inside the screen. Both figures are in the
+widgets' own pixels: on a monitor where they are drawn at 2x, a 12 px margin is 24 of the
+screen's.
 
 In the widgets themselves: tabs, month list, calendar selection, scroll to browse months,
 the 12/24-hour field, scroll along the usage graph's hours, checkboxes, the scrollbar,

@@ -19,8 +19,16 @@
 //! than that -- the rain -- asks for frames, and a second timer runs for as
 //! long as one does and there is a screen to show them on.
 //!
-//! The process is not DPI aware, on purpose: the skins are laid out in whole
-//! pixels, and on a scaled display Windows stretches the widgets as a whole.
+//! The process is per-monitor DPI aware, and every place and size here is
+//! in the monitors' own pixels.  The skins are laid out in whole pixels, and
+//! a monitor at 225% would have to blur them to stretch them that much; so
+//! each window is drawn at a whole number of times its skin instead -- its
+//! slot's `n`, the scale of the monitor it is on (`screens::scale_of`):
+//! drawn at its own size, then each pixel put up as an n x n block.  The
+//! widgets know nothing of it -- they are drawn, and are handed the mouse,
+//! in their own pixels -- and the margin and the gap are in those too.
+//! Places written by a build from before this are in the coordinates Windows
+//! made up for it, and are converted once (`convert_old_places`).
 //!
 //! Re-entrancy.  Windows calls a window procedure in the middle of other
 //! calls (SetWindowPos sends WM_WINDOWPOSCHANGING, and so on).  So the
@@ -34,7 +42,7 @@ use core::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering::Relaxed};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use crate::canvas::{Canvas, Rect};
+use crate::canvas::{self, Canvas, Rect};
 use crate::clock;
 use crate::datetime::DateTime;
 use crate::disk::Disk;
@@ -124,6 +132,9 @@ const MOST_SPACE: i32 = 200;
 const ROOM_STEPS: i32 = 8;
 /// With no room anywhere, a new note sits this far down and right of the old.
 const CASCADE: i32 = 24;
+/// Under [General] in settings.ini, 1 once the places there are in the
+/// monitors' own pixels: written by a build that is DPI aware.
+const DEVICE_PIXELS: &str = "DevicePixels";
 /// Our own z-order changes do not ask the window for permission.
 const ZPOS_FLAGS: u32 = SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING;
 
@@ -188,10 +199,26 @@ enum Later {
     Quit,
 }
 
-/// The frame of a window at (x, y): a window has `Pad` of nothing round it.
-fn frame(kind: Kind, x: i32, y: i32) -> Rect {
-    let (skin, pad) = (kind.skin(), kind.skin().int("Pad", 12));
-    Rect::new(x + pad, y + pad, x + skin.w - pad, y + skin.h - pad)
+/// The frame of a window at (x, y), drawn at `n` times its skin: a window
+/// has `Pad` of nothing round it.
+fn frame(kind: Kind, x: i32, y: i32, n: i32) -> Rect {
+    let (skin, pad) = (kind.skin(), kind.skin().int("Pad", 12) * n);
+    Rect::new(x + pad, y + pad, x + skin.w * n - pad, y + skin.h * n - pad)
+}
+
+/// The scale a window of a `kind` at (x, y), drawn at `n` now, is to be
+/// drawn at: that of the monitor most of its frame is on -- unless at that
+/// scale, larger or smaller, most of it would be on a monitor of another.
+/// Then it stays as it is, so that a window across the line between two
+/// monitors is not made larger and smaller by turns.
+fn settled_scale(kind: Kind, x: i32, y: i32, n: i32) -> i32 {
+    let here = screens::scale_of(&on_screens(frame(kind, x, y, n)));
+    if here == n || screens::scale_of(&on_screens(frame(kind, x, y, here))) != here { n } else { here }
+}
+
+/// One copy of every skin fits in this many pixels across and down.
+fn largest_skin() -> (i32, i32) {
+    FIXED.iter().fold((0, 0), |(w, h), f| (w.max(f.0.skin().w), h.max(f.0.skin().h)))
 }
 
 /// A wheel turned `delta` on top of the part of a notch it had turned
@@ -230,6 +257,9 @@ struct Slot {
     /// never do, so a window comes back to its place with the monitor it was
     /// on.
     put: (i32, i32),
+    /// How many times its skin the window is drawn at: the scale of the
+    /// monitor it is on (see `settled_scale`).
+    n: i32,
     /// The meter the pointer is over, if it is one that reacts to that.
     hover: Option<usize>,
     tracking: bool,
@@ -238,7 +268,12 @@ struct Slot {
 
 impl Slot {
     fn new(kind: Kind, section: &str, title: String) -> Slot {
-        Slot { kind, section: section.to_owned(), title, deleted: false, hwnd: 0, x: 0, y: 0, put: (0, 0), hover: None, tracking: false, seen: Vec::new() }
+        Slot { kind, section: section.to_owned(), title, deleted: false, hwnd: 0, x: 0, y: 0, put: (0, 0), n: 1, hover: None, tracking: false, seen: Vec::new() }
+    }
+
+    /// Its frame where the window is.
+    fn frame(&self) -> Rect {
+        frame(self.kind, self.x, self.y, self.n)
     }
 }
 
@@ -255,11 +290,14 @@ struct Press {
     spent: bool,
 }
 
+/// What a window is handed to the window manager from: in the screen's
+/// pixels, as large as the largest skin at the largest scale yet drawn.
 struct Buffer {
     dc: HDC,
     bitmap: HGDIOBJ,
     bits: *mut u32,
     w: i32,
+    h: i32,
 }
 
 /// The widgets that are running, each under its slot's number; None for one
@@ -282,6 +320,9 @@ impl Widgets {
 struct App {
     settings: Settings,
     text: Text,
+    /// Where every widget is drawn, at its own size: as large as the largest
+    /// skin, rows `largest_skin().0` apart.  Put up in `buffer` from there.
+    picture: Vec<u32>,
     buffer: Buffer,
     widgets: Widgets,
     slots: Vec<Slot>,
@@ -361,18 +402,20 @@ fn on_screens(r: Rect) -> RECT {
     RECT { left: r.x0, top: r.y0, right: r.x1, bottom: r.y1 }
 }
 
-/// What has to be on the monitors for a window of a `kind` at (x, y) to be
-/// seen whole: its frame, and a margin of bare screen round that.
-fn reach(kind: Kind, x: i32, y: i32, margin: i32) -> RECT {
-    let f = frame(kind, x, y);
+/// What has to be on the monitors for a window of a `kind` at (x, y), drawn
+/// at `n`, to be seen whole: its frame, and a margin of bare screen round
+/// that (`margin` of the widget's own pixels, n times as many of the
+/// screen's).
+fn reach(kind: Kind, x: i32, y: i32, margin: i32, n: i32) -> RECT {
+    let (f, margin) = (frame(kind, x, y, n), margin * n);
     RECT { left: f.x0 - margin, top: f.y0 - margin, right: f.x1 + margin, bottom: f.y1 + margin }
 }
 
 /// Where a window of a `kind` meant for (x, y) can go and be seen whole,
 /// `margin` in from the edge: there, or the least distance from there onto
 /// the monitors there are now.
-fn on_screen(kind: Kind, x: i32, y: i32, margin: i32) -> (i32, i32) {
-    let (dx, dy) = screens::keep_on(&reach(kind, x, y, margin), &screens::work_areas());
+fn on_screen(kind: Kind, x: i32, y: i32, margin: i32, n: i32) -> (i32, i32) {
+    let (dx, dy) = screens::keep_on(&reach(kind, x, y, margin, n), &screens::work_areas());
     (x + dx, y + dy)
 }
 
@@ -518,19 +561,31 @@ impl Buffer {
             let mut bits: *mut c_void = null_mut();
             let bitmap = CreateDIBSection(dc, &header, DIB_RGB_COLORS, &mut bits, 0, 0);
             SelectObject(dc, bitmap);
-            Buffer { dc, bitmap, bits: bits as *mut u32, w }
+            Buffer { dc, bitmap, bits: bits as *mut u32, w, h }
         }
+    }
+
+    /// Its pixels, row after row.
+    fn pixels(&mut self) -> &mut [u32] {
+        if self.bits.is_null() {
+            return &mut [];
+        }
+        // SAFETY: the DIB is w x h 32-bit pixels, and lives as long as self.
+        unsafe { core::slice::from_raw_parts_mut(self.bits, (self.w * self.h) as usize) }
     }
 }
 
 impl App {
     /// The App as settings.ini describes it, with no widget started yet.
     fn new(settings: Settings, text: Text, locked: bool, signed_in: Option<i64>) -> App {
-        // one buffer, as large as the largest skin: every window is drawn in it
-        let (w, h) = FIXED.iter().fold((0, 0), |(w, h), f| (w.max(f.0.skin().w), h.max(f.0.skin().h)));
+        // One picture, as large as the largest skin: every window is drawn in
+        // it, and put up from it in the buffer, which is made larger when a
+        // window is first drawn at a larger scale.
+        let (w, h) = largest_skin();
         let mut app = App {
             settings,
             text,
+            picture: vec![0; (w * h) as usize],
             buffer: Buffer::new(w, h),
             // both filled in by read_slots, from settings.ini
             widgets: Widgets(Vec::new()),
@@ -588,12 +643,12 @@ impl App {
         // Running now, so laid out with the others: where it was put, or
         // where it can be seen.
         self.lay_out();
-        let (skin, x, y) = (kind.skin(), self.slots[i].x, self.slots[i].y);
+        let (skin, x, y, n) = (kind.skin(), self.slots[i].x, self.slots[i].y, self.slots[i].n);
         unsafe {
             let wnd = CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 wide(WIDGET_CLASS).as_ptr(), wide(&self.slots[i].title).as_ptr(), WS_POPUP,
-                x, y, skin.w, skin.h, 0, 0, GetModuleHandleW(null()), null_mut(),
+                x, y, skin.w * n, skin.h * n, 0, 0, GetModuleHandleW(null()), null_mut(),
             );
             SetWindowLongPtrW(wnd, GWLP_USERDATA, i as isize);
             self.slots[i].hwnd = wnd;
@@ -680,21 +735,43 @@ impl App {
     fn lay_out_on(&mut self, work_areas: &[RECT]) {
         let Spacing { margin, gap } = self.spacing;
         let running = self.running();
-        let wanted: Vec<RECT> = running.iter().map(|&i| reach(self.slots[i].kind, self.slots[i].put.0, self.slots[i].put.1, margin)).collect();
+        let wanted: Vec<RECT> = running.iter().map(|&i| {
+            let slot = &self.slots[i];
+            reach(slot.kind, slot.put.0, slot.put.1, margin, settled_scale(slot.kind, slot.put.0, slot.put.1, slot.n))
+        }).collect();
         // Frames a gap apart are kept together.  With a margin round each,
         // that is two margins nearer.
-        let near = (gap - 2 * margin).max(0);
+        let most = running.iter().map(|&i| self.slots[i].n).max().unwrap_or(1);
+        let near = (gap - 2 * margin).max(0) * most;
         for (&i, (dx, dy)) in running.iter().zip(screens::settle(&wanted, work_areas, near)) {
             let slot = &mut self.slots[i];
-            let (x, y) = (slot.put.0 + dx, slot.put.1 + dy);
-            if (x, y) == (slot.x, slot.y) {
-                continue;
+            let (mut x, mut y) = (slot.put.0 + dx, slot.put.1 + dy);
+            // Where it goes may be a monitor of another scale, or the scale of
+            // its own may have changed: drawn at that one, and seen whole at
+            // the size that makes it.
+            let n = settled_scale(slot.kind, x, y, slot.n);
+            if n != slot.n {
+                let (kx, ky) = screens::keep_on(&reach(slot.kind, x, y, margin, n), work_areas);
+                (x, y) = (x + kx, y + ky);
             }
-            (slot.x, slot.y) = (x, y);
-            if slot.hwnd != 0 {
-                unsafe { SetWindowPos(slot.hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+            let rescaled = core::mem::replace(&mut slot.n, n) != n;
+            if (x, y) != (slot.x, slot.y) {
+                (slot.x, slot.y) = (x, y);
+                if slot.hwnd != 0 {
+                    unsafe { SetWindowPos(slot.hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+                }
+            }
+            if rescaled {
+                self.redraw(i);
             }
         }
+    }
+
+    /// Draw window `i` afresh, all of it: at another size, or after Windows
+    /// has lost what it showed.
+    fn redraw(&mut self, i: usize) {
+        self.slots[i].seen.clear();
+        self.paint(i, Dirty::All);
     }
 
     /// The windows whose widgets are running.
@@ -722,11 +799,20 @@ impl App {
     /// and comes back there.
     fn respace(&mut self, old: Spacing) {
         let running = self.running();
-        let frames: Vec<RECT> = running.iter().map(|&i| on_screens(frame(self.slots[i].kind, self.slots[i].put.0, self.slots[i].put.1))).collect();
-        let moves = grid::respace(&frames, &screens::work_areas(), old, self.spacing);
-        for (&i, (dx, dy)) in running.iter().zip(moves) {
-            let (x, y) = self.slots[i].put;
-            self.put(i, x + dx, y + dy);
+        let work_areas = screens::work_areas();
+        // The grid is as much larger as the widgets on it: those drawn at one
+        // scale are respaced together, apart from those drawn at another.
+        let mut scales: Vec<i32> = running.iter().map(|&i| self.slots[i].n).collect();
+        scales.sort_unstable();
+        scales.dedup();
+        for n in scales {
+            let these: Vec<usize> = running.iter().copied().filter(|&i| self.slots[i].n == n).collect();
+            let frames: Vec<RECT> = these.iter().map(|&i| on_screens(frame(self.slots[i].kind, self.slots[i].put.0, self.slots[i].put.1, n))).collect();
+            let moves = grid::respace(&frames, &work_areas, old, self.spacing, n);
+            for (&i, (dx, dy)) in these.iter().zip(moves) {
+                let (x, y) = self.slots[i].put;
+                self.put(i, x + dx, y + dy);
+            }
         }
         self.lay_out();
     }
@@ -741,21 +827,22 @@ impl App {
     /// made and not seen.)
     fn room_beside(&self, b: usize) -> (i32, i32) {
         let base = &self.slots[b];
-        let Spacing { margin, gap } = self.spacing;
-        let own = frame(base.kind, base.x, base.y);
+        let n = base.n;
+        let Spacing { margin, gap } = self.spacing.times(n);
+        let own = base.frame();
         let work = work_area(&on_screens(own));
         let free = |&(x, y): &(i32, i32)| {
-            let f = frame(base.kind, x, y);
+            let f = frame(base.kind, x, y, n);
             let room = Rect::new(f.x0 - gap, f.y0 - gap, f.x1 + gap, f.y1 + gap);
             f.x0 >= work.left + margin && f.y0 >= work.top + margin && f.x1 <= work.right - margin && f.y1 <= work.bottom - margin
-                && !self.slots.iter().any(|s| s.hwnd != 0 && frame(s.kind, s.x, s.y).intersects(&room))
+                && !self.slots.iter().any(|s| s.hwnd != 0 && s.frame().intersects(&room))
         };
         let (dx, dy) = (own.x1 - own.x0 + gap, own.y1 - own.y0 + gap);
         (1..=ROOM_STEPS)
             .flat_map(|k| [(-k, 0), (k, 0), (0, k), (0, -k)])
             .map(|(i, j)| (base.x + i * dx, base.y + j * dy))
             .find(free)
-            .unwrap_or_else(|| on_screen(base.kind, base.x + CASCADE, base.y + CASCADE, margin))
+            .unwrap_or_else(|| on_screen(base.kind, base.x + CASCADE * n, base.y + CASCADE * n, self.spacing.margin, n))
     }
 
     /// The notes there are: the first, then the others in the order of their
@@ -785,10 +872,11 @@ impl App {
         // Something may have been put where it was since: it would come back
         // underneath that, and not be seen.  Then it goes where a new one would.
         let (x, y) = self.slots[closed].put;
-        let own = frame(Kind::Notes, x, y);
-        if self.slots.iter().any(|s| s.hwnd != 0 && frame(s.kind, s.x, s.y).intersects(&own)) {
+        let own = frame(Kind::Notes, x, y, settled_scale(Kind::Notes, x, y, self.slots[closed].n));
+        if self.slots.iter().any(|s| s.hwnd != 0 && s.frame().intersects(&own)) {
             let beside = self.note_to_close(from).unwrap_or(closed);
             (self.slots[closed].x, self.slots[closed].y) = self.room_beside(beside);
+            self.slots[closed].n = self.slots[beside].n;
             self.keep_place(closed);
         }
         self.set_enabled(closed, true);
@@ -810,7 +898,7 @@ impl App {
         let (x, y) = self.room_beside(beside);
         let section = notes::create(&mut self.settings);
         let title = notes::name(&section);
-        self.slots.push(Slot { x, y, ..Slot::new(Kind::Notes, &section, title) });
+        self.slots.push(Slot { x, y, n: self.slots[beside].n, ..Slot::new(Kind::Notes, &section, title) });
         self.widgets.0.push(None);
         let i = self.slots.len() - 1;
         self.keep_place(i);
@@ -847,16 +935,31 @@ impl App {
         if rect.is_empty() {
             return;
         }
-        // SAFETY: the buffer is at least as large as the largest skin.
-        let mut canvas = unsafe { Canvas::new(self.buffer.bits, self.buffer.w, skin.w, skin.h) };
+        // Drawn at its own size...
+        let (stride, rows) = largest_skin();
+        // SAFETY: the picture is `stride` x `rows`, at least as large as the largest skin.
+        let mut canvas = unsafe { Canvas::new(self.picture.as_mut_ptr(), stride, skin.w, skin.h) };
         canvas.set_clip(rect);
         canvas.clear(rect);
         skin::draw(skin, widget as &dyn Hooks, &mut canvas, &mut self.text, &mut self.slots[i].seen);
+        drop(canvas);
 
-        let size = SIZE { cx: skin.w, cy: skin.h };
+        // ...and put up n times that, in the buffer.
+        let n = self.slots[i].n;
+        if self.buffer.w < stride * n || self.buffer.h < rows * n {
+            self.buffer = Buffer::new(stride * n, rows * n);
+        }
+        let wide = self.buffer.w as usize;
+        let pixels = self.buffer.pixels();
+        if pixels.is_empty() {
+            return; // no bitmap to be had: nothing can be shown
+        }
+        canvas::scale_into(&self.picture, stride as usize, rect, pixels, wide, n);
+
+        let size = SIZE { cx: skin.w * n, cy: skin.h * n };
         let origin = POINT { x: 0, y: 0 };
         let blend = BLENDFUNCTION { BlendOp: 0, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA };
-        let area = RECT { left: rect.x0, top: rect.y0, right: rect.x1, bottom: rect.y1 };
+        let area = RECT { left: rect.x0 * n, top: rect.y0 * n, right: rect.x1 * n, bottom: rect.y1 * n };
         let info = UPDATELAYEREDWINDOWINFO {
             cbSize: size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
             hdcDst: 0,
@@ -1094,7 +1197,16 @@ impl App {
 
     // ---- the mouse ---------------------------------------------------------------
 
+    /// A point of window `i`, in the screen's pixels, as the widget has it:
+    /// in its own.  (Held by the mouse, a window is told of points left of
+    /// it and above it too, so these are rounded down, not towards 0.)
+    fn widget_point(&self, i: usize, x: i32, y: i32) -> (i32, i32) {
+        let n = self.slots[i].n.max(1);
+        (x.div_euclid(n), y.div_euclid(n))
+    }
+
     fn mouse_down(&mut self, i: usize, wnd: HWND, x: i32, y: i32, double: bool) -> Later {
+        let (x, y) = self.widget_point(i, x, y);
         // Clicking anywhere but on what is being typed on -- the note's sheet,
         // the weather's city field -- finishes the typing.
         if !(self.typing == Some(i) && self.widgets.get(i).is_some_and(|w| w.typing_at(x, y))) {
@@ -1127,6 +1239,7 @@ impl App {
     }
 
     fn mouse_move(&mut self, i: usize, wnd: HWND, x: i32, y: i32, button_down: bool) -> Later {
+        let (x, y) = self.widget_point(i, x, y);
         // A press whose release went somewhere else is over.
         if !button_down {
             self.press = None;
@@ -1145,11 +1258,24 @@ impl App {
                 press.dragging = dx.abs() > limit_x || dy.abs() > limit_y;
             }
             if press.dragging {
+                // Over a monitor of another scale, the window is drawn at that
+                // one, and the spot of it that was taken hold of stays under
+                // the pointer.  (The pointer's monitor, not the window's: the
+                // window's would change as the window did.)
+                let (was, n) = (self.slots[i].n, screens::scale_at(cursor.x, cursor.y));
+                if n != was {
+                    let held = (press.cursor.x - press.window.x, press.cursor.y - press.window.y);
+                    press.window = POINT { x: press.cursor.x - held.0 * n / was, y: press.cursor.y - held.1 * n / was };
+                }
                 let (px, py) = (press.window.x + dx, press.window.y + dy);
+                self.slots[i].n = n;
                 let (nx, ny) = self.snapped(i, px, py);
                 self.slots[i].x = nx;
                 self.slots[i].y = ny;
                 unsafe { SetWindowPos(wnd, 0, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+                if n != was {
+                    self.redraw(i);
+                }
             }
             return Later::Nothing;
         }
@@ -1181,6 +1307,7 @@ impl App {
     }
 
     fn mouse_up(&mut self, i: usize, x: i32, y: i32) -> Later {
+        let (x, y) = self.widget_point(i, x, y);
         let press = self.press.take();
         unsafe { ReleaseCapture() };
         let Some(press) = press.filter(|p| p.idx == i) else { return Later::Nothing };
@@ -1201,6 +1328,7 @@ impl App {
     fn mouse_wheel(&mut self, i: usize, wnd: HWND, screen_x: i32, screen_y: i32, axis: Axis, delta: i32) -> Later {
         let mut p = POINT { x: screen_x, y: screen_y };
         unsafe { ScreenToClient(wnd, &mut p) };
+        let (x, y) = self.widget_point(i, p.x, p.y);
         let rest = match axis {
             Axis::Upright => &mut self.wheel,
             Axis::Sideways => &mut self.sideways,
@@ -1208,7 +1336,7 @@ impl App {
         let (ev, count) = notches(rest, axis, delta);
         let mut later = Later::Nothing;
         for _ in 0..count {
-            if let Some(l) = self.fire(i, ev, p.x, p.y) {
+            if let Some(l) = self.fire(i, ev, x, y) {
                 later = l;
             }
         }
@@ -1220,27 +1348,26 @@ impl App {
     /// one -- when its frame comes within a snap of it, unless Ctrl or Shift
     /// is held.
     fn snapped(&self, i: usize, mut x: i32, mut y: i32) -> (i32, i32) {
-        let kind = self.slots[i].kind;
+        let (kind, n) = (self.slots[i].kind, self.slots[i].n);
         let held = |key: i32| unsafe { GetKeyState(key) } < 0;
         if self.snap && !held(VK_CONTROL) && !held(VK_SHIFT) {
-            let f = on_screens(frame(kind, x, y));
+            let f = on_screens(frame(kind, x, y, n));
             let others: Vec<RECT> = (self.slots.iter().enumerate())
                 .filter(|&(j, other)| j != i && other.hwnd != 0)
-                .map(|(_, other)| on_screens(frame(other.kind, other.x, other.y)))
+                .map(|(_, other)| on_screens(other.frame()))
                 .collect();
-            let (dx, dy) = grid::snap(&f, &others, &work_area(&f), self.spacing);
+            let (dx, dy) = grid::snap(&f, &others, &work_area(&f), self.spacing, n);
             (x, y) = (x + dx, y + dy);
         }
         // Not dropped where no monitor shows it, nor half off one.
-        on_screen(kind, x, y, self.spacing.margin)
+        on_screen(kind, x, y, self.spacing.margin, n)
     }
 
     /// Is (x, y) on the screen in the margin round window `i`'s frame, and
     /// over another widget's frame?  A press there is for that one.
     fn over_another(&self, i: usize, x: i32, y: i32) -> bool {
-        let own = &self.slots[i];
-        !frame(own.kind, own.x, own.y).contains(x, y)
-            && (self.slots.iter().enumerate()).any(|(j, other)| j != i && other.hwnd != 0 && frame(other.kind, other.x, other.y).contains(x, y))
+        !self.slots[i].frame().contains(x, y)
+            && (self.slots.iter().enumerate()).any(|(j, other)| j != i && other.hwnd != 0 && other.frame().contains(x, y))
     }
 
     // ---- menus ---------------------------------------------------------------------
@@ -1430,11 +1557,14 @@ impl App {
         }
         self.widgets.0.clear();
         self.widgets.0.resize_with(self.slots.len(), || None);
+        self.convert_old_places();
 
+        // the first layout, on the main monitor, at its scale
         let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
-        let size = |i: usize| (FIXED[i].0.skin().w, FIXED[i].0.skin().h);
-        let pad = FIXED[DATETIME].0.skin().int("Pad", 12);
-        let Spacing { margin, gap } = self.spacing;
+        let n = screens::scale_of(&work);
+        let size = |i: usize| (FIXED[i].0.skin().w * n, FIXED[i].0.skin().h * n);
+        let pad = FIXED[DATETIME].0.skin().int("Pad", 12) * n;
+        let Spacing { margin, gap } = self.spacing.times(n);
         // From one window to the next, past the first's size: the two pads
         // of nothing between the frames are taken back and the gap put in.
         let step = gap - 2 * pad;
@@ -1459,7 +1589,7 @@ impl App {
             // written into settings.ini by hand, with no place given, steps
             // down from the first.
             let (x, y) = defaults.get(i).copied().unwrap_or_else(|| {
-                let step = CASCADE * (i + 1 - FIXED.len()) as i32;
+                let step = CASCADE * n * (i + 1 - FIXED.len()) as i32;
                 (defaults[NOTE].0 + step, defaults[NOTE].1 + step)
             });
             let section = &self.slots[i].section;
@@ -1467,10 +1597,41 @@ impl App {
             let (x, y) = (self.settings.int(section, "X", x), self.settings.int(section, "Y", y));
             (self.slots[i].x, self.slots[i].y) = (x, y);
             self.slots[i].put = (x, y);
+            // at the scale of the monitor most of it is on at its own size
+            let kind = self.slots[i].kind;
+            self.slots[i].n = settled_scale(kind, x, y, screens::scale_of(&on_screens(frame(kind, x, y, 1))));
             if !placed {
                 self.keep_place(i);
             }
         }
+    }
+
+    /// A build from before the program was DPI aware wrote the places in
+    /// settings.ini in the coordinates Windows made up for it, which are not
+    /// the screens' pixels on a monitor that is scaled.  Turn them into those,
+    /// once, keeping each widget where it was on its monitor (see
+    /// `screens::from_unaware`) -- closed ones too -- and say so in [General].
+    fn convert_old_places(&mut self) {
+        if !dpi_aware() || self.settings.flag("General", DEVICE_PIXELS, false) {
+            return;
+        }
+        let placed: Vec<(usize, i32, i32)> = (0..self.slots.len())
+            .filter_map(|i| {
+                let section = &self.slots[i].section;
+                self.settings.get(section, "X")?;
+                Some((i, self.settings.int(section, "X", 0), self.settings.int(section, "Y", 0)))
+            })
+            .collect();
+        let frames: Vec<RECT> = placed.iter().map(|&(i, x, y)| on_screens(frame(self.slots[i].kind, x, y, 1))).collect();
+        // those that stood on the grid together stay together
+        let near = self.spacing.gap + grid::SNAP;
+        for (&(i, _, _), ((x, y), n)) in placed.iter().zip(screens::from_unaware(&frames, &screens::monitors_both_ways(), near)) {
+            let pad = self.slots[i].kind.skin().int("Pad", 12) * n;
+            let section = self.slots[i].section.clone();
+            self.settings.set_int(&section, "X", x - pad);
+            self.settings.set_int(&section, "Y", y - pad);
+        }
+        self.settings.set_int("General", DEVICE_PIXELS, 1);
     }
 
     fn shutdown(&mut self) {
@@ -1534,14 +1695,12 @@ fn run_later(mut later: Later) {
                     return;
                 };
                 let text = format!("{about}\n\nWin98 Widgets {}", env!("CARGO_PKG_VERSION"));
-                with_sharp_dpi(|| unsafe {
-                    MessageBoxW(0, wide(&text).as_ptr(), wide(&format!("About {title}")).as_ptr(), MB_OK | MB_ICONINFORMATION)
-                });
+                unsafe { MessageBoxW(0, wide(&text).as_ptr(), wide(&format!("About {title}")).as_ptr(), MB_OK | MB_ICONINFORMATION) };
                 Later::Nothing
             }
             Later::Delete(section, ask) => {
                 let sure = ask.is_none_or(|(title, text)| {
-                    with_sharp_dpi(|| unsafe { MessageBoxW(0, wide(&text).as_ptr(), wide(&title).as_ptr(), MB_YESNO | MB_ICONQUESTION) }) == IDYES
+                    (unsafe { MessageBoxW(0, wide(&text).as_ptr(), wide(&title).as_ptr(), MB_YESNO | MB_ICONQUESTION) }) == IDYES
                 });
                 if sure {
                     recycle(&with_app(|app| app.delete_note(&section)).unwrap_or_default());
@@ -1592,7 +1751,7 @@ fn recycle(files: &[PathBuf]) {
 fn show_menu(i: Option<usize>) -> Later {
     let Some(model) = with_app(|app| app.menu(i)) else { return Later::Nothing };
     let main = MAIN.load(Relaxed);
-    let chosen = with_sharp_dpi(|| unsafe {
+    let chosen = unsafe {
         let root = CreatePopupMenu();
         let mut stack = vec![root];
         let mut pending: Option<String> = None;
@@ -1622,7 +1781,7 @@ fn show_menu(i: Option<usize>) -> Later {
         PostMessageW(main, WM_NULL, 0, 0);
         DestroyMenu(root);
         chosen as usize
-    });
+    };
     if chosen == 0 {
         return Later::Nothing;
     }
@@ -1660,7 +1819,11 @@ unsafe extern "system" fn widget_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 let mut p = POINT::default();
                 GetCursorPos(&mut p);
                 ScreenToClient(wnd, &mut p);
-                let over_text = with_app(|app| app.widgets.get(i).is_some_and(|w| w.ibeam(p.x, p.y))).unwrap_or(false);
+                let over_text = with_app(|app| {
+                    let (x, y) = app.widget_point(i, p.x, p.y);
+                    app.widgets.get(i).is_some_and(|w| w.ibeam(x, y))
+                })
+                .unwrap_or(false);
                 SetCursor(LoadCursorW(0, if over_text { IDC_IBEAM } else { IDC_ARROW } as PCWSTR));
                 return 1;
             }
@@ -1693,6 +1856,19 @@ unsafe extern "system" fn widget_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 app.set_enabled(i, false);
                 Later::Nothing
             }),
+            // The monitor's scale setting changed, or the window was moved
+            // onto one with another: the size Windows offers is its own
+            // stretch, not a whole number of times the skin -- the windows
+            // are laid out again instead, each at the scale its monitor has.
+            // (A drag sees to the window it moves: see `mouse_move`.)
+            WM_DPICHANGED => {
+                with_app(|app| {
+                    if !app.press.as_ref().is_some_and(|p| p.dragging) {
+                        app.lay_out();
+                    }
+                });
+                return 0;
+            }
             _ => return DefWindowProcW(wnd, msg, wp, lp),
         };
         run_later(later.unwrap_or(Later::Nothing));
@@ -1844,6 +2020,9 @@ pub fn run() -> i32 {
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return 0;
         }
+        // Before there is a window: the widgets are scaled here, not
+        // stretched by Windows (see the head of this file).
+        make_dpi_aware();
 
         let font = skin::datetime::SKIN.var("Font");
         let Some(text) = Text::new(font, skin::FONTS) else {
@@ -2043,8 +2222,8 @@ mod tests {
         app.fewer_notes(None);
         show(&mut app, RAIN, x, y);
         app.more_notes(None);
-        let moved = frame(Kind::Notes, app.slots[NOTE].x, app.slots[NOTE].y);
-        assert!(!moved.intersects(&frame(Kind::Rain, x, y)));
+        let moved = app.slots[NOTE].frame();
+        assert!(!moved.intersects(&frame(Kind::Rain, x, y, 1)));
         assert_eq!(app.settings.int(notes::FIRST, "X", -1), app.slots[NOTE].x);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2099,7 +2278,7 @@ mod tests {
         app.lay_out_on(&away);
         for (i, _) in places {
             let (x, y) = shown(&app, i);
-            assert_eq!(screens::keep_on(&reach(Kind::Notes, x, y, app.spacing.margin), &away), (0, 0), "slot {i} at {x},{y}");
+            assert_eq!(screens::keep_on(&reach(Kind::Notes, x, y, app.spacing.margin, 1), &away), (0, 0), "slot {i} at {x},{y}");
         }
         let ((x1, y1), (x2, y2)) = (shown(&app, first), shown(&app, second));
         assert_eq!((x2 - x1, y2 - y1), (step, 0));
@@ -2118,7 +2297,7 @@ mod tests {
 
     /// The frame of slot `i` where it is put.
     fn put_frame(app: &App, i: usize) -> Rect {
-        frame(app.slots[i].kind, app.slots[i].put.0, app.slots[i].put.1)
+        frame(app.slots[i].kind, app.slots[i].put.0, app.slots[i].put.1, app.slots[i].n)
     }
 
     /// Slot `i` put with the top left corner of its frame at (x, y).
@@ -2167,7 +2346,7 @@ mod tests {
         app.set_enabled(top, true);
         let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
         let Spacing { margin, gap } = app.spacing;
-        let size = frame(Kind::Notes, 0, 0);
+        let size = frame(Kind::Notes, 0, 0, 1);
         let (w, h) = (size.x1 - size.x0, size.y1 - size.y0);
         put_frame_at(&mut app, top, work.right - margin - w, work.top + margin);
         put_frame_at(&mut app, under, work.right - margin - w, work.top + margin + h + gap);
@@ -2207,7 +2386,7 @@ mod tests {
     fn a_press_in_the_margin_round_a_frame_is_for_the_frame_under_it() {
         let (mut app, dir) = app("press");
         let pad = Kind::Notes.skin().int("Pad", 12);
-        let size = frame(Kind::Notes, 0, 0);
+        let size = frame(Kind::Notes, 0, 0, 1);
         let w = size.x1 - size.x0;
         // two notes frame against frame: the first's margin lies over the
         // second's frame
@@ -2222,6 +2401,27 @@ mod tests {
         assert!(!app.over_another(second, edge + 3, y));
         assert!(!app.over_another(NOTE, edge - 3, y));
         assert!(!app.over_another(NOTE, 102, y));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_window_drawn_at_two_is_its_skin_twice_over() {
+        let (mut app, dir) = app("scale");
+        let (skin, pad) = (Kind::Notes.skin(), Kind::Notes.skin().int("Pad", 12));
+        // the frame: twice the pad in, twice as wide and as high
+        let (one, two) = (frame(Kind::Notes, 100, 100, 1), frame(Kind::Notes, 100, 100, 2));
+        assert_eq!((two.x0, two.y0), (100 + 2 * pad, 100 + 2 * pad));
+        assert_eq!((two.x1 - two.x0, two.y1 - two.y0), (2 * (one.x1 - one.x0), 2 * (one.y1 - one.y0)));
+        assert_eq!((two.x1, two.y1), (100 + 2 * skin.w - 2 * pad, 100 + 2 * skin.h - 2 * pad));
+        // and the margin round it, twice as wide
+        let around = reach(Kind::Notes, 100, 100, 12, 2);
+        assert_eq!((around.left, around.right), (two.x0 - 24, two.x1 + 24));
+        // the mouse, in the widget's own pixels; held, also left of the window
+        app.slots[NOTE].n = 2;
+        assert_eq!(app.widget_point(NOTE, 61, 50), (30, 25));
+        assert_eq!(app.widget_point(NOTE, -1, -3), (-1, -2));
+        app.slots[NOTE].n = 1;
+        assert_eq!(app.widget_point(NOTE, 61, -3), (61, -3));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
