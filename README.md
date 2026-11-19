@@ -1,8 +1,17 @@
 # Win98 Widgets
 
-Six Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
-Weather, Rain Window and Disk Space — as one small Rust program. There is one of each, and as many
-more Sticky Notes as you ask for.
+Seven Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
+Weather, Rain Window, Disk Space and World Clock — as one small Rust program. There is one of
+each, and as many more Sticky Notes as you ask for.
+
+![All seven widgets on a desktop, in the default rust colour](screenshots/rust.png)
+
+Down the left, the **Resource Meter** (how busy the processors are and how full the
+memory is), **Date/Time Properties** (a calendar, a clock and a graph of when the computer
+was in use today) and, along the bottom, **Disk Space** and **Weather**. In the middle the
+**World Clock** keeps the time in three cities, with the **Rain Window** under it; on the
+right, a **Sticky Note**. The same desktop in two of the other colours is further down,
+under *Colour*.
 
 | | |
 |--------------------------|---------|
@@ -27,12 +36,12 @@ Run the .exe. Nothing is installed: it can live anywhere. Only one copy runs at 
 
 Each widget's layout is an `.ini` file in [`skins/`](skins): a `[Variables]` section for the
 palette and the layout figures, then one section per meter — a shape, a line of text or an
-image — in the order they are painted. `build.rs` compiles the six of them into static
+image — in the order they are painted. `build.rs` compiles the seven of them into static
 tables — every meter's position, shapes, colours, text options and mouse actions — so
 **the `.ini` files are the single source of truth for the layout**. Change a colour or move
 a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
 runs: the logic behind each widget is plain Rust in `src/widgets/` (`datetime.rs`,
-`resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`), and a mouse action in a skin, such as
+`resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`, `world.rs`), and a mouse action in a skin, such as
 `LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
 Text is laid out by DirectWrite and rasterised with aliased glyphs. Shapes are filled by a
@@ -90,8 +99,8 @@ screen's.
 **Colour.** The widgets are drawn in rust and gold unless another colour is picked:
 right-click → *Colour* has the warm Rust, Brick, Orange, Mustard, Olive, Mauve and Taupe,
 then the cool Navy, Teal, Slate and Graphite, each with a swatch, and *Custom...*, which
-opens the Windows colour dialog for any other. Every
-widget changes at once, and the choice is kept in `settings.ini` as `Tint=` under
+opens the Windows colour dialog for any other. Every widget changes at once, and the
+choice is kept in `settings.ini` as `Tint=` under
 `[General]` — `R,G,B` or `#RRGGBB`, written there by hand if you like and picked up with
 *Reload settings*; empty is the rust. The colour is the accents': the title bars, the
 calendar's heading and the selected day, the clocks' hands and dots, the usage bars, the
@@ -104,6 +113,14 @@ out in between (navy gives a title bar that runs from navy to blue). The swatche
 the colour as the widgets will have it. The skins' accents are all drawn around one
 colour, the `Tint` variable in each `skins/*.ini`, and what a skin keeps as it is is
 listed there as `Untinted=`.
+
+<p>
+  <img src="screenshots/brick.png" width="49%" alt="The same widgets in Brick: red title bars, clock hands, usage bars, pie and rain">
+  <img src="screenshots/navy.png" width="49%" alt="The same widgets in Navy: blue title bars, clock hands, usage bars, pie and rain">
+</p>
+
+Brick and Navy: the title bars, hands, bars, pie and rain change; the grey faces, the white
+fields, the text and the note's paper do not.
 
 In the widgets themselves: tabs, month list, calendar selection, scroll to browse months,
 the 12/24-hour field, scroll along the usage graph's hours, checkboxes, the scrollbar,
@@ -165,6 +182,15 @@ does the wheel over the name; right-click has every drive by its letter. The cho
 kept in `settings.ini` as `Drive`; with none made it is the drive Windows is on. The
 pie's colours are the `Pie*` variables in `skins/Win98Disk.ini`.
 
+**World Clock** keeps the time in three cities, side by side: each has its hands, the time
+in figures, and on its box whether it is today there and how far ahead of here it is
+("Today, +2 hrs"). Click a city's name and type another — `Lviv`, or `Paris, US` /
+`Portland, Maine` to say which one; Enter takes it, Escape does not, and an empty field
+puts that clock away. A city is looked up once, with Open-Meteo, for the time zone it
+keeps; after that its time is worked out on this machine, summer time and all. The three
+are kept in `settings.ini` as `City1`/`Zone1` to `City3`/`Zone3` under `[World]`, and the
+figures follow the Date/Time widget's 12- or 24-hour choice.
+
 **Position** (right-click → Position): *On desktop* (default) keeps the widgets behind
 every window; *Normal*; *Always on top*.
 
@@ -206,7 +232,8 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 ## Layout of the source
 
 ```text
-skins/       the six layouts (.ini), the weather icons and the tray icon
+skins/       the seven layouts (.ini), the weather icons and the tray icon
+screenshots/ the pictures in this file
 build.rs     those .ini files compiled into static tables
 src/
   main.rs      the way in, and the list of modules
@@ -214,17 +241,23 @@ src/
                tray, the once-a-second tick, the frames in between
   tools/       for working on the program
     dump         off-screen rendering, for checking a change
-  widgets/     what a widget is, and the six there are
+  widgets/     what a widget is, and the seven there are
     widget       the Widget trait: all the host knows about a widget
+    field        a city field, typed on where it stands: the weather's and the
+                 world clock's three
     datetime     Date/Time Properties
     resources    Resource Meter
     notes        Sticky Note (also: which sections of settings.ini are notes)
     weather      Weather (and the child that fetches it)
     rain         Rain Window (the one that is animated)
     disk         Disk Space
+    world        World Clock (and the child that finds a city's time zone)
   input/       typing
     keys         the window that holds the keyboard for a widget
-    editor       a text and what the keys do to it: the note's, the city field's
+    editor       a text and what the keys do to it: the note's, the city fields'
+  net/         the network, which only a child ever touches
+    geocode      a city by name: where it is, and its time zone
+    http         one GET over WinHTTP
   storage/     what is kept on disk
     settings     settings.ini
     usage        the on/unlocked journal the Date/Time graph is drawn from
@@ -232,7 +265,7 @@ src/
     skin         the compiled tables, and drawing and hit-testing them
     canvas       the software canvas they are drawn on
     text         DirectWrite text, rasterised into the canvas
-    tint         the colour picked, and every colour turned to it
+    tint         the colour picked, and every accent turned to it
   platform/    Windows
     sys          the Win32 declarations all of it uses
     screens      the monitors, and keeping a widget on them
