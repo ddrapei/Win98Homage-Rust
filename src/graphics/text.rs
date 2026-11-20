@@ -28,27 +28,7 @@ use core::ffi::c_void;
 use core::ptr::{null, null_mut};
 
 use crate::canvas::{Canvas, Rect};
-use crate::sys::{self, BOOL, HRESULT};
-
-type Com = *mut c_void;
-
-/// The function in slot `index` of a COM object's vtable.
-#[inline]
-unsafe fn slot<F: Copy>(obj: Com, index: usize) -> F {
-    unsafe {
-        let table = *(obj as *const *const *const c_void);
-        core::mem::transmute_copy(&*table.add(index))
-    }
-}
-
-unsafe fn release(obj: Com) {
-    if !obj.is_null() {
-        unsafe {
-            let f: unsafe extern "system" fn(Com) -> u32 = slot(obj, 2);
-            f(obj);
-        }
-    }
-}
+use crate::sys::{self, release, slot, Com, BOOL, HRESULT};
 
 #[repr(C)]
 #[derive(Default)]

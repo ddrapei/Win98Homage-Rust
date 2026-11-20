@@ -5,8 +5,10 @@
 //! Only user32, gdi32, kernel32, comdlg32, shell32 and advapi32 are imported
 //! outright.
 //! DirectWrite, the session API and the DPI functions (which older Windows
-//! does not have) are found with GetProcAddress, and WinHTTP
-//! is only ever loaded by the short-lived child that fetches the weather.
+//! does not have) are found with GetProcAddress, and so is COM (ole32), which
+//! is loaded only once a photo frame decodes a photo (with WIC) or asks for a
+//! folder.  WinHTTP is only ever loaded by the short-lived child that fetches
+//! the weather.
 
 #![allow(non_snake_case, non_camel_case_types, clippy::upper_case_acronyms, dead_code)]
 
@@ -223,6 +225,30 @@ pub struct SHFILEOPSTRUCTW {
     pub hNameMappings: *mut c_void,
     pub lpszProgressTitle: PCWSTR,
 }
+
+/// SHBrowseForFolderW's: the "Browse for Folder" dialog.
+pub type BFFCALLBACK = unsafe extern "system" fn(HWND, u32, LPARAM, LPARAM) -> i32;
+
+#[repr(C)]
+pub struct BROWSEINFOW {
+    pub hwndOwner: HWND,
+    pub pidlRoot: *const c_void,
+    /// MAX_PATH characters, for the folder's display name.
+    pub pszDisplayName: *mut u16,
+    pub lpszTitle: PCWSTR,
+    pub ulFlags: u32,
+    pub lpfn: Option<BFFCALLBACK>,
+    pub lParam: LPARAM,
+    pub iImage: i32,
+}
+
+pub const MAX_PATH: usize = 260;
+/// Only folders that are folders on a disk can be chosen.
+pub const BIF_RETURNONLYFSDIRS: u32 = 0x1;
+/// The dialog is up: the moment to show it the folder to start from.
+pub const BFFM_INITIALIZED: u32 = 1;
+/// WM_USER + 103: select this path (lParam a PCWSTR, wParam TRUE).
+pub const BFFM_SETSELECTIONW: u32 = 0x0400 + 103;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
@@ -666,6 +692,8 @@ unsafe extern "system" {
     pub fn Shell_NotifyIconW(message: u32, data: *const NOTIFYICONDATAW) -> BOOL;
     pub fn ShellExecuteW(wnd: HWND, verb: PCWSTR, file: PCWSTR, params: PCWSTR, dir: PCWSTR, show: i32) -> isize;
     pub fn SHFileOperationW(op: *mut SHFILEOPSTRUCTW) -> i32;
+    pub fn SHBrowseForFolderW(info: *const BROWSEINFOW) -> *mut c_void;
+    pub fn SHGetPathFromIDListW(list: *const c_void, path: *mut u16) -> BOOL;
 }
 
 #[link(name = "advapi32")]
@@ -688,6 +716,83 @@ pub fn wide(s: &str) -> Vec<u16> {
 pub fn from_wide(buf: &[u16]) -> String {
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..len])
+}
+
+// ---- COM ----------------------------------------------------------------------
+
+/// A COM interface pointer.  The few methods the program calls are called
+/// through their vtable slots, which the SDK headers fix.
+pub type Com = *mut c_void;
+
+/// The function in slot `index` of a COM object's vtable.
+#[inline]
+pub unsafe fn slot<F: Copy>(obj: Com, index: usize) -> F {
+    unsafe {
+        let table = *(obj as *const *const *const c_void);
+        core::mem::transmute_copy(&*table.add(index))
+    }
+}
+
+/// IUnknown::Release, for a pointer that may be null.
+pub unsafe fn release(obj: Com) {
+    if !obj.is_null() {
+        unsafe {
+            let f: unsafe extern "system" fn(Com) -> u32 = slot(obj, 2);
+            f(obj);
+        }
+    }
+}
+
+pub const COINIT_APARTMENTTHREADED: u32 = 0x2;
+pub const COINIT_DISABLE_OLE1DDE: u32 = 0x4;
+pub const CLSCTX_INPROC_SERVER: u32 = 0x1;
+
+thread_local! {
+    static COM_READY: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Start COM on this thread, once: the window thread is a single-threaded
+/// apartment, which is what the folder dialog wants and WIC takes.  It is
+/// never stopped; it ends with the thread.  False if ole32 cannot be had.
+pub fn com_init() -> bool {
+    if COM_READY.get() {
+        return true;
+    }
+    type Init = unsafe extern "system" fn(*mut c_void, u32) -> HRESULT;
+    let ready = unsafe {
+        proc_address("ole32.dll", b"CoInitializeEx\0").is_some_and(|p| {
+            // S_OK, or S_FALSE if it was started already; RPC_E_CHANGED_MODE
+            // if something started it multi-threaded, which serves as well
+            let hr = core::mem::transmute::<*const c_void, Init>(p)(core::ptr::null_mut(), COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            hr >= 0 || hr as u32 == 0x8001_0106
+        })
+    };
+    COM_READY.set(ready);
+    ready
+}
+
+/// CoCreateInstance for an in-process server: the interface `iid` of a new
+/// `clsid`, or None.  COM must have been started (`com_init`).
+pub fn co_create(clsid: &GUID, iid: &GUID) -> Option<Com> {
+    type Create = unsafe extern "system" fn(*const GUID, Com, u32, *const GUID, *mut Com) -> HRESULT;
+    unsafe {
+        let create: Create = core::mem::transmute(proc_address("ole32.dll", b"CoCreateInstance\0")?);
+        let mut obj: Com = core::ptr::null_mut();
+        (create(clsid, core::ptr::null_mut(), CLSCTX_INPROC_SERVER, iid, &mut obj) >= 0 && !obj.is_null()).then_some(obj)
+    }
+}
+
+/// CoTaskMemFree: what the shell and COM hand back is given back this way.
+pub unsafe fn co_free(p: *mut c_void) {
+    type Free = unsafe extern "system" fn(*mut c_void);
+    if p.is_null() {
+        return;
+    }
+    unsafe {
+        if let Some(f) = proc_address("ole32.dll", b"CoTaskMemFree\0") {
+            core::mem::transmute::<*const c_void, Free>(f)(p);
+        }
+    }
 }
 
 /// A function from a DLL that is not imported outright.  `name` must end in NUL.

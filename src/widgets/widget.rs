@@ -40,6 +40,13 @@ pub enum Request {
     TakeKeys,
     /// The widget is done with the keyboard, as a click elsewhere would say.
     DropKeys,
+    /// The skin the widget is drawn from is another now (a photo frame
+    /// turned to another shape): its window is made again, the size of that
+    /// one, where it was.
+    Reshape,
+    /// Ask for a folder, starting from this one: what is chosen comes back
+    /// through `folder_chosen`.
+    ChooseFolder(PathBuf),
 }
 
 pub struct Outcome {
@@ -118,6 +125,12 @@ pub trait Widget: Hooks {
     fn drag(&mut self, _x: i32, _y: i32) -> Dirty {
         Dirty::None
     }
+    /// The button has come up at this point of the window, ending a press
+    /// the widget took -- or the press has ended out of the window's sight,
+    /// and the point is `i32::MIN` both ways, over nothing.
+    fn release(&mut self, _x: i32, _y: i32, _ctx: &mut Ctx) -> Outcome {
+        Outcome::none()
+    }
     /// Whether the pointer is over text, and should look it.
     fn ibeam(&self, _x: i32, _y: i32) -> bool {
         false
@@ -169,10 +182,15 @@ pub trait Widget: Hooks {
     /// tinted as they are drawn.)
     fn retint(&mut self) {}
 
-    /// Its own entries for the right-click menu.
+    /// Its own entries for the right-click menu; one with id 0 is a line
+    /// between them.
     fn menu(&self, _items: &mut Vec<MenuItem>) {}
     fn menu_command(&mut self, _id: u32, _ctx: &mut Ctx) -> Outcome {
         Outcome::none()
+    }
+    /// The folder chosen after it asked for one (`Request::ChooseFolder`).
+    fn folder_chosen(&mut self, _folder: PathBuf, _ctx: &mut Ctx) -> Dirty {
+        Dirty::None
     }
     /// The program is closing, or the widget is.
     fn shutdown(&mut self, _ctx: &mut Ctx) {}

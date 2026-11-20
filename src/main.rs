@@ -1,11 +1,11 @@
-//! Win98 Widgets -- ten Windows 98 style desktop widgets as one small
+//! Win98 Widgets -- eleven Windows 98 style desktop widgets as one small
 //! native program.
 //!
 //! Date/Time Properties, Resource Meter, Sticky Note, Weather, Rain Window,
-//! Disk Space, World Clock, Battery, Countdown and Claude Usage, drawn from
-//! the .ini files in `skins/` -- with no Direct2D and no script engine
-//! underneath.  One of each, and as many more Sticky Notes and Countdowns as
-//! are asked for.
+//! Disk Space, World Clock, Battery, Countdown, Claude Usage and Photo Frame,
+//! drawn from the .ini files in `skins/` -- with no Direct2D and no script
+//! engine underneath.  One of each, and as many more Sticky Notes, Countdowns
+//! and Photo Frames as are asked for.
 //!
 //! # Where things are
 //!
@@ -22,7 +22,7 @@
 //!   tools/         for working on the program
 //!     dump           off-screen rendering, for checking a change
 //!
-//!   widgets/       what a widget is, and the ten there are
+//!   widgets/       what a widget is, and the eleven there are
 //!     widget         what the host asks of a widget -- the one thing about
 //!                    them it knows
 //!     field          a one-line field, typed on where it stands: the
@@ -41,6 +41,7 @@
 //!     battery        Battery
 //!     countdown      Countdown
 //!     claude         Claude Usage     (and the child that asks for it)
+//!     photo          Photo Frame
 //!
 //!   input/        typing
 //!     keys           the window that holds the keyboard for a widget
@@ -59,6 +60,7 @@
 //!     skin           the compiled tables, and drawing and hit-testing them
 //!     canvas         the software canvas they are drawn on
 //!     text           DirectWrite text, rasterised into the canvas
+//!     decode         a photo read by WIC and brought down small
 //!     figures        3x5 pixel figures, for a ruler's numbers
 //!     tint           the colour the user picked, and every colour turned
 //!                    to it
@@ -86,13 +88,13 @@ mod widgets;
 // says `crate::canvas`, not `crate::graphics::canvas`.  Which folder a file
 // is in says what it is for; moving one changes these lines and nothing in
 // the file, or in any file that uses it.
-use graphics::{canvas, figures, skin, text, tint};
+use graphics::{canvas, decode, figures, skin, text, tint};
 use input::{editor, keys};
 use net::{geocode, http};
 use platform::{clock, grid, screens, sys};
 use storage::{settings, usage};
 use tools::dump;
-use widgets::{battery, calendar, claude, countdown, datetime, disk, field, notes, rain, resources, weather, widget, world};
+use widgets::{battery, calendar, claude, countdown, datetime, disk, field, notes, photo, rain, resources, weather, widget, world};
 
 fn main() {
     // There is no console to complain to: if something does go wrong, leave

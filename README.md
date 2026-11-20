@@ -1,8 +1,9 @@
 # Win98 Widgets
 
-Ten Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
-Weather, Rain Window, Disk Space, World Clock, Battery, Countdown and Claude Usage — as one
-small Rust program. There is one of each, and as many more Sticky Notes and Countdowns as you ask for.
+Eleven Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
+Weather, Rain Window, Disk Space, World Clock, Battery, Countdown, Claude Usage and Photo
+Frame — as one small Rust program. There is one of each, and as many more Sticky Notes,
+Countdowns and Photo Frames as you ask for.
 
 ![All seven widgets on a desktop, in the default rust colour](screenshots/rust.png)
 
@@ -11,8 +12,8 @@ memory is), **Date/Time Properties** (a calendar, a clock and a graph of when th
 was in use today) and, along the bottom, **Disk Space** and **Weather**. In the middle the
 **World Clock** keeps the time in three cities, with the **Rain Window** under it; on the
 right, a **Sticky Note**. The same desktop in two of the other colours is further down,
-under *Colour*. The **Battery**, the smallest, the **Countdown** and **Claude Usage** came
-after these pictures were taken.
+under *Colour*. The **Battery**, the smallest, the **Countdown**, **Claude Usage** and the
+**Photo Frame** came after these pictures were taken.
 
 | | |
 |--------------------------|---------|
@@ -37,13 +38,15 @@ Run the .exe. Nothing is installed: it can live anywhere. Only one copy runs at 
 
 Each widget's layout is an `.ini` file in [`skins/`](skins): a `[Variables]` section for the
 palette and the layout figures, then one section per meter — a shape, a line of text or an
-image — in the order they are painted. `build.rs` compiles the ten of them into static
-tables — every meter's position, shapes, colours, text options and mouse actions — so
+image — in the order they are painted. `build.rs` compiles the eleven of them into static
+tables (the Photo Frame's three times, once for each of its shapes, with its `PicW` and
+`PicH` given in `build.rs`) — every meter's position, shapes, colours, text options and
+mouse actions — so
 **the `.ini` files are the single source of truth for the layout**. Change a colour or move
 a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
 runs: the logic behind each widget is plain Rust in `src/widgets/` (`datetime.rs`,
 `resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`, `world.rs`, `battery.rs`,
-`countdown.rs`, `claude.rs`), and a mouse action in a skin, such as
+`countdown.rs`, `claude.rs`, `photo.rs`), and a mouse action in a skin, such as
 `LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
 Text is laid out by DirectWrite and rasterised with aliased glyphs, set the way Windows 98's
@@ -52,7 +55,7 @@ and no kerning, so every glyph starts on a pixel and the gaps between letters ar
 Shapes are filled by a small software canvas.
 
 `--dump <dir> [--state <file>]` draws each widget off-screen, in a state given by the
-file (which can ask for more than one note or countdown), and writes it out as a BMP — for comparing
+file (which can ask for more than one note, countdown or photo frame), and writes it out as a BMP — for comparing
 before and after a change (see `src/tools/dump.rs`).
 
 **Scaled displays.** The skins are laid out in whole pixels, and stretching them by 225% would
@@ -75,7 +78,7 @@ type in them).
 | | |
 |--|--|
 | drag anywhere | move a widget; it snaps onto the grid — the screen margin and the gap between widgets — and into line with the others (hold Ctrl or Shift not to). The note's text is the exception: dragging there selects |
-| right-click | menu: the widget's own options, Position, Snap, Screen margin, Gap between widgets, Colour, Lock, Close, the list of widgets (with *Sticky Note +* and *−* for the notes, and *Countdown +* and *−* for the countdowns), Start with Windows, settings, Exit |
+| right-click | menu: the widget's own options, Position, Snap, Screen margin, Gap between widgets, Colour, Lock, Close, the list of widgets (with *Sticky Note +* and *−* for the notes, *Countdown +* and *−* for the countdowns, and *Photo Frame +* and *−* for the photo frames), Start with Windows, settings, Exit |
 | tray icon | the same menu — this is how a closed widget is brought back |
 | `X` | closes that widget (it stops costing anything); `?` says what it does |
 
@@ -95,7 +98,7 @@ it: a widget against the screen's edge stays against it, the ones beside it or u
 follow on at the new gap, and ones lined up with each other stay lined up. "On the grid"
 means no further from the edge or the neighbour than the old figure and 10 px more, near
 enough to have been snapped there. A widget placed further away stays where it is, and
-so does a closed one. The first layout and the place of a new note or countdown follow
+so does a closed one. The first layout and the place of a new note, countdown or photo frame follow
 the same two figures. A widget is kept at least the margin inside the screen. Both figures are in the
 widgets' own pixels: on a monitor where they are drawn at 2x, a 12 px margin is 24 of the
 screen's.
@@ -112,7 +115,8 @@ used part of the disk pie, the rain, the Claude Usage needles. The greys and whi
 windows themselves — faces, bevels, fields — and the text stay exactly as they are, and so
 do the note's papers with the red margin printed on them, the weather's icons, the
 countdown's hourglass and its red pen ring, the battery's sections, red to green, and the
-Claude Usage scales, green to red, which have to mean the same whatever the colour. An
+Claude Usage scales, green to red, which have to mean the same whatever the colour — and
+the photos in a Photo Frame, which are shown in their own colours. An
 accent takes the
 colour's hue and how colourful it is, but keeps its own lightness, so the white text on
 a title bar stays as readable as it was; a very pale or very dark colour therefore comes
@@ -171,7 +175,8 @@ for good: its text file goes to the Recycle Bin, after a question if there is an
 written on it. The first note is the one that is always there: it can be closed but not
 deleted. Countdowns are counted the same way, with *Countdown +* and *Countdown −*, and
 one after the first can be deleted with *Delete this countdown* (after a question if it
-counts to a day or has a name).
+counts to a day or has a name). So are photo frames, with *Photo Frame +* and *Photo
+Frame −*; *Delete this photo frame* asks nothing, as its photos stay in their folder.
 
 **The weather's city.** Click the city field and type a place: `Lviv`, or `Paris, US` /
 `Portland, Maine` to say which one. Enter (or a click anywhere else) looks it up and pins
@@ -253,6 +258,43 @@ to date. While there is no answer it says *Offline*. Right-click → *Refresh no
 once. The gauges' shape, colours and shading are the `Dial*`, `Scale*`, `Needle*` and
 `Segment*` variables in `skins/Win98Claude.ini`.
 
+**Photo Frame** shows the photos in a folder one after another, each as the screen of a
+Siemens C60 would have shown it: brought down to that phone's 101 × 80 pixels and to its
+4096 colours (sixteen levels each of red, green and blue, with an ordered dither for the
+shades in between, as the phones of the time showed a photo), and every one of those
+pixels drawn as a 2 × 2 square of the widget's own, 4 × 4 on a monitor at 2x. It comes in
+three shapes, picked from its right-click menu: *Wide frame*, the phone's 101 × 80 in a
+218 × 223 frame; *Upright frame*, 80 × 101 in 176 × 265; and *Square frame*, 80 × 80 in
+176 × 223. A photo fills the frame: it is scaled until it covers it, centred, and what
+sticks out is cut off. A photo taken with the camera turned stands the right way up. The
+photos come round in a shuffled order, each once before any comes again, and the folder is
+looked at afresh for each round, so a photo put in it shows up in the next. Under the
+photo, in a small sunken tray just big enough for them, centred, is a row of three buttons
+in the manner of a classic media player's: back to the photo before, stop, and on to the
+next. They stand a few pixels apart, each with a dark line round it, each a light face with a bright top and left, a darker
+right edge and a deep foot, and every symbol is cut into its face the same way — dark
+along its top and left, a shade under the face inside, lit along its bottom and right —
+and is 9 px tall. They move when pressed: held down, a button gives at once (its highlight
+goes, its foot thins, its symbol drops a pixel) and a frame later is all the way in (its
+top and left in shade, its face darker, its symbol a pixel down and right); let go, it
+comes back the same way. However short the click it goes all the way in first, and slid
+off while held it comes out without doing anything: a button does its work when it is let
+go of over itself. The frame remembers the last hundred photos it showed, so back walks back through
+them and next walks forward again before any new photo comes; with nothing to go back to,
+the back button is greyed and does not move. Stop keeps the photo there is, and turns
+into a play button that starts the photos again. A click on the photo is next as well. Right-click for *Previous photo* and *Next photo*, how long each
+photo stays (5, 10, 30 seconds, a minute or five; 10 to begin with) and *Pause*, which is
+the stop button; *Choose folder...* opens the Browse for Folder dialog, and *Open folder*
+opens the folder in Explorer. To begin with the folder is `Photos`, beside
+`settings.ini`, made the first time the frame starts; the photos in it are shown, not those
+in the folders inside it. JPEG, PNG, BMP, GIF (its first frame) and TIFF photos are shown,
+decoded by the Windows Imaging Component that comes with Windows. HEIC photos (an iPhone's)
+and WebP are not: Windows decodes those only with extensions from the Microsoft Store, which
+a machine may or may not have. Each frame keeps its folder, shape and interval in
+`settings.ini` as `Folder=`, `Shape=` (`wide`, `tall` or `square`), `Interval=` and
+`Paused=` under its own section, `[Photo]`, `[Photo2]`, … The pane is dark, like the Rain
+Window's, and with no photo to show it says so.
+
 **Position** (right-click → Position): *On desktop* (default) keeps the widgets behind
 every window; *Normal*; *Always on top*.
 
@@ -260,7 +302,8 @@ every window; *Normal*; *Always on top*.
 
 | | |
 |--|--|
-| `%APPDATA%\Win98Widgets\settings.ini` | positions, which widgets are shown, each widget's knobs, and the countdowns' days and names |
+| `%APPDATA%\Win98Widgets\settings.ini` | positions, which widgets are shown, each widget's knobs, the countdowns' days and names, and the photo frames' folders and shapes |
+| `%APPDATA%\Win98Widgets\Photos\` | the photos the first photo frame shows, unless it is given another folder |
 | `%APPDATA%\Win98Widgets\Notes.txt` | the note (`NoteFile=` in settings.ini to keep it elsewhere) |
 | `%APPDATA%\Win98Widgets\Notes2.txt`, `Notes3.txt`, … | the notes after the first, each with a `[Notes2]`, `[Notes3]`, … section of its own in settings.ini |
 | `%LOCALAPPDATA%\Win98DateTime\Usage.log`, or `%LOCALAPPDATA%\Win98DateTime.log` | the usage log |
@@ -290,6 +333,12 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
   weather, every five minutes; in between it only moves the reset times on, once a
   minute. While Claude Code's sign-in has run out it asks nothing, and only looks every
   15 seconds at when the sign-in file was last changed — never at what is in it.
+- **Photo Frame** reads a photo only when it is due, and repaints only its pane. A photo
+  of many megapixels is decoded at a fraction of its size where the format allows (a JPEG
+  does) and brought down from there; between photos the frame only counts the seconds.
+  With no photo to show it looks in its folder every five seconds. A button moving asks
+  for frames, about thirty a second, for the tenth of a second it moves and no longer;
+  only its tray is repainted.
 - **Disk Space** asks a drive on this machine for its figures every five seconds, and
   repaints only when a figure it shows has changed. A network drive, a disc or a card can
   take many seconds to answer, so those are asked every half minute from a thread that
@@ -302,16 +351,17 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 ## Layout of the source
 
 ```text
-skins/       the ten layouts (.ini), the weather icons and the tray icon
+skins/       the eleven layouts (.ini), the weather icons and the tray icon
 screenshots/ the pictures in this file
 build.rs     those .ini files compiled into static tables
 src/
   main.rs      the way in, and the list of modules
-  app.rs       the host: windows (one per widget, per note and per countdown),
-               mouse, menus, tray, the once-a-second tick, the frames in between
+  app.rs       the host: windows (one per widget, per note, per countdown and per
+               photo frame), mouse, menus, tray, the once-a-second tick, the frames
+               in between
   tools/       for working on the program
     dump         off-screen rendering, for checking a change
-  widgets/     what a widget is, and the ten there are
+  widgets/     what a widget is, and the eleven there are
     widget       the Widget trait: all the host knows about a widget
     field        a one-line field, typed on where it stands: the weather's city,
                  the world clock's three, a countdown's name
@@ -327,6 +377,7 @@ src/
     battery      Battery
     countdown    Countdown (also: which sections of settings.ini are countdowns)
     claude       Claude Usage (and the child that asks for it)
+    photo        Photo Frame (also: which sections of settings.ini are photo frames)
   input/       typing
     keys         the window that holds the keyboard for a widget
     editor       a text and what the keys do to it: the note's, the one-line fields'
@@ -340,6 +391,7 @@ src/
     skin         the compiled tables, and drawing and hit-testing them
     canvas       the software canvas they are drawn on
     text         DirectWrite text, rasterised into the canvas
+    decode       a photo read by WIC, brought down small and stood the right way up
     tint         the colour picked, and every accent turned to it
   platform/    Windows
     sys          the Win32 declarations all of it uses

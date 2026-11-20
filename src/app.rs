@@ -1,14 +1,18 @@
 //! The host: one small process, one thread, a layered window for each widget.
 //!
-//! There is one of each of the ten, and as many more Sticky Notes and
-//! Countdowns as have been asked for: a note after the first is a window like
-//! any other, made from the same skin, with a section of settings.ini and a
-//! text file of its own (see `notes`), and a countdown after the first is the
-//! same with a section and no file (see `countdown`).  Those two kinds are
-//! the families (`FAMILIES`).  The windows are numbered -- the ten first,
-//! then the other notes and countdowns as they were made -- and a number is
-//! never handed on: a deleted one's stays its own, unused, until the program
-//! ends.
+//! There is one of each of the eleven, and as many more Sticky Notes,
+//! Countdowns and Photo Frames as have been asked for: a note after the
+//! first is a window like any other, made from the same skin, with a section
+//! of settings.ini and a text file of its own (see `notes`), and a countdown
+//! or a photo frame after the first is the same with a section and no file
+//! (see `countdown`, `photo`).  Those three kinds are the families
+//! (`FAMILIES`).  The windows are numbered -- the eleven first, then the
+//! others as they were made -- and a number is never handed on: a deleted
+//! one's stays its own, unused, until the program ends.
+//!
+//! A window's skin is its slot's: for every kind but one that is the kind's,
+//! and a photo frame's is the one for the shape its section asks for.
+//! Turned to another shape, its window is made again at the new size.
 //!
 //! Each widget is a borderless layered window that never takes the keyboard
 //! and never shows in the taskbar or Alt-Tab -- a desktop widget, not an
@@ -55,6 +59,7 @@ use crate::disk::Disk;
 use crate::grid::{self, Spacing};
 use crate::keys::{self, Axis, Input, Key, Keys};
 use crate::notes::{self, Notes};
+use crate::photo::{self, Photo};
 use crate::rain::Rain;
 use crate::resources::Resources;
 use crate::screens::{self, work_area};
@@ -79,9 +84,12 @@ enum Kind {
     Battery,
     Countdown,
     Claude,
+    Photo,
 }
 
 impl Kind {
+    /// The kind's skin.  A photo frame's is the one for its shape, which
+    /// `skin_in` knows; this is the shape a frame starts in.
     fn skin(self) -> &'static Skin {
         match self {
             Kind::DateTime => &skin::datetime::SKIN,
@@ -94,6 +102,16 @@ impl Kind {
             Kind::Battery => &skin::battery::SKIN,
             Kind::Countdown => &skin::countdown::SKIN,
             Kind::Claude => &skin::claude::SKIN,
+            Kind::Photo => &skin::photo_wide::SKIN,
+        }
+    }
+
+    /// The skin of the one of this kind with `section`: for a photo frame,
+    /// the one its shape asks for.
+    fn skin_in(self, settings: &Settings, section: &str) -> &'static Skin {
+        match self {
+            Kind::Photo => photo::skin_of(settings, section),
+            _ => self.skin(),
         }
     }
 
@@ -105,8 +123,9 @@ impl Kind {
 
 /// The widgets there is always one of, in the order their windows are
 /// numbered: what each is, its section of settings.ini, and what the menus
-/// call it.  The notes and countdowns after the first follow these.
-const FIXED: [(Kind, &str, &str); 10] = [
+/// call it.  The notes, countdowns and photo frames after the first follow
+/// these.
+const FIXED: [(Kind, &str, &str); 11] = [
     (Kind::DateTime, "DateTime", "Date/Time"),
     (Kind::Resources, "Resources", "Resource Meter"),
     (Kind::Notes, notes::FIRST, "Sticky Note"),
@@ -117,6 +136,7 @@ const FIXED: [(Kind, &str, &str); 10] = [
     (Kind::Battery, "Battery", "Battery"),
     (Kind::Countdown, countdown::FIRST, "Countdown"),
     (Kind::Claude, "Claude", "Claude Usage"),
+    (Kind::Photo, photo::FIRST, "Photo Frame"),
 ];
 const DATETIME: usize = 0;
 const NOTE: usize = 2;
@@ -127,10 +147,12 @@ const WORLD: usize = 6;
 const BATTERY: usize = 7;
 const COUNTDOWN: usize = 8;
 const CLAUDE: usize = 9;
+const PHOTO: usize = 10;
 
 /// A kind of widget there can be any number of: the first is in FIXED, and
 /// the others are made from the menu, each with a section of settings.ini of
-/// its own -- `[Notes2]`, `[Countdown3]` -- that its own module looks after.
+/// its own -- `[Notes2]`, `[Countdown3]`, `[Photo2]` -- that its own module
+/// looks after.
 struct Family {
     kind: Kind,
     /// The first's window.
@@ -153,7 +175,7 @@ struct Family {
     ask: fn(&Settings, &str) -> Option<String>,
 }
 
-const FAMILIES: [Family; 2] = [
+const FAMILIES: [Family; 3] = [
     Family {
         kind: Kind::Notes,
         first: NOTE,
@@ -187,6 +209,20 @@ const FAMILIES: [Family; 2] = [
             (!countdown::is_blank(settings, section))
                 .then(|| String::from("Delete this countdown?\n\nThe day it counts to and its name are forgotten."))
         },
+    },
+    Family {
+        kind: Kind::Photo,
+        first: PHOTO,
+        more: CMD_MORE_PHOTOS,
+        fewer: CMD_FEWER_PHOTOS,
+        delete: CMD_DELETE_PHOTO,
+        delete_label: "Delete this photo frame",
+        name: photo::name,
+        others: photo::others,
+        create: photo::create,
+        forget: photo::forget,
+        // nothing is lost: the photos stay in their folder
+        ask: |_, _| None,
     },
 ];
 
@@ -237,6 +273,9 @@ const CMD_FEWER_NOTES: usize = 42;
 const CMD_MORE_COUNTDOWNS: usize = 43;
 const CMD_DELETE_COUNTDOWN: usize = 44;
 const CMD_FEWER_COUNTDOWNS: usize = 45;
+const CMD_MORE_PHOTOS: usize = 46;
+const CMD_DELETE_PHOTO: usize = 47;
+const CMD_FEWER_PHOTOS: usize = 48;
 const CMD_AUTOSTART: usize = 50;
 const CMD_SETTINGS: usize = 51;
 const CMD_RELOAD: usize = 52;
@@ -300,29 +339,34 @@ enum Later {
     /// The colour dialog, starting from this tint (0xRRGGBB): what is picked
     /// in it is the tint from then on.
     PickColour(u32),
+    /// The folder dialog for the widget with this section -- again not its
+    /// number -- starting from this folder.
+    ChooseFolder(String, PathBuf),
     Quit,
 }
 
-/// The frame of a window at (x, y), drawn at `n` times its skin: a window
-/// has `Pad` of nothing round it.
-fn frame(kind: Kind, x: i32, y: i32, n: i32) -> Rect {
-    let (skin, pad) = (kind.skin(), kind.skin().int("Pad", 12) * n);
+/// The frame of a window of a `skin` at (x, y), drawn at `n` times that: a
+/// window has `Pad` of nothing round it.
+fn frame(skin: &Skin, x: i32, y: i32, n: i32) -> Rect {
+    let pad = skin.int("Pad", 12) * n;
     Rect::new(x + pad, y + pad, x + skin.w * n - pad, y + skin.h * n - pad)
 }
 
-/// The scale a window of a `kind` at (x, y), drawn at `n` now, is to be
+/// The scale a window of a `skin` at (x, y), drawn at `n` now, is to be
 /// drawn at: that of the monitor most of its frame is on -- unless at that
 /// scale, larger or smaller, most of it would be on a monitor of another.
 /// Then it stays as it is, so that a window across the line between two
 /// monitors is not made larger and smaller by turns.
-fn settled_scale(kind: Kind, x: i32, y: i32, n: i32) -> i32 {
-    let here = screens::scale_of(&on_screens(frame(kind, x, y, n)));
-    if here == n || screens::scale_of(&on_screens(frame(kind, x, y, here))) != here { n } else { here }
+fn settled_scale(skin: &Skin, x: i32, y: i32, n: i32) -> i32 {
+    let here = screens::scale_of(&on_screens(frame(skin, x, y, n)));
+    if here == n || screens::scale_of(&on_screens(frame(skin, x, y, here))) != here { n } else { here }
 }
 
-/// One copy of every skin fits in this many pixels across and down.
+/// One copy of every skin fits in this many pixels across and down: each
+/// kind's, and each shape of photo frame.
 fn largest_skin() -> (i32, i32) {
-    FIXED.iter().fold((0, 0), |(w, h), f| (w.max(f.0.skin().w), h.max(f.0.skin().h)))
+    let photos = [&skin::photo_wide::SKIN, &skin::photo_tall::SKIN, &skin::photo_square::SKIN];
+    FIXED.iter().map(|f| f.0.skin()).chain(photos).fold((0, 0), |(w, h), s| (w.max(s.w), h.max(s.h)))
 }
 
 /// A wheel turned `delta` on top of the part of a notch it had turned
@@ -344,11 +388,14 @@ fn notches(rest: &mut i32, axis: Axis, delta: i32) -> (Ev, u32) {
 
 struct Slot {
     kind: Kind,
+    /// What it is drawn from: the kind's skin, or for a photo frame the one
+    /// for its shape.  The window is this size, n times over.
+    skin: &'static Skin,
     /// Its section of settings.ini, and what the menus call it.
     section: String,
     title: String,
-    /// A note or a countdown that has been deleted.  Nothing is left of it
-    /// but its number, which no other window is given.
+    /// A note, countdown or photo frame that has been deleted.  Nothing is
+    /// left of it but its number, which no other window is given.
     deleted: bool,
     hwnd: HWND,
     /// Where the window is.
@@ -371,13 +418,29 @@ struct Slot {
 }
 
 impl Slot {
-    fn new(kind: Kind, section: &str, title: String) -> Slot {
-        Slot { kind, section: section.to_owned(), title, deleted: false, hwnd: 0, x: 0, y: 0, put: (0, 0), n: 1, hover: None, tracking: false, seen: Vec::new() }
+    /// Window `kind` with `section`, drawn from the skin settings.ini gives
+    /// that one.
+    fn new(kind: Kind, section: &str, title: String, settings: &Settings) -> Slot {
+        Slot {
+            kind,
+            skin: kind.skin_in(settings, section),
+            section: section.to_owned(),
+            title,
+            deleted: false,
+            hwnd: 0,
+            x: 0,
+            y: 0,
+            put: (0, 0),
+            n: 1,
+            hover: None,
+            tracking: false,
+            seen: Vec::new(),
+        }
     }
 
     /// Its frame where the window is.
     fn frame(&self) -> Rect {
-        frame(self.kind, self.x, self.y, self.n)
+        frame(self.skin, self.x, self.y, self.n)
     }
 }
 
@@ -506,20 +569,20 @@ fn on_screens(r: Rect) -> RECT {
     RECT { left: r.x0, top: r.y0, right: r.x1, bottom: r.y1 }
 }
 
-/// What has to be on the monitors for a window of a `kind` at (x, y), drawn
+/// What has to be on the monitors for a window of a `skin` at (x, y), drawn
 /// at `n`, to be seen whole: its frame, and a margin of bare screen round
 /// that (`margin` of the widget's own pixels, n times as many of the
 /// screen's).
-fn reach(kind: Kind, x: i32, y: i32, margin: i32, n: i32) -> RECT {
-    let (f, margin) = (frame(kind, x, y, n), margin * n);
+fn reach(skin: &Skin, x: i32, y: i32, margin: i32, n: i32) -> RECT {
+    let (f, margin) = (frame(skin, x, y, n), margin * n);
     RECT { left: f.x0 - margin, top: f.y0 - margin, right: f.x1 + margin, bottom: f.y1 + margin }
 }
 
-/// Where a window of a `kind` meant for (x, y) can go and be seen whole,
+/// Where a window of a `skin` meant for (x, y) can go and be seen whole,
 /// `margin` in from the edge: there, or the least distance from there onto
 /// the monitors there are now.
-fn on_screen(kind: Kind, x: i32, y: i32, margin: i32, n: i32) -> (i32, i32) {
-    let (dx, dy) = screens::keep_on(&reach(kind, x, y, margin, n), &screens::work_areas());
+fn on_screen(skin: &Skin, x: i32, y: i32, margin: i32, n: i32) -> (i32, i32) {
+    let (dx, dy) = screens::keep_on(&reach(skin, x, y, margin, n), &screens::work_areas());
     (x + dx, y + dy)
 }
 
@@ -730,6 +793,9 @@ impl App {
             return;
         }
         let (kind, section) = (self.slots[i].kind, self.slots[i].section.clone());
+        // the skin the widget is about to be made with: a photo frame's may
+        // be another since the window was last made (`reshape`)
+        self.slots[i].skin = kind.skin_in(&self.settings, &section);
         {
             let (mut ctx, widgets) = self.ctx();
             let mut widget: Box<dyn Widget> = match kind {
@@ -743,6 +809,7 @@ impl App {
                 Kind::Battery => Box::new(Battery::new(&ctx)),
                 Kind::Countdown => Box::new(Countdown::new(&ctx, &section)),
                 Kind::Claude => Box::new(Claude::new(&ctx)),
+                Kind::Photo => Box::new(Photo::new(&ctx, &section)),
             };
             widget.tick(&mut ctx);
             widgets.0[i] = Some(widget);
@@ -750,7 +817,7 @@ impl App {
         // Running now, so laid out with the others: where it was put, or
         // where it can be seen.
         self.lay_out();
-        let (skin, x, y, n) = (kind.skin(), self.slots[i].x, self.slots[i].y, self.slots[i].n);
+        let (skin, x, y, n) = (self.slots[i].skin, self.slots[i].x, self.slots[i].y, self.slots[i].n);
         unsafe {
             let wnd = CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -804,6 +871,35 @@ impl App {
         self.settings.save();
     }
 
+    /// Widget `i` is drawn from another skin now -- a photo frame turned to
+    /// another shape -- so its window is made again, the new size, where it
+    /// was put.  (What it showed goes with the old one; the new one starts
+    /// afresh, as it would at the next run.)
+    fn reshape(&mut self, i: usize) {
+        let skin = self.slots[i].kind.skin_in(&self.settings, &self.slots[i].section);
+        if core::ptr::eq(skin, self.slots[i].skin) || self.widgets.get(i).is_none() {
+            return;
+        }
+        self.stop(i);
+        self.start(i);
+    }
+
+    /// The folder chosen in the dialog a widget asked for, handed to it --
+    /// if it is still there: it is found by its section, as others may have
+    /// come and gone while the dialog was up.
+    fn folder_chosen(&mut self, section: &str, folder: PathBuf) {
+        let Some(i) = self.slots.iter().position(|s| !s.deleted && s.section == section) else { return };
+        let dirty = {
+            let (mut ctx, widgets) = self.ctx();
+            match widgets.get_mut(i) {
+                Some(w) => w.folder_chosen(folder, &mut ctx),
+                None => return,
+            }
+        };
+        self.paint(i, dirty);
+        self.settings.save();
+    }
+
     /// Every widget settings.ini does not say is closed.
     fn start_enabled(&mut self) {
         for i in 0..self.slots.len() {
@@ -844,7 +940,7 @@ impl App {
         let running = self.running();
         let wanted: Vec<RECT> = running.iter().map(|&i| {
             let slot = &self.slots[i];
-            reach(slot.kind, slot.put.0, slot.put.1, margin, settled_scale(slot.kind, slot.put.0, slot.put.1, slot.n))
+            reach(slot.skin, slot.put.0, slot.put.1, margin, settled_scale(slot.skin, slot.put.0, slot.put.1, slot.n))
         }).collect();
         // Frames a gap apart are kept together.  With a margin round each,
         // that is two margins nearer.
@@ -856,9 +952,9 @@ impl App {
             // Where it goes may be a monitor of another scale, or the scale of
             // its own may have changed: drawn at that one, and seen whole at
             // the size that makes it.
-            let n = settled_scale(slot.kind, x, y, slot.n);
+            let n = settled_scale(slot.skin, x, y, slot.n);
             if n != slot.n {
-                let (kx, ky) = screens::keep_on(&reach(slot.kind, x, y, margin, n), work_areas);
+                let (kx, ky) = screens::keep_on(&reach(slot.skin, x, y, margin, n), work_areas);
                 (x, y) = (x + kx, y + ky);
             }
             let rescaled = core::mem::replace(&mut slot.n, n) != n;
@@ -935,7 +1031,7 @@ impl App {
         scales.dedup();
         for n in scales {
             let these: Vec<usize> = running.iter().copied().filter(|&i| self.slots[i].n == n).collect();
-            let frames: Vec<RECT> = these.iter().map(|&i| on_screens(frame(self.slots[i].kind, self.slots[i].put.0, self.slots[i].put.1, n))).collect();
+            let frames: Vec<RECT> = these.iter().map(|&i| on_screens(frame(self.slots[i].skin, self.slots[i].put.0, self.slots[i].put.1, n))).collect();
             let moves = grid::respace(&frames, &work_areas, old, self.spacing, n);
             for (&i, (dx, dy)) in these.iter().zip(moves) {
                 let (x, y) = self.slots[i].put;
@@ -953,24 +1049,34 @@ impl App {
     /// no nearer than a gap to any widget that is showing.  (On the desktop
     /// a new window goes underneath the others: one that overlapped would be
     /// made and not seen.)
-    fn room_beside(&self, b: usize) -> (i32, i32) {
+    fn room_beside(&self, b: usize, skin: &'static Skin) -> (i32, i32) {
         let base = &self.slots[b];
         let n = base.n;
         let Spacing { margin, gap } = self.spacing.times(n);
         let own = base.frame();
         let work = work_area(&on_screens(own));
         let free = |&(x, y): &(i32, i32)| {
-            let f = frame(base.kind, x, y, n);
+            let f = frame(skin, x, y, n);
             let room = Rect::new(f.x0 - gap, f.y0 - gap, f.x1 + gap, f.y1 + gap);
             f.x0 >= work.left + margin && f.y0 >= work.top + margin && f.x1 <= work.right - margin && f.y1 <= work.bottom - margin
                 && !self.slots.iter().any(|s| s.hwnd != 0 && s.frame().intersects(&room))
         };
-        let (dx, dy) = (own.x1 - own.x0 + gap, own.y1 - own.y0 + gap);
+        // The new window's frame `k` places along from the old one's, a gap
+        // between each: level with its top beside it, level with its left
+        // above and below.  (The new one may be another size: a photo frame
+        // of another shape.)
+        let pad = skin.int("Pad", 12) * n;
+        let (w, h) = (skin.w * n - 2 * pad, skin.h * n - 2 * pad);
+        let along = |k: i32, from: i32, to: i32, size: i32| match k {
+            0 => from,
+            k if k < 0 => from + k * (size + gap),
+            k => to + gap + (k - 1) * (size + gap),
+        };
         (1..=ROOM_STEPS)
             .flat_map(|k| [(-k, 0), (k, 0), (0, k), (0, -k)])
-            .map(|(i, j)| (base.x + i * dx, base.y + j * dy))
+            .map(|(i, j)| (along(i, own.x0, own.x1, w) - pad, along(j, own.y0, own.y1, h) - pad))
             .find(free)
-            .unwrap_or_else(|| on_screen(base.kind, base.x + CASCADE * n, base.y + CASCADE * n, self.spacing.margin, n))
+            .unwrap_or_else(|| on_screen(skin, base.x + CASCADE * n, base.y + CASCADE * n, self.spacing.margin, n))
     }
 
     /// The windows of a family there are: the first, then the others in the
@@ -1000,11 +1106,11 @@ impl App {
         };
         // Something may have been put where it was since: it would come back
         // underneath that, and not be seen.  Then it goes where a new one would.
-        let (x, y) = self.slots[closed].put;
-        let own = frame(f.kind, x, y, settled_scale(f.kind, x, y, self.slots[closed].n));
+        let ((x, y), skin) = (self.slots[closed].put, self.slots[closed].skin);
+        let own = frame(skin, x, y, settled_scale(skin, x, y, self.slots[closed].n));
         if self.slots.iter().any(|s| s.hwnd != 0 && s.frame().intersects(&own)) {
             let beside = self.to_close(f, from).unwrap_or(closed);
-            (self.slots[closed].x, self.slots[closed].y) = self.room_beside(beside);
+            (self.slots[closed].x, self.slots[closed].y) = self.room_beside(beside, skin);
             self.slots[closed].n = self.slots[beside].n;
             self.keep_place(closed);
         }
@@ -1025,19 +1131,20 @@ impl App {
     fn new_one(&mut self, f: &Family, from: Option<usize>) {
         let is_member = |s: &Slot| s.kind == f.kind && !s.deleted;
         let beside = from.filter(|&i| is_member(&self.slots[i])).or_else(|| self.slots.iter().rposition(is_member)).unwrap_or(f.first);
-        let (x, y) = self.room_beside(beside);
         let section = (f.create)(&mut self.settings);
         let title = (f.name)(&section);
-        self.slots.push(Slot { x, y, n: self.slots[beside].n, ..Slot::new(f.kind, &section, title) });
+        let slot = Slot::new(f.kind, &section, title, &self.settings);
+        let (x, y) = self.room_beside(beside, slot.skin);
+        self.slots.push(Slot { x, y, n: self.slots[beside].n, ..slot });
         self.widgets.0.push(None);
         let i = self.slots.len() - 1;
         self.keep_place(i);
         self.set_enabled(i, true);
     }
 
-    /// Delete a note or a countdown after the first: its window, and its
-    /// section of settings.ini.  What it leaves on disk is handed back, to be
-    /// disposed of once the App has been let go of.
+    /// Delete a note, a countdown or a photo frame after the first: its
+    /// window, and its section of settings.ini.  What it leaves on disk is
+    /// handed back, to be disposed of once the App has been let go of.
     fn delete(&mut self, section: &str) -> Vec<PathBuf> {
         let found = self.slots.iter().position(|s| !s.deleted && s.section == section);
         let Some((i, f)) = found.filter(|&i| i >= FIXED.len()).and_then(|i| Some((i, self.slots[i].kind.family()?))) else {
@@ -1138,6 +1245,11 @@ impl App {
                 self.leave_editor();
                 Later::Nothing
             }
+            Request::Reshape => {
+                self.reshape(i);
+                Later::Nothing
+            }
+            Request::ChooseFolder(start) => Later::ChooseFolder(self.slots[i].section.clone(), start),
         };
         self.settings.save();
         later
@@ -1298,6 +1410,9 @@ impl App {
             };
             self.paint(i, dirty);
         }
+        // a widget whose movement has come to an end -- a button back up --
+        // asks for no more
+        self.pace();
     }
 
     fn repaint_all(&mut self) {
@@ -1382,13 +1497,18 @@ impl App {
 
     fn mouse_move(&mut self, i: usize, wnd: HWND, x: i32, y: i32, button_down: bool) -> Later {
         let (x, y) = self.widget_point(i, x, y);
-        // A press whose release went somewhere else is over.
+        // A press whose release went somewhere else is over -- and the widget
+        // that took it is told so, as a release over nothing.
         if !button_down {
-            self.press = None;
+            if let Some(press) = self.press.take().filter(|p| p.owned) {
+                self.release(press.idx, i32::MIN, i32::MIN);
+            }
         }
         if self.press.as_ref().is_some_and(|p| p.idx == i && p.owned) {
             let dirty = self.widgets.get_mut(i).map_or(Dirty::None, |w| w.drag(x, y));
             self.paint(i, dirty);
+            // a button let go of, or taken hold of again, moves
+            self.pace();
             return Later::Nothing;
         }
         if let Some(press) = self.press.as_mut().filter(|p| p.idx == i) {
@@ -1440,7 +1560,7 @@ impl App {
             return;
         }
         self.slots[i].hover = over;
-        let meters = self.slots[i].kind.skin().meters;
+        let meters = self.slots[i].skin.meters;
         for (meter, ev) in [(was, Ev::Leave), (over, Ev::Over)] {
             if let Some(act) = meter.and_then(|m| meters[m].acts.iter().find(|a| a.ev == ev)) {
                 self.command(i, act, 0, 0);
@@ -1458,10 +1578,26 @@ impl App {
             self.settings.save();
             return Later::Nothing;
         }
-        if press.spent || press.owned {
+        if press.owned {
+            return self.release(i, x, y);
+        }
+        if press.spent {
             return Later::Nothing;
         }
         self.fire(i, Ev::Up, x, y).unwrap_or(Later::Nothing)
+    }
+
+    /// The end of a press widget `i` took, at (x, y) of it: a button let go
+    /// of over itself does what it is for.
+    fn release(&mut self, i: usize, x: i32, y: i32) -> Later {
+        let outcome = {
+            let (mut ctx, widgets) = self.ctx();
+            match widgets.get_mut(i) {
+                Some(w) => w.release(x, y, &mut ctx),
+                None => return Later::Nothing,
+            }
+        };
+        self.apply(i, outcome)
     }
 
     /// A wheel turned over window `i`: a skin's wheel action for every whole
@@ -1490,10 +1626,10 @@ impl App {
     /// one -- when its frame comes within a snap of it, unless Ctrl or Shift
     /// is held.
     fn snapped(&self, i: usize, mut x: i32, mut y: i32) -> (i32, i32) {
-        let (kind, n) = (self.slots[i].kind, self.slots[i].n);
+        let (skin, n) = (self.slots[i].skin, self.slots[i].n);
         let held = |key: i32| unsafe { GetKeyState(key) } < 0;
         if self.snap && !held(VK_CONTROL) && !held(VK_SHIFT) {
-            let f = on_screens(frame(kind, x, y, n));
+            let f = on_screens(frame(skin, x, y, n));
             let others: Vec<RECT> = (self.slots.iter().enumerate())
                 .filter(|&(j, other)| j != i && other.hwnd != 0)
                 .map(|(_, other)| on_screens(other.frame()))
@@ -1502,7 +1638,7 @@ impl App {
             (x, y) = (x + dx, y + dy);
         }
         // Not dropped where no monitor shows it, nor half off one.
-        on_screen(kind, x, y, self.spacing.margin, n)
+        on_screen(skin, x, y, self.spacing.margin, n)
     }
 
     /// Is (x, y) on the screen in the margin round window `i`'s frame, and
@@ -1525,7 +1661,9 @@ impl App {
                 w.menu(&mut own);
             }
             for item in &own {
-                m.push((CMD_WIDGET + item.id as usize, item.label.to_owned(), item.checked));
+                // id 0 is a line between its entries
+                let id = if item.id == 0 { 0 } else { CMD_WIDGET + item.id as usize };
+                m.push((id, item.label.to_owned(), item.checked));
             }
             if !own.is_empty() {
                 m.push((0, String::new(), false));
@@ -1695,24 +1833,25 @@ impl App {
         tint::set(self.settings.tint());
     }
 
-    /// Which windows there are -- the ten, and a note or a countdown for
-    /// every other section of settings.ini that is one's -- and where each
-    /// sits: where it was left, or -- the first time -- on the grid, in a
-    /// column down the right-hand side of the screen: the date and time in
-    /// the top corner, the resource meter under it, and under that the
-    /// weather, the note to its left, the rain to the left of the note, the
-    /// disk to the left of the rain, the battery to the left of the disk and
-    /// the Claude usage to the left of the battery; the world clock heads a
-    /// second column, to the left of the date and time, and the countdown
-    /// stands under it, against the first column.
+    /// Which windows there are -- the eleven, and a note, a countdown or a
+    /// photo frame for every other section of settings.ini that is one's --
+    /// and where each sits: where it was left, or -- the first time -- on the
+    /// grid, in a column down the right-hand side of the screen: the date and
+    /// time in the top corner, the resource meter under it, and under that
+    /// the weather, the note to its left, the rain to the left of the note,
+    /// the disk to the left of the rain, the battery to the left of the disk
+    /// and the Claude usage to the left of the battery; the world clock heads
+    /// a second column, to the left of the date and time, and the countdown
+    /// stands under it, against the first column; the photo frame heads a
+    /// third, to the left of the world clock.
     /// Called with every window shut: at the start, and when settings.ini is
     /// read again.
     fn read_slots(&mut self) {
-        self.slots = FIXED.iter().map(|&(kind, section, title)| Slot::new(kind, section, title.to_owned())).collect();
+        self.slots = FIXED.iter().map(|&(kind, section, title)| Slot::new(kind, section, title.to_owned(), &self.settings)).collect();
         for f in &FAMILIES {
             for section in (f.others)(&self.settings) {
                 let title = (f.name)(&section);
-                self.slots.push(Slot::new(f.kind, &section, title));
+                self.slots.push(Slot::new(f.kind, &section, title, &self.settings));
             }
         }
         self.widgets.0.clear();
@@ -1722,7 +1861,7 @@ impl App {
         // the first layout, on the main monitor, at its scale
         let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
         let n = screens::scale_of(&work);
-        let size = |i: usize| (FIXED[i].0.skin().w * n, FIXED[i].0.skin().h * n);
+        let size = |i: usize| (self.slots[i].skin.w * n, self.slots[i].skin.h * n);
         let pad = FIXED[DATETIME].0.skin().int("Pad", 12) * n;
         let Spacing { margin, gap } = self.spacing.times(n);
         // From one window to the next, past the first's size: the two pads
@@ -1737,6 +1876,7 @@ impl App {
         let rain = note - step - size(RAIN).0;
         let disk = rain - step - size(DISK).0;
         let battery = disk - step - size(BATTERY).0;
+        let world = x0 - step - size(WORLD).0;
         let defaults = [
             (x0, y0),
             (x0, y1),
@@ -1744,17 +1884,18 @@ impl App {
             (weather, y2),
             (rain, y2),
             (disk, y2),
-            (x0 - step - size(WORLD).0, y0),
+            (world, y0),
             (battery, y2),
             (x0 - step - size(COUNTDOWN).0, y0 + size(WORLD).1 + step),
             (battery - step - size(CLAUDE).0, y2),
+            (world - step - size(PHOTO).0, y0),
         ];
         for i in 0..self.slots.len() {
-            // A note or a countdown after the first was put somewhere when it
-            // was made.  One written into settings.ini by hand, with no place
-            // given, steps down from the first of its kind, a step for each of
-            // its kind before it.
-            let kind = self.slots[i].kind;
+            // A note, a countdown or a photo frame after the first was put
+            // somewhere when it was made.  One written into settings.ini by
+            // hand, with no place given, steps down from the first of its
+            // kind, a step for each of its kind before it.
+            let (kind, skin) = (self.slots[i].kind, self.slots[i].skin);
             let (x, y) = defaults.get(i).copied().unwrap_or_else(|| {
                 let first = kind.family().map_or(NOTE, |f| f.first);
                 let before = (FIXED.len()..=i).filter(|&j| self.slots[j].kind == kind).count();
@@ -1767,7 +1908,7 @@ impl App {
             (self.slots[i].x, self.slots[i].y) = (x, y);
             self.slots[i].put = (x, y);
             // at the scale of the monitor most of it is on at its own size
-            self.slots[i].n = settled_scale(kind, x, y, screens::scale_of(&on_screens(frame(kind, x, y, 1))));
+            self.slots[i].n = settled_scale(skin, x, y, screens::scale_of(&on_screens(frame(skin, x, y, 1))));
             if !placed {
                 self.keep_place(i);
             }
@@ -1790,11 +1931,11 @@ impl App {
                 Some((i, self.settings.int(section, "X", 0), self.settings.int(section, "Y", 0)))
             })
             .collect();
-        let frames: Vec<RECT> = placed.iter().map(|&(i, x, y)| on_screens(frame(self.slots[i].kind, x, y, 1))).collect();
+        let frames: Vec<RECT> = placed.iter().map(|&(i, x, y)| on_screens(frame(self.slots[i].skin, x, y, 1))).collect();
         // those that stood on the grid together stay together
         let near = self.spacing.gap + grid::SNAP;
         for (&(i, _, _), ((x, y), n)) in placed.iter().zip(screens::from_unaware(&frames, &screens::monitors_both_ways(), near)) {
-            let pad = self.slots[i].kind.skin().int("Pad", 12) * n;
+            let pad = self.slots[i].skin.int("Pad", 12) * n;
             let section = self.slots[i].section.clone();
             self.settings.set_int(&section, "X", x - pad);
             self.settings.set_int(&section, "Y", y - pad);
@@ -1890,6 +2031,12 @@ fn run_later(mut later: Later) {
                 }
                 Later::Nothing
             }
+            Later::ChooseFolder(section, start) => {
+                if let Some(folder) = choose_folder(&start) {
+                    with_app(|app| app.folder_chosen(&section, folder));
+                }
+                Later::Nothing
+            }
             Later::Quit => {
                 unsafe { DestroyWindow(MAIN.load(Relaxed)) };
                 return;
@@ -1962,6 +2109,46 @@ fn pick_colour(rgb: u32) -> Option<u32> {
     let picked = unsafe { ChooseColorW(&mut cc) } != 0;
     CUSTOM_COLOURS.set(custom);
     picked.then(|| colorref(cc.rgbResult))
+}
+
+/// The Windows "Browse for Folder" dialog -- the tree of folders Windows 98
+/// had -- open at `start` if it is there: the folder chosen in it, or None if
+/// it was cancelled.
+fn choose_folder(start: &std::path::Path) -> Option<PathBuf> {
+    /// Once the dialog is up, show it the folder to start from.
+    unsafe extern "system" fn callback(wnd: HWND, msg: u32, _lp: LPARAM, data: LPARAM) -> i32 {
+        if msg == BFFM_INITIALIZED && data != 0 {
+            unsafe { SendMessageW(wnd, BFFM_SETSELECTIONW, 1, data) };
+        }
+        0
+    }
+    if !com_init() {
+        return None;
+    }
+    let start: Vec<u16> = start.as_os_str().encode_wide().chain(Some(0)).collect();
+    let title = wide("Choose the folder of photos this frame shows:");
+    let mut name = [0u16; MAX_PATH];
+    let info = BROWSEINFOW {
+        hwndOwner: 0,
+        pidlRoot: null(),
+        pszDisplayName: name.as_mut_ptr(),
+        lpszTitle: title.as_ptr(),
+        ulFlags: BIF_RETURNONLYFSDIRS,
+        lpfn: Some(callback),
+        lParam: start.as_ptr() as LPARAM,
+        iImage: 0,
+    };
+    unsafe {
+        let list = SHBrowseForFolderW(&info);
+        if list.is_null() {
+            return None;
+        }
+        // SHGetPathFromIDListW writes at most MAX_PATH characters
+        let mut path = [0u16; MAX_PATH];
+        let found = SHGetPathFromIDListW(list, path.as_mut_ptr()) != 0;
+        co_free(list);
+        found.then(|| PathBuf::from(from_wide(&path)))
+    }
 }
 
 /// What a Colour menu entry's swatch shows: the accent as that tint will
@@ -2368,6 +2555,7 @@ mod tests {
 
     const NOTES: &Family = &FAMILIES[0];
     const COUNTDOWNS: &Family = &FAMILIES[1];
+    const PHOTOS: &Family = &FAMILIES[2];
 
     /// An App whose settings.ini, and whose notes, are in a folder that is
     /// the test's own.  No window class is registered here, so no window is
@@ -2456,7 +2644,7 @@ mod tests {
         // one entry for more of them wherever the menu is opened, in the list
         // of widgets, and none that ticks a note on and off
         for at in [None, Some(NOTE), Some(WEATHER)] {
-            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", "Claude Usage"]);
+            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", "Claude Usage", "Photo Frame +"]);
             assert_eq!(app.menu(at).iter().filter(|m| m.0 == CMD_MORE_NOTES).count(), 1);
             assert!(!app.menu(at).iter().any(|m| m.0 == CMD_TOGGLE + NOTE));
         }
@@ -2466,7 +2654,7 @@ mod tests {
         // the first comes out, and with it the way to put one back
         app.menu_command(None, CMD_MORE_NOTES);
         assert_eq!((running(&app), app.slots.len()), (1, FIXED.len()));
-        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", "Claude Usage"]);
+        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", "Claude Usage", "Photo Frame +"]);
         // with none closed, more is a new one each time
         app.menu_command(None, CMD_MORE_NOTES);
         app.menu_command(Some(WEATHER), CMD_MORE_NOTES);
@@ -2522,7 +2710,7 @@ mod tests {
         let (notes_minus, minus) = ("Sticky Note \u{2212}", "Countdown \u{2212}");
         assert_eq!(
             listed(&app),
-            ["Date/Time", "Resource Meter", "Sticky Note +", notes_minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", minus, "Claude Usage"]
+            ["Date/Time", "Resource Meter", "Sticky Note +", notes_minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", minus, "Claude Usage", "Photo Frame +"]
         );
 
         // only one after the first can be deleted, and each by its own entry
@@ -2556,6 +2744,65 @@ mod tests {
     }
 
     #[test]
+    fn photo_frames_come_and_go_and_change_shape_where_they_stand() {
+        let (mut app, dir) = app("photos");
+        let is = |a: &Skin, b: &Skin| core::ptr::eq(a, b);
+        // the first, on the folder beside settings.ini, which is made for it
+        app.menu_command(None, CMD_MORE_PHOTOS);
+        assert!(app.widgets.get(PHOTO).is_some() && dir.join("Photos").is_dir());
+        assert!(is(app.slots[PHOTO].skin, &skin::photo_wide::SKIN));
+        app.menu_command(Some(PHOTO), CMD_MORE_PHOTOS);
+        let second = FIXED.len();
+        assert_eq!(family_titles(&app, PHOTOS), ["Photo Frame", "Photo Frame 2"]);
+        assert_eq!(app.slots[second].section, "Photo2");
+        assert!(listed(&app).ends_with(&[String::from("Photo Frame +"), String::from("Photo Frame \u{2212}")]));
+
+        // its own entries in its menu, a line between the groups of them
+        let menu = app.menu(Some(second));
+        let at = |label: &str| menu.iter().position(|m| m.1 == label).unwrap();
+        assert!(at("Next photo") < at("Upright frame") && menu[at("Next photo") + 1].0 == 0);
+        assert!(menu[at("Wide frame")].2 && !menu[at("Upright frame")].2);
+
+        // turned upright: made again where it was put, the new size, and the
+        // first left as it was
+        let (put, n) = (app.slots[second].put, app.slots[second].n);
+        app.menu_command(Some(second), menu[at("Upright frame")].0);
+        assert!(is(app.slots[second].skin, &skin::photo_tall::SKIN));
+        assert!(app.widgets.get(second).is_some_and(|w| is(w.skin(), &skin::photo_tall::SKIN)));
+        assert_eq!(app.slots[second].put, put);
+        let f = app.slots[second].frame();
+        assert_eq!((f.x1 - f.x0, f.y1 - f.y0), (176 * n, 265 * n));
+        assert_eq!((app.settings.get("Photo2", "Shape"), app.settings.get(photo::FIRST, "Shape")), (Some("tall"), Some("wide")));
+
+        // a new one beside the upright one, though it is wide: a gap from it,
+        // level with it
+        app.menu_command(Some(second), CMD_MORE_PHOTOS);
+        let third = FIXED.len() + 1;
+        let (a, b) = (app.slots[second].frame(), app.slots[third].frame());
+        assert_eq!(b.x1 - b.x0, 218 * n);
+        let gap = app.spacing.gap * n;
+        let beside = (b.x1 + gap == a.x0 || a.x1 + gap == b.x0) && a.y0 == b.y0;
+        let under = (b.y1 + gap == a.y0 || a.y1 + gap == b.y0) && a.x0 == b.x0;
+        assert!(beside || under, "{a:?} and {b:?} are not a gap apart");
+
+        // deleted without a question -- its photos are not its to lose -- and
+        // gone from settings.ini, leaving nothing to be binned
+        let Later::Delete(section, None) = app.menu_command(Some(second), CMD_DELETE_PHOTO) else { panic!("asked about a photo frame") };
+        assert!(app.delete(&section).is_empty());
+        assert!(app.slots[second].deleted && !app.settings.sections().any(|s| s == "Photo2"));
+
+        // the next run finds the one that is left, in its own shape
+        for i in 0..app.slots.len() {
+            app.stop(i);
+        }
+        app.settings.set("Photo3", "Shape", "square");
+        app.read_slots();
+        assert_eq!(family_titles(&app, PHOTOS), ["Photo Frame", "Photo Frame 3"]);
+        assert!(is(app.slots[FIXED.len()].skin, &skin::photo_square::SKIN));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_note_does_not_come_back_underneath_another_widget() {
         let (mut app, dir) = app("back");
         let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
@@ -2571,7 +2818,7 @@ mod tests {
         show(&mut app, RAIN, x, y);
         app.more(NOTES, None);
         let moved = app.slots[NOTE].frame();
-        assert!(!moved.intersects(&frame(Kind::Rain, x, y, 1)));
+        assert!(!moved.intersects(&frame(Kind::Rain.skin(), x, y, 1)));
         assert_eq!(app.settings.int(notes::FIRST, "X", -1), app.slots[NOTE].x);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2586,13 +2833,13 @@ mod tests {
         show(&mut app, NOTE, x, y);
         // to its left, the gap from it
         let step = skin.w - 2 * skin.int("Pad", 12) + app.spacing.gap;
-        assert_eq!(app.room_beside(NOTE), (x - step, y));
+        assert_eq!(app.room_beside(NOTE, Kind::Notes.skin()), (x - step, y));
         // the rain is there: to its right, then
         show(&mut app, RAIN, x - step, y);
-        assert_eq!(app.room_beside(NOTE), (x + step, y));
+        assert_eq!(app.room_beside(NOTE, Kind::Notes.skin()), (x + step, y));
         // a widget that only reaches into that place is as much in the way
         show(&mut app, WEATHER, x + step + 40, y - 40);
-        assert_ne!(app.room_beside(NOTE), (x + step, y));
+        assert_ne!(app.room_beside(NOTE, Kind::Notes.skin()), (x + step, y));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2626,7 +2873,7 @@ mod tests {
         app.lay_out_on(&away);
         for (i, _) in places {
             let (x, y) = shown(&app, i);
-            assert_eq!(screens::keep_on(&reach(Kind::Notes, x, y, app.spacing.margin, 1), &away), (0, 0), "slot {i} at {x},{y}");
+            assert_eq!(screens::keep_on(&reach(Kind::Notes.skin(), x, y, app.spacing.margin, 1), &away), (0, 0), "slot {i} at {x},{y}");
         }
         let ((x1, y1), (x2, y2)) = (shown(&app, first), shown(&app, second));
         assert_eq!((x2 - x1, y2 - y1), (step, 0));
@@ -2645,12 +2892,12 @@ mod tests {
 
     /// The frame of slot `i` where it is put.
     fn put_frame(app: &App, i: usize) -> Rect {
-        frame(app.slots[i].kind, app.slots[i].put.0, app.slots[i].put.1, app.slots[i].n)
+        frame(app.slots[i].skin, app.slots[i].put.0, app.slots[i].put.1, app.slots[i].n)
     }
 
     /// Slot `i` put with the top left corner of its frame at (x, y).
     fn put_frame_at(app: &mut App, i: usize, x: i32, y: i32) {
-        let pad = app.slots[i].kind.skin().int("Pad", 12);
+        let pad = app.slots[i].skin.int("Pad", 12);
         app.put(i, x - pad, y - pad);
     }
 
@@ -2677,13 +2924,15 @@ mod tests {
         assert_eq!((at(1).y0 - at(DATETIME).y1, at(WEATHER).y0 - at(1).y1), (gap, gap));
         assert_eq!((at(1).x1, at(WEATHER).x1), (at(DATETIME).x1, at(DATETIME).x1));
         // along the foot and along the top, a gap apart
-        for (left, right) in [(NOTE, WEATHER), (RAIN, NOTE), (DISK, RAIN), (BATTERY, DISK), (CLAUDE, BATTERY), (WORLD, DATETIME)] {
+        for (left, right) in [(NOTE, WEATHER), (RAIN, NOTE), (DISK, RAIN), (BATTERY, DISK), (CLAUDE, BATTERY), (WORLD, DATETIME), (PHOTO, WORLD)] {
             assert_eq!((at(right).x0 - at(left).x1, at(right).y0), (gap, at(left).y0), "slot {left} to slot {right}");
         }
         // the countdown under the world clock, against the first column, and
         // clear of the foot
         assert_eq!((at(COUNTDOWN).y0 - at(WORLD).y1, at(COUNTDOWN).x1), (gap, at(WORLD).x1));
         assert!(at(WEATHER).y0 - at(COUNTDOWN).y1 >= gap);
+        // the photo frame, heading a third column, on top of none of them
+        assert!((0..FIXED.len()).filter(|&i| i != PHOTO).all(|i| !at(PHOTO).intersects(&at(i))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2698,7 +2947,7 @@ mod tests {
         app.set_enabled(top, true);
         let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
         let Spacing { margin, gap } = app.spacing;
-        let size = frame(Kind::Notes, 0, 0, 1);
+        let size = frame(Kind::Notes.skin(), 0, 0, 1);
         let (w, h) = (size.x1 - size.x0, size.y1 - size.y0);
         put_frame_at(&mut app, top, work.right - margin - w, work.top + margin);
         put_frame_at(&mut app, under, work.right - margin - w, work.top + margin + h + gap);
@@ -2777,7 +3026,7 @@ mod tests {
     fn a_press_in_the_margin_round_a_frame_is_for_the_frame_under_it() {
         let (mut app, dir) = app("press");
         let pad = Kind::Notes.skin().int("Pad", 12);
-        let size = frame(Kind::Notes, 0, 0, 1);
+        let size = frame(Kind::Notes.skin(), 0, 0, 1);
         let w = size.x1 - size.x0;
         // two notes frame against frame: the first's margin lies over the
         // second's frame
@@ -2800,12 +3049,12 @@ mod tests {
         let (mut app, dir) = app("scale");
         let (skin, pad) = (Kind::Notes.skin(), Kind::Notes.skin().int("Pad", 12));
         // the frame: twice the pad in, twice as wide and as high
-        let (one, two) = (frame(Kind::Notes, 100, 100, 1), frame(Kind::Notes, 100, 100, 2));
+        let (one, two) = (frame(Kind::Notes.skin(), 100, 100, 1), frame(Kind::Notes.skin(), 100, 100, 2));
         assert_eq!((two.x0, two.y0), (100 + 2 * pad, 100 + 2 * pad));
         assert_eq!((two.x1 - two.x0, two.y1 - two.y0), (2 * (one.x1 - one.x0), 2 * (one.y1 - one.y0)));
         assert_eq!((two.x1, two.y1), (100 + 2 * skin.w - 2 * pad, 100 + 2 * skin.h - 2 * pad));
         // and the margin round it, twice as wide
-        let around = reach(Kind::Notes, 100, 100, 12, 2);
+        let around = reach(Kind::Notes.skin(), 100, 100, 12, 2);
         assert_eq!((around.left, around.right), (two.x0 - 24, two.x1 + 24));
         // the mouse, in the widget's own pixels; held, also left of the window
         app.slots[NOTE].n = 2;

@@ -1,4 +1,5 @@
-//! Compiles the ten widgets' skins into static Rust tables.
+//! Compiles the eleven widgets' skins into static Rust tables -- the photo
+//! frame's three times, once for each of its shapes.
 //!
 //! The .ini files in `skins/` are the single source of truth for every
 //! pixel: each meter's position, shapes, colours, text options and mouse
@@ -512,6 +513,9 @@ struct SkinDef {
     file: &'static str,
     /// Variables the skin's logic writes while it runs.
     dynamic: fn(&str) -> bool,
+    /// Values put in place of the file's own for some of its [Variables]:
+    /// how one file becomes more than one skin (the photo frame's shapes).
+    overrides: &'static [(&'static str, &'static str)],
 }
 
 /// `prefix` followed by nothing but digits: Row7, Tick12 -- but not Row1Y.
@@ -567,18 +571,28 @@ fn dyn_countdown(n: &str) -> bool {
     NAMES.contains(&n) || numbered(n, "D") || numbered(n, "W")
 }
 
-const SKINS: [SkinDef; 10] = [
-    SkinDef { module: "datetime", file: "Win98DateTime.ini", dynamic: dyn_datetime },
-    SkinDef { module: "resources", file: "Win98Resources.ini", dynamic: dyn_resources },
-    SkinDef { module: "notes", file: "Win98Notes.ini", dynamic: dyn_notes },
-    SkinDef { module: "weather", file: "Win98Weather.ini", dynamic: dyn_weather },
+fn dyn_photo(n: &str) -> bool {
+    n == "HasPhoto"
+}
+
+const SKINS: [SkinDef; 13] = [
+    SkinDef { module: "datetime", file: "Win98DateTime.ini", dynamic: dyn_datetime, overrides: &[] },
+    SkinDef { module: "resources", file: "Win98Resources.ini", dynamic: dyn_resources, overrides: &[] },
+    SkinDef { module: "notes", file: "Win98Notes.ini", dynamic: dyn_notes, overrides: &[] },
+    SkinDef { module: "weather", file: "Win98Weather.ini", dynamic: dyn_weather, overrides: &[] },
     // nothing in the rain's skin changes while it runs: rain.rs draws the one meter that moves
-    SkinDef { module: "rain", file: "Win98Rain.ini", dynamic: |_| false },
-    SkinDef { module: "disk", file: "Win98Disk.ini", dynamic: dyn_disk },
-    SkinDef { module: "world", file: "Win98World.ini", dynamic: dyn_world },
-    SkinDef { module: "battery", file: "Win98Battery.ini", dynamic: dyn_battery },
-    SkinDef { module: "countdown", file: "Win98Countdown.ini", dynamic: dyn_countdown },
-    SkinDef { module: "claude", file: "Win98Claude.ini", dynamic: dyn_claude },
+    SkinDef { module: "rain", file: "Win98Rain.ini", dynamic: |_| false, overrides: &[] },
+    SkinDef { module: "disk", file: "Win98Disk.ini", dynamic: dyn_disk, overrides: &[] },
+    SkinDef { module: "world", file: "Win98World.ini", dynamic: dyn_world, overrides: &[] },
+    SkinDef { module: "battery", file: "Win98Battery.ini", dynamic: dyn_battery, overrides: &[] },
+    SkinDef { module: "countdown", file: "Win98Countdown.ini", dynamic: dyn_countdown, overrides: &[] },
+    SkinDef { module: "claude", file: "Win98Claude.ini", dynamic: dyn_claude, overrides: &[] },
+    // The photo frame's three shapes, from the one file: a Siemens C60's
+    // 101 x 80 pixels on its side, standing up, and cut square, each pixel
+    // a 2 x 2 square (the file's Block).
+    SkinDef { module: "photo_wide", file: "Win98Photo.ini", dynamic: dyn_photo, overrides: &[("PicW", "202"), ("PicH", "160")] },
+    SkinDef { module: "photo_tall", file: "Win98Photo.ini", dynamic: dyn_photo, overrides: &[("PicW", "160"), ("PicH", "202")] },
+    SkinDef { module: "photo_square", file: "Win98Photo.ini", dynamic: dyn_photo, overrides: &[("PicW", "160"), ("PicH", "160")] },
 ];
 
 /// Compile one skin into `out`; its `Tint` -- the colour its palette is drawn
@@ -604,6 +618,11 @@ fn compile_skin(def: &SkinDef, root: &Path, fonts: &mut Vec<(String, bool)>, out
                 .to_string();
             var_order.push((spelled, k.clone()));
         }
+    }
+    for (name, value) in def.overrides {
+        let key = name.to_ascii_lowercase();
+        assert!(vars.contains_key(&key), "{}: {name} is overridden for {}, but [Variables] has no {name}", def.file, def.module);
+        vars.insert(key, value.to_string());
     }
     let mut ctx = Ctx { vars, dynamic: &def.dynamic, untinted: Vec::new() };
 

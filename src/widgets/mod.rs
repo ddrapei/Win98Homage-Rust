@@ -19,6 +19,7 @@ pub mod countdown;
 pub mod datetime;
 pub mod disk;
 pub mod notes;
+pub mod photo;
 pub mod rain;
 pub mod resources;
 pub mod weather;

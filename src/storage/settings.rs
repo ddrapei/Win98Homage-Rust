@@ -228,13 +228,15 @@ fn default_file() -> String {
     let notes = &skin::notes::SKIN;
     let wx = &skin::weather::SKIN;
     let world = &skin::world::SKIN;
+    let photo = &skin::photo_wide::SKIN;
     format!(
         "\
 ; Win98 Widgets -- settings.
 ; Edit while the program is not running, or use \"Reload settings\" in the tray
 ; menu afterwards.  Positions, the paper colour, the 12/24-hour choice, the
-; weather's city, the countdowns' days and names and the widgets' colour are
-; written back here by the program; everything else is yours.
+; weather's city, the countdowns' days and names, the photo frames' folders
+; and shapes and the widgets' colour are written back here by the program;
+; everything else is yours.
 
 [General]
 ; desktop = behind every window, on the desktop itself
@@ -323,6 +325,20 @@ Name=
 ; the figures Claude Code's /usage shows, asked for with Claude Code's own
 ; sign-in; nothing to set
 Enabled=1
+
+[Photo]
+; The first photo frame.  Every other one (right-click, Widgets, Photo Frame +)
+; has a section like this of its own -- [Photo2], [Photo3], ...
+Enabled=1
+; where its photos are: a folder beside this file, unless the name says where
+; itself (right-click, Choose folder... writes it).  JPEG, PNG, BMP, GIF and
+; TIFF files in it are shown; the folders inside it are not looked in
+Folder={folder}
+; wide, tall or square
+Shape={shape}
+; seconds each photo stays; Paused=1 keeps the one there is
+Interval={interval}
+Paused={paused}
 ",
         week_start = dt.var("WeekStart"),
         use24 = dt.var("Use24Hour"),
@@ -346,6 +362,10 @@ Enabled=1
         zone2 = world.var("Zone2"),
         city3 = world.var("City3"),
         zone3 = world.var("Zone3"),
+        folder = photo.var("Folder"),
+        shape = photo.var("Shape"),
+        interval = photo.var("Interval"),
+        paused = photo.var("Paused"),
     )
 }
 

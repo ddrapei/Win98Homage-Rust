@@ -65,6 +65,22 @@
 //!                                      and its name field typed on
 //!                                      (type.countdown2, ...); nothing is
 //!                                      written to settings.ini by these.
+//!   set.Photo.Folder=C:\path\photos    the photo frame's folder and shape
+//!   set.Photo.Shape=tall               (wide, tall or square), as
+//!                                      settings.ini has them; drawn to
+//!                                      photo.bmp showing the first photo
+//!                                      in the folder by name -- and any
+//!                                      other frame the state sets anything
+//!                                      for (set.Photo2.Folder=...) to
+//!                                      photo2.bmp, and so on.  With no
+//!                                      folder given, or none of its photos
+//!                                      readable, the frame shows it has
+//!                                      none.  do.photo=Next;Previous;Stop
+//!                                      do what its buttons do (do.photo2,
+//!                                      ...), and type.photo=press X Y;frame
+//!                                      holds one down: pressed it gives a
+//!                                      pixel, and each frame sinks it one
+//!                                      more, to the bottom.
 
 use std::path::{Path, PathBuf};
 
@@ -77,6 +93,7 @@ use crate::datetime::DateTime;
 use crate::disk::Disk;
 use crate::keys::Key;
 use crate::notes::{self, Notes};
+use crate::photo::{self, Photo};
 use crate::rain::Rain;
 use crate::resources::Resources;
 use crate::settings::Settings;
@@ -156,6 +173,8 @@ fn type_on(widget: &mut dyn Widget, script: &str) {
                 widget.press(x, y, true, false);
             }
             "drag" => drop(widget.drag(x, y)),
+            // one frame of whatever is moving -- a button on its way down
+            "frame" => drop(widget.frame(1000)),
             "type" => rest.chars().for_each(|c| drop(widget.typed(c))),
             "key" => {
                 let mut name = rest.trim();
@@ -325,6 +344,18 @@ pub fn run(args: &[String]) -> i32 {
         w.set_fixed(reading, now);
         render(&w, &mut text, &dir.join("claude.bmp"));
     }
+    // the first photo frame, then every other the state sets anything for;
+    // never this machine's photos: with no folder given, the frame's own is
+    // beside a settings.ini that is nowhere, and it has none
+    let sections: Vec<String> = core::iter::once(String::from(photo::FIRST)).chain(photo::others(ctx.settings)).collect();
+    for section in sections {
+        let tag = section.to_ascii_lowercase();
+        let mut w = Photo::new(&ctx, &section);
+        w.set_fixed();
+        perform(&mut w, get(&format!("do.{tag}")).unwrap_or(""), &mut ctx);
+        type_on(&mut w, get(&format!("type.{tag}")).unwrap_or(""));
+        render(&w, &mut text, &dir.join(format!("{tag}.bmp")));
+    }
     0
 }
 
@@ -364,6 +395,13 @@ mod tests {
         // are both there
         let mut claude = Claude::new(ctx);
         claude.set_fixed(Some((42.0, Some(ctx.now + 8040), 18.0, Some(ctx.now + 3 * 86_400))), ctx.now);
+        // on the photo beside the note (see the test), which the tint is to
+        // leave as it is
+        let folder = note.parent().unwrap().to_string_lossy().into_owned();
+        ctx.settings.set(photo::FIRST, "Folder", &folder);
+        let mut photo = Photo::new(ctx, photo::FIRST);
+        photo.set_fixed();
+        assert_eq!(photo.num("HasPhoto"), 1.0, "the photo frame could not read {folder}\\photo.bmp");
         vec![
             Box::new(datetime),
             Box::new(resources),
@@ -375,6 +413,7 @@ mod tests {
             Box::new(battery),
             Box::new(countdown),
             Box::new(claude),
+            Box::new(photo),
         ]
     }
 
@@ -385,6 +424,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let note = dir.join("Notes.txt");
         std::fs::write(&note, "Buy milk\r\n[ ] call home\r\n[x] done\r\n").unwrap();
+        // a photo for the photo frame: a sweep of colour, for its dither
+        let sweep = |x: usize, y: usize| ((x * 255 / 159) as u32) << 16 | ((y * 255 / 119) as u32) << 8 | 0x60;
+        std::fs::write(dir.join("photo.bmp"), crate::decode::bmp(160, 120, sweep)).unwrap();
         let mut text = Text::new(skin::datetime::SKIN.var("Font"), skin::FONTS).unwrap();
         let mut settings = Settings::in_memory();
         settings.set("Notes", "Ruled", "1");
