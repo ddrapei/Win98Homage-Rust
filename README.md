@@ -1,8 +1,8 @@
 # Win98 Widgets
 
-Eight Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
-Weather, Rain Window, Disk Space, World Clock and Battery — as one small Rust program. There
-is one of each, and as many more Sticky Notes as you ask for.
+Nine Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
+Weather, Rain Window, Disk Space, World Clock, Battery and Countdown — as one small Rust
+program. There is one of each, and as many more Sticky Notes and Countdowns as you ask for.
 
 ![All seven widgets on a desktop, in the default rust colour](screenshots/rust.png)
 
@@ -11,7 +11,8 @@ memory is), **Date/Time Properties** (a calendar, a clock and a graph of when th
 was in use today) and, along the bottom, **Disk Space** and **Weather**. In the middle the
 **World Clock** keeps the time in three cities, with the **Rain Window** under it; on the
 right, a **Sticky Note**. The same desktop in two of the other colours is further down,
-under *Colour*. The **Battery**, the smallest, came after these pictures were taken.
+under *Colour*. The **Battery**, the smallest, and the **Countdown** came after these
+pictures were taken.
 
 | | |
 |--------------------------|---------|
@@ -36,12 +37,13 @@ Run the .exe. Nothing is installed: it can live anywhere. Only one copy runs at 
 
 Each widget's layout is an `.ini` file in [`skins/`](skins): a `[Variables]` section for the
 palette and the layout figures, then one section per meter — a shape, a line of text or an
-image — in the order they are painted. `build.rs` compiles the eight of them into static
+image — in the order they are painted. `build.rs` compiles the nine of them into static
 tables — every meter's position, shapes, colours, text options and mouse actions — so
 **the `.ini` files are the single source of truth for the layout**. Change a colour or move
 a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
 runs: the logic behind each widget is plain Rust in `src/widgets/` (`datetime.rs`,
-`resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`, `world.rs`, `battery.rs`), and a mouse action in a skin, such as
+`resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`, `world.rs`, `battery.rs`,
+`countdown.rs`), and a mouse action in a skin, such as
 `LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
 Text is laid out by DirectWrite and rasterised with aliased glyphs, set the way Windows 98's
@@ -50,7 +52,7 @@ and no kerning, so every glyph starts on a pixel and the gaps between letters ar
 Shapes are filled by a small software canvas.
 
 `--dump <dir> [--state <file>]` draws each widget off-screen, in a state given by the
-file (which can ask for more than one note), and writes it out as a BMP — for comparing
+file (which can ask for more than one note or countdown), and writes it out as a BMP — for comparing
 before and after a change (see `src/tools/dump.rs`).
 
 **Scaled displays.** The skins are laid out in whole pixels, and stretching them by 225% would
@@ -67,13 +69,13 @@ widget where it was on its monitor, and then gets `DevicePixels=1` under `[Gener
 ## Using them
 
 They are desktop widgets, not windows: no taskbar button, not in Alt-Tab, and they never
-take the keyboard (except the note and the weather's city field, while you type in
-them).
+take the keyboard (except the note, the city fields and a countdown's name, while you
+type in them).
 
 | | |
 |--|--|
 | drag anywhere | move a widget; it snaps onto the grid — the screen margin and the gap between widgets — and into line with the others (hold Ctrl or Shift not to). The note's text is the exception: dragging there selects |
-| right-click | menu: the widget's own options, Position, Snap, Screen margin, Gap between widgets, Colour, Lock, Close, the list of widgets (with *Sticky Note +* and *−* for the notes), Start with Windows, settings, Exit |
+| right-click | menu: the widget's own options, Position, Snap, Screen margin, Gap between widgets, Colour, Lock, Close, the list of widgets (with *Sticky Note +* and *−* for the notes, and *Countdown +* and *−* for the countdowns), Start with Windows, settings, Exit |
 | tray icon | the same menu — this is how a closed widget is brought back |
 | `X` | closes that widget (it stops costing anything); `?` says what it does |
 
@@ -93,8 +95,8 @@ it: a widget against the screen's edge stays against it, the ones beside it or u
 follow on at the new gap, and ones lined up with each other stay lined up. "On the grid"
 means no further from the edge or the neighbour than the old figure and 10 px more, near
 enough to have been snapped there. A widget placed further away stays where it is, and
-so does a closed one. The first layout and a new note's place follow the same two
-figures. A widget is kept at least the margin inside the screen. Both figures are in the
+so does a closed one. The first layout and the place of a new note or countdown follow
+the same two figures. A widget is kept at least the margin inside the screen. Both figures are in the
 widgets' own pixels: on a monitor where they are drawn at 2x, a 12 px margin is 24 of the
 screen's.
 
@@ -108,8 +110,9 @@ choice is kept in `settings.ini` as `Tint=` under
 calendar's heading and the selected day, the clocks' hands and dots, the usage bars, the
 used part of the disk pie, the rain. The greys and whites of the windows themselves —
 faces, bevels, fields — and the text stay exactly as they are, and so do the note's
-papers with the red margin printed on them, the weather's icons, and the battery's
-sections, red to green, which have to mean the same whatever the colour. An accent takes the
+papers with the red margin printed on them, the weather's icons, the countdown's
+hourglass and its red pen ring, and the battery's sections, red to green, which have to
+mean the same whatever the colour. An accent takes the
 colour's hue and how colourful it is, but keeps its own lightness, so the white text on
 a title bar stays as readable as it was; a very pale or very dark colour therefore comes
 out in between (navy gives a title bar that runs from navy to blue). The swatches show
@@ -128,7 +131,7 @@ fields, the text and the note's paper do not.
 In the widgets themselves: tabs, month list, calendar selection, scroll to browse months,
 the 12/24-hour field, scroll along the usage graph's hours, checkboxes, the scrollbar,
 the paper swatch and the ruled-paper button, typing on the note with save-as-you-type and
-a `.bak`, and the weather's city field.
+a `.bak`, the weather's city field, and a countdown's calendar and name field.
 
 **The usage graph.** The Date/Time graph shows part of the day, 07:00 to 21:00 unless
 `GraphFrom=` and `GraphTo=` under `[DateTime]` in `settings.ini` say otherwise. The wheel
@@ -165,7 +168,9 @@ own text, its own paper and ruling and its own place; none has a title — the b
 icon and the buttons. Right-click a note after the first → *Delete this note* removes it
 for good: its text file goes to the Recycle Bin, after a question if there is anything
 written on it. The first note is the one that is always there: it can be closed but not
-deleted.
+deleted. Countdowns are counted the same way, with *Countdown +* and *Countdown −*, and
+one after the first can be deleted with *Delete this countdown* (after a question if it
+counts to a day or has a name).
 
 **The weather's city.** Click the city field and type a place: `Lviv`, or `Paris, US` /
 `Portland, Maine` to say which one. Enter (or a click anywhere else) looks it up and pins
@@ -211,6 +216,19 @@ it out). A machine with no battery shows a dark one, "--" and the plug, since it
 the mains. The battery's shape, colours and shading are the `Batt*` and `Cell*` variables
 in `skins/Win98Battery.ini`.
 
+**Countdown** counts the days to a day you pick. Its top box is the Date/Time widget's
+calendar, the same month list, year arrows and grid, with today in the dark block: click
+a day and the countdown counts to it, and that day is ringed in red whenever its month is
+on show — as by hand with a pen: centred on the number, a little lopsided, and not closed,
+its end running on past its start with a flick. The wheel over the grid or the month field browses, and a
+double-click on the grid goes back to the month counted to. Under the calendar are the
+count, big — the days left from today, *Today* on the day itself, 0 once it has gone by,
+moving on at midnight — the day counted to in full ("Friday, 27 November 2026"), and a
+field to type what the day is: click it and type, Enter takes it, Escape does not. The
+week starts on the day the Date/Time widget's starts on. Each countdown keeps its day and
+its name in `settings.ini` as `Date=2026-11-27` and `Name=` under its own section,
+`[Countdown]`, `[Countdown2]`, …
+
 **Position** (right-click → Position): *On desktop* (default) keeps the widgets behind
 every window; *Normal*; *Always on top*.
 
@@ -218,7 +236,7 @@ every window; *Normal*; *Always on top*.
 
 | | |
 |--|--|
-| `%APPDATA%\Win98Widgets\settings.ini` | positions, which widgets are shown, and each widget's knobs |
+| `%APPDATA%\Win98Widgets\settings.ini` | positions, which widgets are shown, each widget's knobs, and the countdowns' days and names |
 | `%APPDATA%\Win98Widgets\Notes.txt` | the note (`NoteFile=` in settings.ini to keep it elsewhere) |
 | `%APPDATA%\Win98Widgets\Notes2.txt`, `Notes3.txt`, … | the notes after the first, each with a `[Notes2]`, `[Notes3]`, … section of its own in settings.ini |
 | `%LOCALAPPDATA%\Win98DateTime\Usage.log`, or `%LOCALAPPDATA%\Win98DateTime.log` | the usage log |
@@ -255,19 +273,21 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 ## Layout of the source
 
 ```text
-skins/       the eight layouts (.ini), the weather icons and the tray icon
+skins/       the nine layouts (.ini), the weather icons and the tray icon
 screenshots/ the pictures in this file
 build.rs     those .ini files compiled into static tables
 src/
   main.rs      the way in, and the list of modules
-  app.rs       the host: windows (one per widget, and per note), mouse, menus,
-               tray, the once-a-second tick, the frames in between
+  app.rs       the host: windows (one per widget, per note and per countdown),
+               mouse, menus, tray, the once-a-second tick, the frames in between
   tools/       for working on the program
     dump         off-screen rendering, for checking a change
-  widgets/     what a widget is, and the eight there are
+  widgets/     what a widget is, and the nine there are
     widget       the Widget trait: all the host knows about a widget
-    field        a city field, typed on where it stands: the weather's and the
-                 world clock's three
+    field        a one-line field, typed on where it stands: the weather's city,
+                 the world clock's three, a countdown's name
+    calendar     a month calendar with its month list: Date/Time's and the
+                 countdown's
     datetime     Date/Time Properties
     resources    Resource Meter
     notes        Sticky Note (also: which sections of settings.ini are notes)
@@ -276,9 +296,10 @@ src/
     disk         Disk Space
     world        World Clock (and the child that finds a city's time zone)
     battery      Battery
+    countdown    Countdown (also: which sections of settings.ini are countdowns)
   input/       typing
     keys         the window that holds the keyboard for a widget
-    editor       a text and what the keys do to it: the note's, the city fields'
+    editor       a text and what the keys do to it: the note's, the one-line fields'
   net/         the network, which only a child ever touches
     geocode      a city by name: where it is, and its time zone
     http         one GET over WinHTTP

@@ -1,10 +1,10 @@
-//! Win98 Widgets -- eight Windows 98 style desktop widgets as one small
+//! Win98 Widgets -- nine Windows 98 style desktop widgets as one small
 //! native program.
 //!
 //! Date/Time Properties, Resource Meter, Sticky Note, Weather, Rain Window,
-//! Disk Space, World Clock and Battery, drawn from the .ini files in `skins/`
-//! -- with no Direct2D and no script engine underneath.  One of each, and as
-//! many more Sticky Notes as are asked for.
+//! Disk Space, World Clock, Battery and Countdown, drawn from the .ini files
+//! in `skins/` -- with no Direct2D and no script engine underneath.  One of
+//! each, and as many more Sticky Notes and Countdowns as are asked for.
 //!
 //! # Where things are
 //!
@@ -21,11 +21,14 @@
 //!   tools/         for working on the program
 //!     dump           off-screen rendering, for checking a change
 //!
-//!   widgets/       what a widget is, and the eight there are
+//!   widgets/       what a widget is, and the nine there are
 //!     widget         what the host asks of a widget -- the one thing about
 //!                    them it knows
-//!     field          a city field, typed on where it stands: the weather's
-//!                    one and the world clock's three
+//!     field          a one-line field, typed on where it stands: the
+//!                    weather's city, the world clock's three, a countdown's
+//!                    name
+//!     calendar       a month calendar with its month list: the Date/Time
+//!                    widget's and the countdown's
 //!     datetime       Date/Time Properties
 //!     resources      Resource Meter
 //!     notes          Sticky Note
@@ -35,11 +38,12 @@
 //!     world          World Clock      (and the child that finds a city's
 //!                    time zone)
 //!     battery        Battery
+//!     countdown      Countdown
 //!
 //!   input/        typing
 //!     keys           the window that holds the keyboard for a widget
 //!     editor         a text and what the keys do to it: the note's, and a
-//!                    city field's
+//!                    one-line field's
 //!
 //!   net/           the network, which only a child ever touches
 //!     geocode        a city by name: where it is, and its time zone
@@ -86,7 +90,7 @@ use net::{geocode, http};
 use platform::{clock, grid, screens, sys};
 use storage::{settings, usage};
 use tools::dump;
-use widgets::{battery, datetime, disk, field, notes, rain, resources, weather, widget, world};
+use widgets::{battery, calendar, countdown, datetime, disk, field, notes, rain, resources, weather, widget, world};
 
 fn main() {
     // There is no console to complain to: if something does go wrong, leave

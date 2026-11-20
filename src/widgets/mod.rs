@@ -5,13 +5,16 @@
 //! others is one widget, whole, in one file -- and another widget is another
 //! file here and a line in the host's list, with none of these changed.
 //!
-//! `field` is the one thing two of them share: a city, typed into a field.
+//! `field` and `calendar` are what some of them share: a city -- or any one
+//! line -- typed into a field, and a month calendar with its month list.
 
 pub mod widget;
 
+pub mod calendar;
 pub mod field;
 
 pub mod battery;
+pub mod countdown;
 pub mod datetime;
 pub mod disk;
 pub mod notes;

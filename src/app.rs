@@ -1,11 +1,14 @@
 //! The host: one small process, one thread, a layered window for each widget.
 //!
-//! There is one of each of the eight, and as many more Sticky Notes as have
-//! been asked for: a note after the first is a window like any other, made
-//! from the same skin, with a section of settings.ini and a text file of its
-//! own (see `notes`).  The windows are numbered -- the eight first, then the
-//! other notes -- and a number is never handed on: a deleted note's stays
-//! its own, unused, until the program ends.
+//! There is one of each of the nine, and as many more Sticky Notes and
+//! Countdowns as have been asked for: a note after the first is a window like
+//! any other, made from the same skin, with a section of settings.ini and a
+//! text file of its own (see `notes`), and a countdown after the first is the
+//! same with a section and no file (see `countdown`).  Those two kinds are
+//! the families (`FAMILIES`).  The windows are numbered -- the nine first,
+//! then the other notes and countdowns as they were made -- and a number is
+//! never handed on: a deleted one's stays its own, unused, until the program
+//! ends.
 //!
 //! Each widget is a borderless layered window that never takes the keyboard
 //! and never shows in the taskbar or Alt-Tab -- a desktop widget, not an
@@ -45,6 +48,7 @@ use std::path::PathBuf;
 use crate::battery::Battery;
 use crate::canvas::{self, Canvas, Rect};
 use crate::clock;
+use crate::countdown::{self, Countdown};
 use crate::datetime::DateTime;
 use crate::disk::Disk;
 use crate::grid::{self, Spacing};
@@ -72,6 +76,7 @@ enum Kind {
     Disk,
     World,
     Battery,
+    Countdown,
 }
 
 impl Kind {
@@ -85,14 +90,20 @@ impl Kind {
             Kind::Disk => &skin::disk::SKIN,
             Kind::World => &skin::world::SKIN,
             Kind::Battery => &skin::battery::SKIN,
+            Kind::Countdown => &skin::countdown::SKIN,
         }
+    }
+
+    /// The family a kind there can be any number of is, if it is one.
+    fn family(self) -> Option<&'static Family> {
+        FAMILIES.iter().find(|f| f.kind == self)
     }
 }
 
 /// The widgets there is always one of, in the order their windows are
 /// numbered: what each is, its section of settings.ini, and what the menus
-/// call it.  The notes after the first follow these.
-const FIXED: [(Kind, &str, &str); 8] = [
+/// call it.  The notes and countdowns after the first follow these.
+const FIXED: [(Kind, &str, &str); 9] = [
     (Kind::DateTime, "DateTime", "Date/Time"),
     (Kind::Resources, "Resources", "Resource Meter"),
     (Kind::Notes, notes::FIRST, "Sticky Note"),
@@ -101,6 +112,7 @@ const FIXED: [(Kind, &str, &str); 8] = [
     (Kind::Disk, "Disk", "Disk Space"),
     (Kind::World, "World", "World Clock"),
     (Kind::Battery, "Battery", "Battery"),
+    (Kind::Countdown, countdown::FIRST, "Countdown"),
 ];
 const DATETIME: usize = 0;
 const NOTE: usize = 2;
@@ -109,6 +121,69 @@ const RAIN: usize = 4;
 const DISK: usize = 5;
 const WORLD: usize = 6;
 const BATTERY: usize = 7;
+const COUNTDOWN: usize = 8;
+
+/// A kind of widget there can be any number of: the first is in FIXED, and
+/// the others are made from the menu, each with a section of settings.ini of
+/// its own -- `[Notes2]`, `[Countdown3]` -- that its own module looks after.
+struct Family {
+    kind: Kind,
+    /// The first's window.
+    first: usize,
+    /// Its entries in the menus: one more, one fewer, and -- on one after
+    /// the first -- delete this one, with what that says.
+    more: usize,
+    fewer: usize,
+    delete: usize,
+    delete_label: &'static str,
+    /// What one with this section is called in the menus.
+    name: fn(&str) -> String,
+    /// The sections of the ones after the first, in the order of their numbers.
+    others: fn(&Settings) -> Vec<String>,
+    /// A section for another; it returns the section.
+    create: fn(&mut Settings) -> String,
+    /// Take one out of settings.ini; what it leaves on disk is handed back.
+    forget: fn(&mut Settings, &str) -> Vec<PathBuf>,
+    /// What to ask before deleting one, if there is anything on it to lose.
+    ask: fn(&Settings, &str) -> Option<String>,
+}
+
+const FAMILIES: [Family; 2] = [
+    Family {
+        kind: Kind::Notes,
+        first: NOTE,
+        more: CMD_MORE_NOTES,
+        fewer: CMD_FEWER_NOTES,
+        delete: CMD_DELETE_NOTE,
+        delete_label: "Delete this note",
+        name: notes::name,
+        others: notes::others,
+        create: notes::create,
+        forget: notes::forget,
+        // (The right click that opened the menu ended any typing, so what is
+        // in the file is what is on the sheet.)
+        ask: |settings, section| {
+            let file = notes::file(settings, section);
+            (!notes::is_blank(&file)).then(|| format!("Delete this note?\n\nIts text, {}, goes to the Recycle Bin.", file.display()))
+        },
+    },
+    Family {
+        kind: Kind::Countdown,
+        first: COUNTDOWN,
+        more: CMD_MORE_COUNTDOWNS,
+        fewer: CMD_FEWER_COUNTDOWNS,
+        delete: CMD_DELETE_COUNTDOWN,
+        delete_label: "Delete this countdown",
+        name: countdown::name,
+        others: countdown::others,
+        create: countdown::create,
+        forget: countdown::forget,
+        ask: |settings, section| {
+            (!countdown::is_blank(settings, section))
+                .then(|| String::from("Delete this countdown?\n\nThe day it counts to and its name are forgotten."))
+        },
+    },
+];
 
 const WIDGET_CLASS: &str = "Win98Widget";
 const MAIN_CLASS: &str = "Win98WidgetsMain";
@@ -133,10 +208,10 @@ const SPACING: Spacing = Spacing { margin: 12, gap: 24 };
 const SPACINGS: [i32; 8] = [0, 4, 8, 10, 12, 16, 24, 32];
 /// No margin or gap is wider than this.
 const MOST_SPACE: i32 = 200;
-/// How many notes' widths, or heights, from a note room for a new one is
-/// looked for.
+/// How many widths, or heights, from a note or a countdown room for a new
+/// one is looked for.
 const ROOM_STEPS: i32 = 8;
-/// With no room anywhere, a new note sits this far down and right of the old.
+/// With no room anywhere, a new one sits this far down and right of the old.
 const CASCADE: i32 = 24;
 /// Under [General] in settings.ini, 1 once the places there are in the
 /// monitors' own pixels: written by a build that is DPI aware.
@@ -154,6 +229,9 @@ const CMD_CLOSE: usize = 30;
 const CMD_MORE_NOTES: usize = 40;
 const CMD_DELETE_NOTE: usize = 41;
 const CMD_FEWER_NOTES: usize = 42;
+const CMD_MORE_COUNTDOWNS: usize = 43;
+const CMD_DELETE_COUNTDOWN: usize = 44;
+const CMD_FEWER_COUNTDOWNS: usize = 45;
 const CMD_AUTOSTART: usize = 50;
 const CMD_SETTINGS: usize = 51;
 const CMD_RELOAD: usize = 52;
@@ -209,9 +287,10 @@ enum Later {
     Menu(Option<usize>),
     About(usize),
     Open(PathBuf),
-    /// Delete the note with this section -- not its number: other notes may
-    /// come and go while the question is on the screen.  With it, the title
-    /// and the text of the question, for a note that has something on it.
+    /// Delete the note or countdown with this section -- not its number:
+    /// others may come and go while the question is on the screen.  With it,
+    /// the title and the text of the question, for one that has something on
+    /// it.
     Delete(String, Option<(String, String)>),
     /// The colour dialog, starting from this tint (0xRRGGBB): what is picked
     /// in it is the tint from then on.
@@ -263,8 +342,8 @@ struct Slot {
     /// Its section of settings.ini, and what the menus call it.
     section: String,
     title: String,
-    /// A note that has been deleted.  Nothing is left of it but its number,
-    /// which no other window is given.
+    /// A note or a countdown that has been deleted.  Nothing is left of it
+    /// but its number, which no other window is given.
     deleted: bool,
     hwnd: HWND,
     /// Where the window is.
@@ -657,6 +736,7 @@ impl App {
                 Kind::Disk => Box::new(Disk::new(&ctx)),
                 Kind::World => Box::new(World::new(&ctx)),
                 Kind::Battery => Box::new(Battery::new(&ctx)),
+                Kind::Countdown => Box::new(Countdown::new(&ctx, &section)),
             };
             widget.tick(&mut ctx);
             widgets.0[i] = Some(widget);
@@ -709,7 +789,7 @@ impl App {
     }
 
     fn set_enabled(&mut self, i: usize, on: bool) {
-        // a deleted note has no section to write to, and is not to be given one
+        // a deleted one has no section to write to, and is not to be given one
         if self.slots[i].deleted {
             return;
         }
@@ -859,7 +939,7 @@ impl App {
         self.lay_out();
     }
 
-    // ---- more notes ------------------------------------------------------------
+    // ---- more notes, more countdowns ------------------------------------------
 
     /// Somewhere to put a window the size of slot `b`'s, next to it: the
     /// nearest place to its left, its right, below or above it, a gap from
@@ -887,36 +967,37 @@ impl App {
             .unwrap_or_else(|| on_screen(base.kind, base.x + CASCADE * n, base.y + CASCADE * n, self.spacing.margin, n))
     }
 
-    /// The notes there are: the first, then the others in the order of their
-    /// numbers -- which, their names being alike but for the number, is
-    /// shortest name first.
-    fn notes(&self) -> Vec<usize> {
-        let mut more: Vec<usize> = (FIXED.len()..self.slots.len()).filter(|&j| !self.slots[j].deleted).collect();
+    /// The windows of a family there are: the first, then the others in the
+    /// order of their numbers -- which, their names being alike but for the
+    /// number, is shortest name first.
+    fn members(&self, f: &Family) -> Vec<usize> {
+        let mut more: Vec<usize> =
+            (FIXED.len()..self.slots.len()).filter(|&j| self.slots[j].kind == f.kind && !self.slots[j].deleted).collect();
         more.sort_by_key(|&j| (self.slots[j].title.len(), &self.slots[j].title));
-        core::iter::once(NOTE).chain(more).collect()
+        core::iter::once(f.first).chain(more).collect()
     }
 
-    /// The note "one fewer" takes off the screen: the one it was asked for
-    /// on, or, asked for anywhere else, the last that is showing.
-    fn note_to_close(&self, from: Option<usize>) -> Option<usize> {
-        let open = |&j: &usize| self.slots[j].kind == Kind::Notes && self.widgets.get(j).is_some();
-        from.filter(open).or_else(|| self.notes().into_iter().rev().find(open))
+    /// The one of a family "one fewer" takes off the screen: the one it was
+    /// asked for on, or, asked for anywhere else, the last that is showing.
+    fn to_close(&self, f: &Family, from: Option<usize>) -> Option<usize> {
+        let open = |&j: &usize| self.slots[j].kind == f.kind && self.widgets.get(j).is_some();
+        from.filter(open).or_else(|| self.members(f).into_iter().rev().find(open))
     }
 
-    /// One more note on the screen.  A note that was closed comes back first,
-    /// where it was and with what was on it, the lowest number before the
-    /// others -- there is no other way back to it -- and with none closed a
-    /// new one is made.
-    fn more_notes(&mut self, from: Option<usize>) {
-        let Some(closed) = self.notes().into_iter().find(|&j| self.widgets.get(j).is_none()) else {
-            return self.new_note(from);
+    /// One more of a family on the screen.  One that was closed comes back
+    /// first, where it was and with what was on it, the lowest number before
+    /// the others -- there is no other way back to it -- and with none closed
+    /// a new one is made.
+    fn more(&mut self, f: &Family, from: Option<usize>) {
+        let Some(closed) = self.members(f).into_iter().find(|&j| self.widgets.get(j).is_none()) else {
+            return self.new_one(f, from);
         };
         // Something may have been put where it was since: it would come back
         // underneath that, and not be seen.  Then it goes where a new one would.
         let (x, y) = self.slots[closed].put;
-        let own = frame(Kind::Notes, x, y, settled_scale(Kind::Notes, x, y, self.slots[closed].n));
+        let own = frame(f.kind, x, y, settled_scale(f.kind, x, y, self.slots[closed].n));
         if self.slots.iter().any(|s| s.hwnd != 0 && s.frame().intersects(&own)) {
-            let beside = self.note_to_close(from).unwrap_or(closed);
+            let beside = self.to_close(f, from).unwrap_or(closed);
             (self.slots[closed].x, self.slots[closed].y) = self.room_beside(beside);
             self.slots[closed].n = self.slots[beside].n;
             self.keep_place(closed);
@@ -924,40 +1005,53 @@ impl App {
         self.set_enabled(closed, true);
     }
 
-    /// One note fewer on the screen: closed, as its X closes it, text kept.
-    fn fewer_notes(&mut self, from: Option<usize>) {
-        if let Some(i) = self.note_to_close(from) {
+    /// One fewer of a family on the screen: closed, as its X closes it,
+    /// with what is on it kept.
+    fn fewer(&mut self, f: &Family, from: Option<usize>) {
+        if let Some(i) = self.to_close(f, from) {
             self.set_enabled(i, false);
         }
     }
 
-    /// Another note: a window beside the note it was asked for on -- or, asked
-    /// for anywhere else, beside the last note there is -- with a section of
-    /// settings.ini and an empty file of its own.
-    fn new_note(&mut self, from: Option<usize>) {
-        let is_note = |s: &Slot| s.kind == Kind::Notes && !s.deleted;
-        let beside = from.filter(|&i| is_note(&self.slots[i])).or_else(|| self.slots.iter().rposition(is_note)).unwrap_or(NOTE);
+    /// Another of a family: a window beside the one it was asked for on --
+    /// or, asked for anywhere else, beside the last there is -- with a
+    /// section of settings.ini of its own (and, for a note, an empty file).
+    fn new_one(&mut self, f: &Family, from: Option<usize>) {
+        let is_member = |s: &Slot| s.kind == f.kind && !s.deleted;
+        let beside = from.filter(|&i| is_member(&self.slots[i])).or_else(|| self.slots.iter().rposition(is_member)).unwrap_or(f.first);
         let (x, y) = self.room_beside(beside);
-        let section = notes::create(&mut self.settings);
-        let title = notes::name(&section);
-        self.slots.push(Slot { x, y, n: self.slots[beside].n, ..Slot::new(Kind::Notes, &section, title) });
+        let section = (f.create)(&mut self.settings);
+        let title = (f.name)(&section);
+        self.slots.push(Slot { x, y, n: self.slots[beside].n, ..Slot::new(f.kind, &section, title) });
         self.widgets.0.push(None);
         let i = self.slots.len() - 1;
         self.keep_place(i);
         self.set_enabled(i, true);
     }
 
-    /// Delete a note after the first: its window, and its section of
-    /// settings.ini.  What it leaves on disk is handed back, to be disposed
-    /// of once the App has been let go of.
-    fn delete_note(&mut self, section: &str) -> Vec<PathBuf> {
+    /// Delete a note or a countdown after the first: its window, and its
+    /// section of settings.ini.  What it leaves on disk is handed back, to be
+    /// disposed of once the App has been let go of.
+    fn delete(&mut self, section: &str) -> Vec<PathBuf> {
         let found = self.slots.iter().position(|s| !s.deleted && s.section == section);
-        let Some(i) = found.filter(|&i| i >= FIXED.len()) else { return Vec::new() };
+        let Some((i, f)) = found.filter(|&i| i >= FIXED.len()).and_then(|i| Some((i, self.slots[i].kind.family()?))) else {
+            return Vec::new();
+        };
         self.stop(i);
         self.slots[i].deleted = true;
-        let files = notes::forget(&mut self.settings, section);
+        let files = (f.forget)(&mut self.settings, section);
         self.settings.save();
         files
+    }
+
+    /// The menu's "Delete this ...", on window `i`: asked about first, unless
+    /// there is nothing on it to lose.  Only one after the first is deleted.
+    fn ask_delete(&self, f: &Family, i: Option<usize>) -> Later {
+        let Some(slot) = i.filter(|&i| i >= FIXED.len() && self.slots[i].kind == f.kind).map(|i| &self.slots[i]) else {
+            return Later::Nothing;
+        };
+        let ask = (f.ask)(&self.settings, &slot.section).map(|text| (format!("Delete {}", slot.title), text));
+        Later::Delete(slot.section.clone(), ask)
     }
 
     /// Redraw what changed and hand it to the window manager.
@@ -1430,10 +1524,10 @@ impl App {
             if !own.is_empty() {
                 m.push((0, String::new(), false));
             }
-            // The first note is closed, like the other six widgets; the ones
-            // after it can also be deleted.
-            if self.slots[i].kind == Kind::Notes && i >= FIXED.len() {
-                m.push((CMD_DELETE_NOTE, String::from("Delete this note"), false));
+            // The first note or countdown is closed, like the widgets there
+            // is one of; the ones after it can also be deleted.
+            if let Some(f) = self.slots[i].kind.family().filter(|_| i >= FIXED.len()) {
+                m.push((f.delete, String::from(f.delete_label), false));
                 m.push((0, String::new(), false));
             }
         }
@@ -1467,16 +1561,16 @@ impl App {
         m.push((0, String::new(), false));
         m.push((SUB, String::from("Widgets"), false));
         for j in 0..FIXED.len() {
-            if j != NOTE {
+            let Some(f) = FAMILIES.iter().find(|f| f.first == j) else {
                 m.push((CMD_TOGGLE + j, self.slots[j].title.clone(), self.slots[j].hwnd != 0));
                 continue;
-            }
+            };
             // There is one of each of the others, shown or not.  Of notes
-            // there is a number: one more, and -- while any is showing -- one
-            // fewer.
-            m.push((CMD_MORE_NOTES, format!("{} +", FIXED[NOTE].2), false));
-            if self.note_to_close(i).is_some() {
-                m.push((CMD_FEWER_NOTES, format!("{} \u{2212}", FIXED[NOTE].2), false));
+            // and of countdowns there is a number: one more, and -- while any
+            // is showing -- one fewer.
+            m.push((f.more, format!("{} +", FIXED[j].2), false));
+            if self.to_close(f, i).is_some() {
+                m.push((f.fewer, format!("{} \u{2212}", FIXED[j].2), false));
             }
         }
         m.push((SUB, String::new(), false));
@@ -1490,6 +1584,15 @@ impl App {
 
     fn menu_command(&mut self, i: Option<usize>, cmd: usize) -> Later {
         self.trim_at = self.ticks + 5;
+        if let Some(f) = FAMILIES.iter().find(|f| [f.more, f.fewer, f.delete].contains(&cmd)) {
+            match cmd {
+                c if c == f.delete => return self.ask_delete(f, i),
+                c if c == f.more => self.more(f, i),
+                _ => self.fewer(f, i),
+            }
+            self.settings.save();
+            return Later::Nothing;
+        }
         match cmd {
             CMD_DESKTOP => self.set_position(Position::Desktop),
             CMD_NORMAL => self.set_position(Position::Normal),
@@ -1530,20 +1633,6 @@ impl App {
             }
             CMD_RELOAD => self.reload(),
             CMD_EXIT => return Later::Quit,
-            CMD_MORE_NOTES => self.more_notes(i),
-            CMD_FEWER_NOTES => self.fewer_notes(i),
-            CMD_DELETE_NOTE => {
-                let Some(slot) = i.filter(|&i| i >= FIXED.len()).map(|i| &self.slots[i]) else { return Later::Nothing };
-                // Asked about first, unless there is nothing on it to lose.
-                // (The right click that opened the menu ended any typing, so
-                // what is in the file is what is on the sheet.)
-                let file = notes::file(&self.settings, &slot.section);
-                let ask = (!notes::is_blank(&file)).then(|| {
-                    let text = format!("Delete this note?\n\nIts text, {}, goes to the Recycle Bin.", file.display());
-                    (format!("Delete {}", slot.title), text)
-                });
-                return Later::Delete(slot.section.clone(), ask);
-            }
             c if c >= CMD_TOGGLE => {
                 let j = c - CMD_TOGGLE;
                 if j < self.slots.len() {
@@ -1600,20 +1689,24 @@ impl App {
         tint::set(self.settings.tint());
     }
 
-    /// Which windows there are -- the eight, and a note for every other
-    /// section of settings.ini that is a note's -- and where each sits: where
-    /// it was left, or -- the first time -- on the grid, in a column down the
-    /// right-hand side of the screen: the date and time in the top corner,
-    /// the resource meter under it, and under that the weather, the note to
-    /// its left, the rain to the left of the note, the disk to the left of
-    /// the rain and the battery to the left of the disk; the world clock
-    /// heads a second column, to the left of the date and time.  Called with
-    /// every window shut: at the start, and when settings.ini is read again.
+    /// Which windows there are -- the nine, and a note or a countdown for
+    /// every other section of settings.ini that is one's -- and where each
+    /// sits: where it was left, or -- the first time -- on the grid, in a
+    /// column down the right-hand side of the screen: the date and time in
+    /// the top corner, the resource meter under it, and under that the
+    /// weather, the note to its left, the rain to the left of the note, the
+    /// disk to the left of the rain and the battery to the left of the disk;
+    /// the world clock heads a second column, to the left of the date and
+    /// time, and the countdown stands under it, against the first column.
+    /// Called with every window shut: at the start, and when settings.ini is
+    /// read again.
     fn read_slots(&mut self) {
         self.slots = FIXED.iter().map(|&(kind, section, title)| Slot::new(kind, section, title.to_owned())).collect();
-        for section in notes::others(&self.settings) {
-            let title = notes::name(&section);
-            self.slots.push(Slot::new(Kind::Notes, &section, title));
+        for f in &FAMILIES {
+            for section in (f.others)(&self.settings) {
+                let title = (f.name)(&section);
+                self.slots.push(Slot::new(f.kind, &section, title));
+            }
         }
         self.widgets.0.clear();
         self.widgets.0.resize_with(self.slots.len(), || None);
@@ -1645,14 +1738,19 @@ impl App {
             (disk, y2),
             (x0 - step - size(WORLD).0, y0),
             (disk - step - size(BATTERY).0, y2),
+            (x0 - step - size(COUNTDOWN).0, y0 + size(WORLD).1 + step),
         ];
         for i in 0..self.slots.len() {
-            // A note after the first was put somewhere when it was made.  One
-            // written into settings.ini by hand, with no place given, steps
-            // down from the first.
+            // A note or a countdown after the first was put somewhere when it
+            // was made.  One written into settings.ini by hand, with no place
+            // given, steps down from the first of its kind, a step for each of
+            // its kind before it.
+            let kind = self.slots[i].kind;
             let (x, y) = defaults.get(i).copied().unwrap_or_else(|| {
-                let step = CASCADE * n * (i + 1 - FIXED.len()) as i32;
-                (defaults[NOTE].0 + step, defaults[NOTE].1 + step)
+                let first = kind.family().map_or(NOTE, |f| f.first);
+                let before = (FIXED.len()..=i).filter(|&j| self.slots[j].kind == kind).count();
+                let step = CASCADE * n * before as i32;
+                (defaults[first].0 + step, defaults[first].1 + step)
             });
             let section = &self.slots[i].section;
             let placed = self.settings.get(section, "X").is_some();
@@ -1660,7 +1758,6 @@ impl App {
             (self.slots[i].x, self.slots[i].y) = (x, y);
             self.slots[i].put = (x, y);
             // at the scale of the monitor most of it is on at its own size
-            let kind = self.slots[i].kind;
             self.slots[i].n = settled_scale(kind, x, y, screens::scale_of(&on_screens(frame(kind, x, y, 1))));
             if !placed {
                 self.keep_place(i);
@@ -1765,7 +1862,7 @@ fn run_later(mut later: Later) {
                     (unsafe { MessageBoxW(0, wide(&text).as_ptr(), wide(&title).as_ptr(), MB_YESNO | MB_ICONQUESTION) }) == IDYES
                 });
                 if sure {
-                    recycle(&with_app(|app| app.delete_note(&section)).unwrap_or_default());
+                    recycle(&with_app(|app| app.delete(&section)).unwrap_or_default());
                 }
                 Later::Nothing
             }
@@ -2260,6 +2357,9 @@ impl Drop for Buffer {
 mod tests {
     use super::*;
 
+    const NOTES: &Family = &FAMILIES[0];
+    const COUNTDOWNS: &Family = &FAMILIES[1];
+
     /// An App whose settings.ini, and whose notes, are in a folder that is
     /// the test's own.  No window class is registered here, so no window is
     /// ever made: a widget that is started runs without one.
@@ -2273,13 +2373,20 @@ mod tests {
 
     /// What the Widgets submenu lists, top to bottom.
     fn listed(app: &App) -> Vec<String> {
-        let entry = |m: &(usize, String, bool)| (CMD_TOGGLE..usize::MAX).contains(&m.0) || [CMD_MORE_NOTES, CMD_FEWER_NOTES].contains(&m.0);
+        let entry = |m: &(usize, String, bool)| {
+            (CMD_TOGGLE..usize::MAX).contains(&m.0) || FAMILIES.iter().any(|f| [f.more, f.fewer].contains(&m.0))
+        };
         app.menu(None).into_iter().filter(entry).map(|m| m.1).collect()
     }
 
     /// The notes there are, by what they are called.
     fn titles(app: &App) -> Vec<String> {
-        app.notes().into_iter().map(|j| app.slots[j].title.clone()).collect()
+        family_titles(app, NOTES)
+    }
+
+    /// The ones of a family there are, by what they are called.
+    fn family_titles(app: &App, f: &Family) -> Vec<String> {
+        app.members(f).into_iter().map(|j| app.slots[j].title.clone()).collect()
     }
 
     fn offers(app: &App, i: usize, label: &str) -> bool {
@@ -2295,8 +2402,8 @@ mod tests {
     fn notes_are_made_and_deleted() {
         let (mut app, dir) = app("notes");
         assert_eq!(app.slots.len(), FIXED.len());
-        app.new_note(Some(NOTE));
-        app.new_note(None);
+        app.new_one(NOTES, Some(NOTE));
+        app.new_one(NOTES, None);
         assert_eq!(titles(&app), ["Sticky Note", "Sticky Note 2", "Sticky Note 3"]);
         // each is running, on a file of its own, and will be there next time
         let (second, third) = (FIXED.len(), FIXED.len() + 1);
@@ -2308,11 +2415,11 @@ mod tests {
         // only a note after the first can be deleted
         assert!(!offers(&app, NOTE, "Delete this note") && offers(&app, third, "Delete this note"));
         assert!(matches!(app.menu_command(Some(NOTE), CMD_DELETE_NOTE), Later::Nothing));
-        assert!(app.delete_note(notes::FIRST).is_empty() && !app.slots[NOTE].deleted);
+        assert!(app.delete(notes::FIRST).is_empty() && !app.slots[NOTE].deleted);
 
         // an empty one goes without a question, and leaves its file to be binned
         let Later::Delete(section, None) = app.menu_command(Some(second), CMD_DELETE_NOTE) else { panic!("asked about an empty note") };
-        assert_eq!(app.delete_note(&section), [dir.join("Notes2.txt")]);
+        assert_eq!(app.delete(&section), [dir.join("Notes2.txt")]);
         assert!(app.slots[second].deleted && app.widgets.get(second).is_none());
         assert_eq!(titles(&app), ["Sticky Note", "Sticky Note 3"]);
         // nothing brings it back, and nothing writes its section again
@@ -2340,17 +2447,17 @@ mod tests {
         // one entry for more of them wherever the menu is opened, in the list
         // of widgets, and none that ticks a note on and off
         for at in [None, Some(NOTE), Some(WEATHER)] {
-            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery"]);
+            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +"]);
             assert_eq!(app.menu(at).iter().filter(|m| m.0 == CMD_MORE_NOTES).count(), 1);
             assert!(!app.menu(at).iter().any(|m| m.0 == CMD_TOGGLE + NOTE));
         }
-        let running = |app: &App| app.notes().into_iter().filter(|&j| app.widgets.get(j).is_some()).count();
+        let running = |app: &App| app.members(NOTES).into_iter().filter(|&j| app.widgets.get(j).is_some()).count();
         let minus = "Sticky Note \u{2212}";
 
         // the first comes out, and with it the way to put one back
         app.menu_command(None, CMD_MORE_NOTES);
         assert_eq!((running(&app), app.slots.len()), (1, FIXED.len()));
-        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery"]);
+        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +"]);
         // with none closed, more is a new one each time
         app.menu_command(None, CMD_MORE_NOTES);
         app.menu_command(Some(WEATHER), CMD_MORE_NOTES);
@@ -2386,6 +2493,60 @@ mod tests {
     }
 
     #[test]
+    fn countdowns_come_and_go_as_notes_do_and_keep_to_their_own() {
+        let (mut app, dir) = app("countdowns");
+        // the first comes out, then more are made -- in turns with a note
+        app.menu_command(None, CMD_MORE_COUNTDOWNS);
+        assert!(app.widgets.get(COUNTDOWN).is_some() && app.slots.len() == FIXED.len());
+        app.menu_command(None, CMD_MORE_COUNTDOWNS);
+        app.new_one(NOTES, Some(NOTE));
+        app.menu_command(Some(COUNTDOWN), CMD_MORE_COUNTDOWNS);
+        let (second, note, third) = (FIXED.len(), FIXED.len() + 1, FIXED.len() + 2);
+        // each family numbered on its own, each with sections of its own
+        assert_eq!(family_titles(&app, COUNTDOWNS), ["Countdown", "Countdown 2", "Countdown 3"]);
+        assert_eq!(titles(&app), ["Sticky Note", "Sticky Note 2"]);
+        let sections: Vec<&str> = [second, note, third].iter().map(|&i| app.slots[i].section.as_str()).collect();
+        assert_eq!(sections, ["Countdown2", "Notes2", "Countdown3"]);
+        assert_eq!(app.settings.get("Countdown3", "Enabled"), Some("1"));
+        assert!(app.settings.get("Countdown3", "X").is_some());
+        // counted up and down where the first stands in the list
+        let (notes_minus, minus) = ("Sticky Note \u{2212}", "Countdown \u{2212}");
+        assert_eq!(
+            listed(&app),
+            ["Date/Time", "Resource Meter", "Sticky Note +", notes_minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", minus]
+        );
+
+        // only one after the first can be deleted, and each by its own entry
+        assert!(!offers(&app, COUNTDOWN, "Delete this countdown") && offers(&app, third, "Delete this countdown"));
+        assert!(!offers(&app, third, "Delete this note") && offers(&app, note, "Delete this note"));
+        assert!(matches!(app.menu_command(Some(COUNTDOWN), CMD_DELETE_COUNTDOWN), Later::Nothing));
+        assert!(matches!(app.menu_command(Some(note), CMD_DELETE_COUNTDOWN), Later::Nothing));
+        // a blank one goes without a question, and leaves nothing to be binned
+        let Later::Delete(section, None) = app.menu_command(Some(second), CMD_DELETE_COUNTDOWN) else { panic!("asked about a blank countdown") };
+        assert!(app.delete(&section).is_empty());
+        assert!(app.slots[second].deleted && !app.settings.sections().any(|s| s == "Countdown2"));
+        assert_eq!(family_titles(&app, COUNTDOWNS), ["Countdown", "Countdown 3"]);
+        // one counting to a day is asked about first
+        app.settings.set("Countdown3", "Date", "2026-12-24");
+        assert!(matches!(app.menu_command(Some(third), CMD_DELETE_COUNTDOWN), Later::Delete(_, Some(_))));
+
+        // one fewer is a countdown, not the note
+        app.menu_command(None, CMD_FEWER_COUNTDOWNS);
+        assert!(app.widgets.get(third).is_none() && app.widgets.get(note).is_some());
+        assert_eq!(app.settings.get("Countdown3", "Date"), Some("2026-12-24"));
+
+        // the next run finds what is left of both, and only that
+        for i in 0..app.slots.len() {
+            app.stop(i);
+        }
+        app.read_slots();
+        assert_eq!(titles(&app), ["Sticky Note", "Sticky Note 2"]);
+        assert_eq!(family_titles(&app, COUNTDOWNS), ["Countdown", "Countdown 3"]);
+        assert_eq!(app.slots.len(), FIXED.len() + 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_note_does_not_come_back_underneath_another_widget() {
         let (mut app, dir) = app("back");
         let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
@@ -2394,12 +2555,12 @@ mod tests {
         // where it was left, with nothing there
         (app.slots[NOTE].x, app.slots[NOTE].y) = (x, y);
         app.keep_place(NOTE);
-        app.more_notes(None);
+        app.more(NOTES, None);
         assert_eq!((app.slots[NOTE].x, app.slots[NOTE].y), (x, y));
         // the rain has been put there since: beside it, then
-        app.fewer_notes(None);
+        app.fewer(NOTES, None);
         show(&mut app, RAIN, x, y);
-        app.more_notes(None);
+        app.more(NOTES, None);
         let moved = app.slots[NOTE].frame();
         assert!(!moved.intersects(&frame(Kind::Rain, x, y, 1)));
         assert_eq!(app.settings.int(notes::FIRST, "X", -1), app.slots[NOTE].x);
@@ -2438,7 +2599,7 @@ mod tests {
         let away = [laptop, rect(-725, -864, 811, 0), rect(811, -864, 2347, 0)];
 
         // two notes on the monitor at the left, frame against frame
-        app.new_note(Some(NOTE));
+        app.new_one(NOTES, Some(NOTE));
         let (first, second) = (NOTE, FIXED.len());
         app.set_enabled(first, true);
         let skin = Kind::Notes.skin();
@@ -2510,6 +2671,10 @@ mod tests {
         for (left, right) in [(NOTE, WEATHER), (RAIN, NOTE), (DISK, RAIN), (BATTERY, DISK), (WORLD, DATETIME)] {
             assert_eq!((at(right).x0 - at(left).x1, at(right).y0), (gap, at(left).y0), "slot {left} to slot {right}");
         }
+        // the countdown under the world clock, against the first column, and
+        // clear of the foot
+        assert_eq!((at(COUNTDOWN).y0 - at(WORLD).y1, at(COUNTDOWN).x1), (gap, at(WORLD).x1));
+        assert!(at(WEATHER).y0 - at(COUNTDOWN).y1 >= gap);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2518,8 +2683,8 @@ mod tests {
         let (mut app, dir) = app("spacing");
         // three notes running: two down the right-hand side of the main
         // screen, on the grid there is, and one on its own
-        app.new_note(Some(NOTE));
-        app.new_note(Some(NOTE));
+        app.new_one(NOTES, Some(NOTE));
+        app.new_one(NOTES, Some(NOTE));
         let (top, under, alone) = (NOTE, FIXED.len(), FIXED.len() + 1);
         app.set_enabled(top, true);
         let work = work_area(&RECT { left: 0, top: 0, right: 1, bottom: 1 });
@@ -2607,7 +2772,7 @@ mod tests {
         let w = size.x1 - size.x0;
         // two notes frame against frame: the first's margin lies over the
         // second's frame
-        app.new_note(Some(NOTE));
+        app.new_one(NOTES, Some(NOTE));
         let second = FIXED.len();
         show(&mut app, NOTE, 100, 100);
         show(&mut app, second, 100 + w, 100);

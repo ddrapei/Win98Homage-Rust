@@ -35,7 +35,7 @@ use crate::canvas::{Canvas, Rect};
 use crate::clock;
 use crate::editor::{self, Doc, Row, TAB};
 use crate::keys::Key;
-use crate::settings::{Settings, write_whole};
+use crate::settings::{self, Settings, write_whole};
 use crate::skin::{self, Hooks, Meter, Skin};
 use crate::text::{Spec, Text};
 use crate::widget::{Ctx, Dirty, MenuItem, Outcome, Pressed, Request, Widget};
@@ -165,11 +165,7 @@ fn bak_of(path: &Path) -> PathBuf {
 /// Which note a section is: 1 for `[Notes]`, n for `[Notes<n>]`, and None for
 /// a section that is not a note's.
 fn number(section: &str) -> Option<u32> {
-    let rest = section.get(FIRST.len()..).filter(|_| section[..FIRST.len()].eq_ignore_ascii_case(FIRST))?;
-    if rest.is_empty() {
-        return Some(1);
-    }
-    rest.parse().ok().filter(|n: &u32| *n >= 2 && n.to_string() == rest)
+    settings::numbered(section, FIRST)
 }
 
 /// The file a note is kept in unless settings.ini names another: the first

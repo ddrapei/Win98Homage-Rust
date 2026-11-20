@@ -1,5 +1,6 @@
 //! A city field: one line of text in a sunken box, typed on where it stands.
-//! The weather has one and the world clock has three.
+//! The weather has one and the world clock has three; a countdown has one
+//! too, for what its day is.
 //!
 //! There is one picture of it -- a name, centred in its box -- and while it
 //! has the keyboard a selection and a caret are drawn on top.  Nothing is

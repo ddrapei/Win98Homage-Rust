@@ -29,6 +29,18 @@ pub fn settings_dir() -> PathBuf {
     }
 }
 
+/// Which of a widget that comes in numbers a section is -- the notes, the
+/// countdowns: 1 for `[<first>]`, n for `[<first><n>]` from 2 up, and None for
+/// a section that is not one of them, or whose number is not written plainly
+/// (`Notes1`, `Notes02`).
+pub fn numbered(section: &str, first: &str) -> Option<u32> {
+    let rest = section.get(first.len()..).filter(|_| section[..first.len()].eq_ignore_ascii_case(first))?;
+    if rest.is_empty() {
+        return Some(1);
+    }
+    rest.parse().ok().filter(|n: &u32| *n >= 2 && n.to_string() == rest)
+}
+
 /// Things the program keeps for itself and the user never edits.
 pub fn data_dir() -> PathBuf {
     match std::env::var_os("LOCALAPPDATA") {
@@ -221,8 +233,8 @@ fn default_file() -> String {
 ; Win98 Widgets -- settings.
 ; Edit while the program is not running, or use \"Reload settings\" in the tray
 ; menu afterwards.  Positions, the paper colour, the 12/24-hour choice, the
-; weather's city and the widgets' colour are written back here by the program;
-; everything else is yours.
+; weather's city, the countdowns' days and names and the widgets' colour are
+; written back here by the program; everything else is yours.
 
 [General]
 ; desktop = behind every window, on the desktop itself
@@ -297,6 +309,15 @@ Zone3={zone3}
 
 [Battery]
 Enabled=1
+
+[Countdown]
+; The first countdown.  Every other one (right-click, Widgets, Countdown +) has a
+; section like this of its own -- [Countdown2], [Countdown3], ...
+Enabled=1
+; the day counted to, as 2026-12-24 (a click on the calendar writes it), and
+; what it is (typed into the field under the count)
+Date=
+Name=
 ",
         week_start = dt.var("WeekStart"),
         use24 = dt.var("Use24Hour"),

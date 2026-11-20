@@ -1,9 +1,12 @@
 //! The Date/Time Properties widget: clock, browsable calendar, time-zone page
 //! and the hourly usage graph.  The variables the skin leaves to the program
-//! are kept as plain fields the skin's meters are answered from.
+//! are kept as plain fields the skin's meters are answered from.  The
+//! calendar -- the month on show, its grid, the month list -- is `calendar`,
+//! which the Countdown has too; the selected day is this widget's own.
 
 use std::path::PathBuf;
 
+use crate::calendar::{Answer, Calendar};
 use crate::canvas::{Canvas, Rect};
 use crate::clock::{self, Tm, MONTHS, WEEKDAYS};
 use crate::skin::{self, index_of, Hooks, Meter, Skin};
@@ -43,11 +46,6 @@ const FIGURE_EVERY: [i32; 4] = [1, 2, 3, 6];
 /// much of the field is kept clear at each end for half of one, "12A".
 const RULE_INSET: i32 = 7;
 const MAX_HOURS: usize = 24;
-
-const DAY_NAMES: [[&str; 7]; 2] = [
-    ["S", "M", "T", "W", "T", "F", "S"],        // WeekStart=0, Sunday first
-    ["M", "T", "W", "Th", "F", "Sa", "Su"],     // WeekStart=1, Monday first
-];
 
 /// One 3D block of the graph: left edge, where the side face begins, height.
 #[derive(Clone, Copy, Default)]
@@ -139,7 +137,7 @@ impl Hours {
 }
 
 pub struct DateTime {
-    week_start: i32,
+    calendar: Calendar,
     use24: bool,
     hide_seconds: bool,
     hide_ring: bool,
@@ -159,15 +157,9 @@ pub struct DateTime {
     light: u32,
 
     page: i32,
-    list_open: bool,
-    /// Month dropdown: the row under the pointer, 0 = none.
-    hovered: i32,
-    /// None: follow the real date.
-    view: Option<(i32, i32)>,
+    /// None: today.
     selected: Option<(i32, i32, i32)>,
 
-    month_name: &'static str,
-    year_text: String,
     time_text: String,
     today: String,
     zone_name: String,
@@ -176,9 +168,7 @@ pub struct DateTime {
     zone_dst: &'static str,
     legend: String,
     totals: String,
-    day_names: [&'static str; 7],
-    /// The six weeks of the grid: day numbers, 0 for a blank cell.
-    days: [u8; 42],
+    /// The cells of the grid whose day has a usage record.
     recorded: [bool; 42],
     sel_col: i32,
     sel_row: i32,
@@ -216,7 +206,7 @@ impl DateTime {
         };
         let [ink, use_ink, use_top, use_side, shadow, light] = colours();
         DateTime {
-            week_start: if var("WeekStart") == 0 { 0 } else { 1 },
+            calendar: Calendar::new(SKIN, var("WeekStart")),
             use24: var("Use24Hour") != 0,
             hide_seconds: var("HideSeconds") != 0,
             hide_ring: var("HideRing") != 0,
@@ -231,12 +221,7 @@ impl DateTime {
             shadow,
             light,
             page: 0,
-            list_open: false,
-            hovered: 0,
-            view: None,
             selected: None,
-            month_name: "",
-            year_text: String::new(),
             time_text: String::new(),
             today: String::new(),
             zone_name: String::new(),
@@ -245,8 +230,6 @@ impl DateTime {
             zone_dst: "",
             legend: String::from("Computer use"),
             totals: String::new(),
-            day_names: DAY_NAMES[1],
-            days: [0; 42],
             recorded: [false; 42],
             sel_col: 0,
             sel_row: 0,
@@ -273,11 +256,6 @@ impl DateTime {
     }
 
     // ---- helpers ---------------------------------------------------------
-
-    /// The column of the 1st: 0 is whichever day WeekStart puts first.
-    fn first_column(&self, year: i32, month: i32) -> i32 {
-        (clock::weekday(year, month, 1) - self.week_start).rem_euclid(7)
-    }
 
     /// What repainting the clock every second has to cover: the hands and
     /// their shadows, and the time field under them.
@@ -453,42 +431,32 @@ impl DateTime {
     // ---- rendering: calendar grid -------------------------------------------
 
     fn render_calendar(&mut self, t: &Tm) {
-        let (year, month) = self.view.unwrap_or((t.year, t.month));
-        self.day_names = DAY_NAMES[self.week_start as usize];
-        let column = self.first_column(year, month);
-        let length = clock::days_in_month(year, month);
-
         // The highlight marks the selected date, which is today unless a
         // click moved it.
-        let (sy, sm, sd) = self.selected.unwrap_or((t.year, t.month, t.day));
-        let show_selection = year == sy && month == sm;
-
+        let selected = self.selected.unwrap_or((t.year, t.month, t.day));
+        let cell = self.calendar.cell_of(selected, t);
+        // The selected day is left blank in the grid: MeterSelText draws it
+        // in light ink on top of the highlight block.
+        self.calendar.fill(t, cell.map(|_| selected.2));
         for i in 0..42 {
-            let day = i as i32 - column + 1;
-            let inside = day >= 1 && day <= length;
-            self.recorded[i] = inside && self.usage.has(&clock::key_of(year, month, day));
-            // The selected day is left blank here: MeterSelText draws it in
-            // light ink on top of the highlight block.
-            self.days[i] = if inside && !(show_selection && day == sd) { day as u8 } else { 0 };
+            let date = self.calendar.date_at(i as i32, t);
+            self.recorded[i] = date.is_some_and(|(y, m, d)| self.usage.has(&clock::key_of(y, m, d)));
         }
 
-        self.sel_hidden = !show_selection;
-        if show_selection {
-            let index = sd - 1 + column;
-            self.sel_col = index % 7;
-            self.sel_row = index / 7;
-            self.today = sd.to_string();
-        } else {
-            self.today.clear();
+        self.sel_hidden = cell.is_none();
+        match cell {
+            Some((col, row)) => {
+                (self.sel_col, self.sel_row) = (col, row);
+                self.today = selected.2.to_string();
+            }
+            None => self.today.clear(),
         }
-        self.month_name = MONTHS[month as usize - 1];
-        self.year_text = year.to_string();
     }
 
     /// Everything the grid depends on.
     fn calendar_key(&self, t: &Tm) -> (Tm, i32, Option<(i32, i32)>, Option<(i32, i32, i32)>, u32) {
         let date = Tm { hour: 0, min: 0, sec: 0, ..*t };
-        (date, self.week_start, self.view, self.selected, self.usage.rev)
+        (date, self.calendar.week_start, self.calendar.view, self.selected, self.usage.rev)
     }
 
     /// Redraw everything that depends on the date, the selection, or the log.
@@ -502,36 +470,12 @@ impl DateTime {
 
     // ---- commands -----------------------------------------------------------
 
-    /// Move the browsed month by n months.  Landing back on the real month
-    /// re-latches to it, so the grid keeps following the date.
-    fn shift(&mut self, n: i32, now: i64) -> Outcome {
-        let t = clock::local(now);
-        let (year, month) = self.view.unwrap_or((t.year, t.month));
-        let months = year * 12 + (month - 1) + n;
-        let (year, month) = (months.div_euclid(12), months.rem_euclid(12) + 1);
-        self.view = (year != t.year || month != t.month).then_some((year, month));
-        self.refresh(now)
-    }
-
-    fn set_month(&mut self, m: i32, now: i64) -> Outcome {
-        self.list_open = false;
-        self.hovered = 0;
-        let t = clock::local(now);
-        let year = self.view.map_or(t.year, |v| v.0);
-        self.view = (year != t.year || m != t.month).then_some((year, m));
-        self.refresh(now)
-    }
-
     /// Calendar cell i (0..41) clicked: select that date, so the usage panel
     /// describes it.  Clicking the cell for today goes back to following today.
     fn select(&mut self, i: i32, now: i64) -> Outcome {
         let t = clock::local(now);
-        let (year, month) = self.view.unwrap_or((t.year, t.month));
-        let day = i - self.first_column(year, month) + 1;
-        if day < 1 || day > clock::days_in_month(year, month) {
-            return Outcome::none();
-        }
-        self.selected = ((year, month, day) != (t.year, t.month, t.day)).then_some((year, month, day));
+        let Some(date) = self.calendar.date_at(i, &t) else { return Outcome::none() };
+        self.selected = (date != (t.year, t.month, t.day)).then_some(date);
         self.refresh(now)
     }
 
@@ -548,8 +492,7 @@ impl DateTime {
 
     fn set_page(&mut self, n: i32, now: i64) -> Outcome {
         self.page = if n == 1 { 1 } else { 0 };
-        self.list_open = false;
-        self.hovered = 0;
+        self.calendar.close_list();
         let t = clock::local(now);
         self.render_clock(&t);
         self.render_utc(now);
@@ -565,10 +508,6 @@ impl DateTime {
         self.render_clock(&clock::local(ctx.now));
         ctx.settings.set_int(SECTION, "Use24Hour", self.use24 as i32);
         Outcome::dirty(Dirty::Part(self.clock_rect().union(&self.graph_rect())))
-    }
-
-    fn list_rect(&self) -> Rect {
-        SKIN.meter("MeterMonthListBg").map_or(Rect::EMPTY, |m| Rect::new(m.b[0], m.b[1], m.b[2], m.b[3]))
     }
 }
 
@@ -603,10 +542,11 @@ fn duration(seconds: i64) -> String {
 
 impl Hooks for DateTime {
     fn num(&self, var: &str) -> f64 {
+        if let Some(v) = self.calendar.num(var) {
+            return v as f64;
+        }
         (match var {
             "Page" => self.page,
-            "MLHide" => !self.list_open as i32,
-            "MLMonth" => self.hovered,
             "SelHide" => self.sel_hidden as i32,
             "SelCol" => self.sel_col,
             "SelRow" => self.sel_row,
@@ -620,19 +560,10 @@ impl Hooks for DateTime {
     }
 
     fn text(&self, var: &str, out: &mut String) {
-        if let Some(i) = index_of(var, "D") {
-            if let Some(&day) = self.days.get(i).filter(|&&d| d != 0) {
-                out.push_str(&day.to_string());
-            }
-            return;
-        }
-        if let Some(i) = index_of(var, "W") {
-            out.push_str(self.day_names.get(i).copied().unwrap_or(""));
+        if self.calendar.text(var, out) {
             return;
         }
         out.push_str(match var {
-            "MonthName" => self.month_name,
-            "YearText" => &self.year_text,
             "TimeText" => &self.time_text,
             "Today" => &self.today,
             "TZName" => &self.zone_name,
@@ -757,28 +688,17 @@ impl Widget for DateTime {
 
     fn command(&mut self, cmd: &str, arg: i32, _x: i32, _y: i32, ctx: &mut Ctx) -> Outcome {
         let now = ctx.now;
+        match self.calendar.command(cmd, arg, &clock::local(now)) {
+            Some(Answer::Moved) => return self.refresh(now),
+            Some(Answer::Repaint(dirty)) => return Outcome::dirty(dirty),
+            None => {}
+        }
         match cmd {
-            "Shift" => self.shift(arg, now),
             "Home" => {
-                self.view = None;
+                self.calendar.view = None;
                 self.selected = None;
                 self.refresh(now)
             }
-            "HoverMonth" => {
-                self.hovered = arg;
-                Outcome::dirty(Dirty::Part(self.list_rect()))
-            }
-            // A leave is only allowed to clear the bar while it still owns it.
-            "UnhoverMonth" if self.hovered == arg => {
-                self.hovered = 0;
-                Outcome::dirty(Dirty::Part(self.list_rect()))
-            }
-            "ToggleMonthList" => {
-                self.list_open = !self.list_open;
-                self.hovered = 0;
-                Outcome::all()
-            }
-            "SetMonth" => self.set_month(arg, now),
             "Select" => self.select(arg, now),
             "SetPage" => self.set_page(arg, now),
             "SetHourFormat" => self.set_hour_format(arg, ctx),
@@ -797,7 +717,7 @@ impl Widget for DateTime {
 
     fn menu(&self, items: &mut Vec<MenuItem>) {
         items.push(MenuItem { id: 1, label: "24-hour clock", checked: self.use24 });
-        items.push(MenuItem { id: 2, label: "Week starts on Monday", checked: self.week_start == 1 });
+        items.push(MenuItem { id: 2, label: "Week starts on Monday", checked: self.calendar.week_start == 1 });
         items.push(MenuItem { id: 3, label: "Second hand", checked: !self.hide_seconds });
         items.push(MenuItem { id: 4, label: "Clock ring", checked: !self.hide_ring });
     }
@@ -808,8 +728,8 @@ impl Widget for DateTime {
                 self.set_hour_format(if self.use24 { 12 } else { 24 }, ctx);
             }
             2 => {
-                self.week_start = 1 - self.week_start;
-                ctx.settings.set_int(SECTION, "WeekStart", self.week_start);
+                self.calendar.week_start = 1 - self.calendar.week_start;
+                ctx.settings.set_int(SECTION, "WeekStart", self.calendar.week_start);
             }
             3 => {
                 self.hide_seconds = !self.hide_seconds;

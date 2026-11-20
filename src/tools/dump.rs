@@ -48,12 +48,24 @@
 //!                                      clock, whose three cities and zones
 //!                                      are set.World.City1, set.World.Zone1
 //!                                      and so on.
+//!   set.Countdown.Date=2026-11-27      the countdown's day and name, as
+//!   set.Countdown.Name=Birthday        settings.ini has them; drawn to
+//!                                      countdown.bmp -- and any other
+//!                                      countdown the state sets something
+//!                                      for (set.Countdown2.Date=...) to
+//!                                      countdown2.bmp, and so on
+//!   do.countdown=Shift 1;Select 12     its commands (do.countdown2, ...)
+//!   type.countdown=press 100 294;type Party
+//!                                      and its name field typed on
+//!                                      (type.countdown2, ...); nothing is
+//!                                      written to settings.ini by these.
 
 use std::path::{Path, PathBuf};
 
 use crate::battery::Battery;
 use crate::canvas::{self, Canvas, Rect};
 use crate::clock;
+use crate::countdown::{self, Countdown};
 use crate::datetime::DateTime;
 use crate::disk::Disk;
 use crate::keys::Key;
@@ -283,6 +295,15 @@ pub fn run(args: &[String]) -> i32 {
         w.set_fixed(reading);
         render(&w, &mut text, &dir.join("battery.bmp"));
     }
+    // the first countdown, then every other the state sets anything for
+    let sections: Vec<String> = core::iter::once(String::from(countdown::FIRST)).chain(countdown::others(ctx.settings)).collect();
+    for section in sections {
+        let tag = section.to_ascii_lowercase();
+        let mut w = Countdown::new(&ctx, &section);
+        perform(&mut w, get(&format!("do.{tag}")).unwrap_or(""), &mut ctx);
+        type_on(&mut w, get(&format!("type.{tag}")).unwrap_or(""));
+        render(&w, &mut text, &dir.join(format!("{tag}.bmp")));
+    }
     0
 }
 
@@ -312,6 +333,12 @@ mod tests {
         world.set_fixed();
         let mut battery = Battery::new(ctx);
         battery.set_fixed(Some((35, true, true, None)));
+        // a day in this month, so that the ring is drawn, and something
+        // selected in the name field, for its colours too
+        ctx.settings.set(countdown::FIRST, "Date", "2026-11-27");
+        ctx.settings.set(countdown::FIRST, "Name", "Birthday");
+        let mut countdown = Countdown::new(ctx, countdown::FIRST);
+        type_on(&mut countdown, "double 115 294");
         vec![
             Box::new(datetime),
             Box::new(resources),
@@ -321,6 +348,7 @@ mod tests {
             Box::new(disk),
             Box::new(world),
             Box::new(battery),
+            Box::new(countdown),
         ]
     }
 
