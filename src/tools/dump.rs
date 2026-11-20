@@ -40,7 +40,7 @@
 //!                                      point of the window, type TEXT, and
 //!                                      key [Shift+][Ctrl+]NAME.  Nothing is
 //!                                      written to the note file by these.
-//!   type.weather=press 107 167;type Lviv
+//!   type.weather=press 87 167;type Lviv
 //!                                      the same for the weather's city field;
 //!                                      nothing is looked up.
 //!   type.world=press 202 135;type Kyiv
@@ -303,7 +303,7 @@ mod tests {
         let mut weather = Weather::new(ctx);
         weather.set_fixed(9.3, 3, false, 10.1, 4.9, "Lviv");
         // something selected in the city field, for its colours too
-        type_on(&mut weather, "double 107 167");
+        type_on(&mut weather, "double 87 167");
         let mut rain = Rain::new(ctx);
         rain.set_fixed(2.5);
         let mut disk = Disk::new(ctx);
