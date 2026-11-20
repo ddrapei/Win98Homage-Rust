@@ -553,7 +553,7 @@ fn dyn_world(n: &str) -> bool {
 }
 
 fn dyn_battery(n: &str) -> bool {
-    matches!(n, "BattPct" | "BattSource" | "BattStatus" | "Charging")
+    matches!(n, "BattPct" | "BattTime" | "Charging" | "OnBattery")
 }
 
 const SKINS: [SkinDef; 8] = [

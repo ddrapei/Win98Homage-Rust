@@ -108,8 +108,8 @@ choice is kept in `settings.ini` as `Tint=` under
 calendar's heading and the selected day, the clocks' hands and dots, the usage bars, the
 used part of the disk pie, the rain. The greys and whites of the windows themselves —
 faces, bevels, fields — and the text stay exactly as they are, and so do the note's
-papers with the red margin printed on them, the weather's icons, and the battery's rings,
-red to green, which have to mean the same whatever the colour. An accent takes the
+papers with the red margin printed on them, the weather's icons, and the battery's
+sections, red to green, which have to mean the same whatever the colour. An accent takes the
 colour's hue and how colourful it is, but keeps its own lightness, so the white text on
 a title bar stays as readable as it was; a very pale or very dark colour therefore comes
 out in between (navy gives a title bar that runs from navy to blue). The swatches show
@@ -197,18 +197,19 @@ figures follow the Date/Time widget's 12- or 24-hour choice.
 **Battery** is the smallest widget, 120 px wide and as tall as Weather and Disk Space. It
 shows how much charge is left as a battery cell standing on end, seen from a little above:
 a flat metal top with the terminal standing up from it, a metal band round the top of the
-side and another round its foot, and between them ten rings that light up from the bottom,
-red at the foot through orange and yellow to green at the top, so the less is left the
-redder it is.
+side and another round its foot, and between them five sections, a fifth of the charge
+each, that light up from the bottom, red at the foot through orange and yellow to green at
+the top, so the less is left the redder it is.
 It is drawn the way pixel art draws a cylinder, with no outline: shaded in stripes down its
-length with the shine of a reflection, and every edge across it curving round. A groove
-parts each two rings. The rings not lit are dark grey, and any charge at all lights at
-least one. A bolt on the battery means it is charging. Under the battery are
-the percentage, where the power is coming from (*On battery* or *Plugged in*), and what the
-battery is doing: how long what is left will last ("2 hr 15 min left", or *Estimating...*
-until Windows has worked it out), *Charging*, *Fully charged* or *Not charging*. A machine
-with no battery shows a dark one and says *No battery*. The battery's shape, colours and
-shading are the `Batt*` and `Cell*` variables in `skins/Win98Battery.ini`.
+length with the shine of a reflection, and every edge across it curving round. The
+sections stand apart like discs on a spindle, the battery's narrower metal core showing in
+the space between them. The sections not lit are dark grey, and any charge at all lights
+at least one. A bolt on the battery means it is charging. Under the battery are the
+percentage and a *Status* row: a plug while it is plugged in, with a small bolt beside it
+while it charges, or on battery the time left ("2h 15m", or "..." until Windows has worked
+it out). A machine with no battery shows a dark one, "--" and the plug, since it runs on
+the mains. The battery's shape, colours and shading are the `Batt*` and `Cell*` variables
+in `skins/Win98Battery.ini`.
 
 **Position** (right-click → Position): *On desktop* (default) keeps the widgets behind
 every window; *Normal*; *Always on top*.

@@ -1,24 +1,26 @@
 //! Battery: how much charge is left, as a battery cell standing on end, seen
-//! from a little above, its side rings that light up from the bottom -- red
-//! at the foot, through orange and yellow, to green at the top -- with the
-//! figure under it, where the power is coming from, and what the battery is
-//! doing.
+//! from a little above, its side sections (rings, in the code) that light up
+//! from the bottom -- red at the foot, through orange and yellow, to green at
+//! the top -- with the figure under it, where the power is coming from, and
+//! what the battery is doing.
 //!
 //! Windows is asked once a second.  That is one call, which answers from what
 //! the power manager already knows, and nothing is repainted unless something
-//! shown has changed.  The rings move in whole tenths and the figure in whole
-//! percents, so a battery that is running down repaints a few times an hour.
+//! shown has changed.  The sections move in whole steps and the figure in
+//! whole percents, so a battery that is running down repaints a few times an
+//! hour.
 //!
 //! The battery is drawn as pixel art draws a cylinder, like the disk pie: a
 //! pixel at a time, each one part of the picture or none of it.  Its top is
-//! an ellipse, a metal cap with the terminal standing in it; its side is
-//! shaded in stripes down its length, lit from the left, and every edge
-//! across it follows the ellipse's front, so the rings curve round it.
-//! Nothing is outlined, and nothing is drawn outside the battery.  A groove,
-//! a darker shade of the ring under it, parts each two rings.  The rings not
+//! an ellipse of flat metal with the terminal standing up from it; down its
+//! side are metal bands at the top and the foot and the sections between,
+//! shaded in stripes down its length, lit from the left; and every edge
+//! across it follows the ellipse's front, so they curve round it.  Nothing is
+//! outlined, and nothing is drawn outside the battery.  The sections stand
+//! apart, with the battery's narrower core showing between them.  Those not
 //! lit are dark grey, like the segments of a bar of lights that are off.
 //! The picture is worked out from the skin's figures and colours whenever
-//! the rings that are lit change, and kept.
+//! the sections that are lit change, and kept.
 
 use crate::canvas::Canvas;
 use crate::skin::{self, Hooks, Meter, Skin};
@@ -100,21 +102,13 @@ fn reported(reading: Option<(u8, bool, bool, Option<u32>)>) -> sys::SYSTEM_POWER
     }
 }
 
-/// The middle line: where the power is coming from.  A machine with no
-/// battery is running on the mains.
-fn source(power: &Power) -> &'static str {
-    if power.state == State::OnBattery { "On battery" } else { "Plugged in" }
-}
-
-/// The last line: what the battery is doing.  There is always something to
-/// say, so the three lines stay three and stay centred under the battery.
-fn status(power: &Power) -> String {
+/// The Status row's words: on battery, the time left, or "..." until Windows
+/// has worked it out.  Plugged in -- and a machine with no battery is on the
+/// mains -- the row shows the plug instead, and no words.
+fn status_time(power: &Power) -> String {
     match power.state {
-        State::NoBattery => String::from("No battery"),
-        State::Charging => String::from("Charging"),
-        State::PluggedIn if power.percent == Some(100) => String::from("Fully charged"),
-        State::PluggedIn => String::from("Not charging"),
-        State::OnBattery => power.left.map_or_else(|| String::from("Estimating..."), time_left),
+        State::OnBattery => power.left.map_or_else(|| String::from("..."), time_left),
+        _ => String::new(),
     }
 }
 
@@ -128,13 +122,13 @@ fn lit(percent: Option<u8>, rings: i32) -> i32 {
     }
 }
 
-/// "2 hr 15 min left", to the nearest minute.
+/// "2h 15m", to the nearest minute: short, to fit the row beside its label.
 fn time_left(seconds: u32) -> String {
     let minutes = (seconds.saturating_add(30) / 60).max(1);
     match (minutes / 60, minutes % 60) {
-        (0, m) => format!("{m} min left"),
-        (h, 0) => format!("{h} hr left"),
-        (h, m) => format!("{h} hr {m} min left"),
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h {m}m"),
     }
 }
 
@@ -239,9 +233,12 @@ enum Part {
     TermShadow,
     /// A row of the metal band round the top of the side or round its foot.
     Band(Lip),
-    /// The ring `i` from the bottom, and the groove on top of it.
+    /// The section `i` from the bottom: its top row, catching the light, and
+    /// the rest of it.
+    RingTop(i32),
     Ring(i32),
-    Groove(i32),
+    /// The battery's core, in the space between two sections.
+    Core,
 }
 
 /// All that is drawn, as it is drawn: a reading that changes none of it
@@ -249,20 +246,23 @@ enum Part {
 #[derive(Default, PartialEq, Debug)]
 struct Shown {
     percent: String,
-    source: &'static str,
-    status: String,
-    /// Rings lit, of `rings`.
-    lit: i32,
+    /// The Status row: the plug, unless it is on battery, when it is the
+    /// time left; and the bolt, on the battery and beside the plug, while
+    /// it charges.
+    on_battery: bool,
+    time: String,
     charging: bool,
+    /// Sections lit, of `rings`.
+    lit: i32,
 }
 
 pub struct Battery {
     shown: Shown,
     /// The battery as the skin lays it out: its size, how far the top's
     /// ellipse reaches from its middle to its front; the terminal's width,
-    /// its own ellipse's reach and its height; the rings down the side --
-    /// how many, how tall, and the gap between two -- and the band at the
-    /// foot.
+    /// its own ellipse's reach and its height; the sections down the side --
+    /// how many, how tall, and the space before each -- the band at the
+    /// foot, and how far in from the edge the core is in the spaces.
     w: i32,
     h: i32,
     ry: i32,
@@ -273,14 +273,16 @@ pub struct Battery {
     ring_h: i32,
     gap: i32,
     band_foot: i32,
-    /// The colours: each ring's, from the bottom one up, lit; a ring not lit;
-    /// the metal, and its glint; and how far towards black a groove is from
-    /// the ring under it.
+    core_inset: i32,
+    /// The colours: each section's, from the bottom one up, lit; a section
+    /// not lit; the metal, and its glint; how far towards black the core is
+    /// from the metal, and towards white a section's top row from the rest.
     lit_rings: Vec<Shades>,
     off: Shades,
     metal: Shades,
     glint: u32,
-    groove: i32,
+    core_shade: i32,
+    bevel: i32,
     /// The picture, a px at a time, row after row: a colour where the
     /// battery is, and 0 where it is not.
     picture: Vec<u32>,
@@ -300,15 +302,17 @@ impl Battery {
             term_w: SKIN.int("TermW", 12).clamp(2, w),
             term_ry: SKIN.int("TermRY", 3).max(1),
             term_h: SKIN.int("TermH", 4).max(0),
-            rings: SKIN.int("Cells", 10).max(1),
-            ring_h: SKIN.int("CellH", 5).max(1),
-            gap: SKIN.int("CellGap", 1).max(0),
+            rings: SKIN.int("Cells", 5).max(1),
+            ring_h: SKIN.int("CellH", 8).max(1),
+            gap: SKIN.int("CellGap", 3).max(0),
             band_foot: SKIN.int("BandFoot", 6).max(0),
+            core_inset: SKIN.int("CoreInset", 3).clamp(0, w / 2 - 1),
             lit_rings: Vec::new(),
             off: Shades::default(),
             metal: Shades::default(),
             glint: 0,
-            groove: 0,
+            core_shade: 0,
+            bevel: 0,
             picture: Vec::new(),
             frozen: false,
         };
@@ -327,10 +331,10 @@ impl Battery {
     fn show(&mut self, power: Power) -> bool {
         let shown = Shown {
             percent: power.percent.map_or_else(|| String::from("--"), |p| format!("{p}%")),
-            source: source(&power),
-            status: status(&power),
-            lit: lit(power.percent, self.rings),
+            on_battery: power.state == State::OnBattery,
+            time: status_time(&power),
             charging: power.state == State::Charging,
+            lit: lit(power.percent, self.rings),
         };
         if shown == self.shown {
             return false;
@@ -356,10 +360,10 @@ impl Battery {
     }
 
     /// The metal bands round the top of the side and round its foot: the
-    /// foot's as the skin has it, the top's what the rings and the foot
-    /// leave.
+    /// foot's as the skin has it, the top's what the sections, the space
+    /// before each and the space after the last, and the foot leave.
     fn bands(&self) -> (i32, i32) {
-        let rings = self.rings * self.ring_h + (self.rings - 1) * self.gap;
+        let rings = self.rings * (self.gap + self.ring_h) + self.gap;
         let room = (self.side() - rings).max(0);
         let foot = self.band_foot.min(room);
         (room - foot, foot)
@@ -401,14 +405,18 @@ impl Battery {
             let k = z - (side - foot);
             return Part::Band(if k < 1.0 { Lip::Light } else if k >= foot - 1.0 { Lip::Dark } else { Lip::None });
         }
-        let period = (self.ring_h + self.gap) as f32;
+        // a space and a section, a space and a section, ... and a space
+        let (gap, period) = (self.gap as f32, (self.gap + self.ring_h) as f32);
         let k = z - top;
         let from_top = (k / period) as i32;
-        if from_top >= self.rings {
-            return Part::Out;
+        let into = k - from_top as f32 * period;
+        if into < gap || from_top >= self.rings {
+            // the core, narrower than the battery: past it is the face
+            let core = rx - self.core_inset as f32;
+            return if dx.abs() < core { Part::Core } else { Part::Out };
         }
-        // past a ring is the groove on top of the one under it
-        if k - from_top as f32 * period < self.ring_h as f32 { Part::Ring(self.rings - 1 - from_top) } else { Part::Groove(self.rings - 2 - from_top) }
+        let i = self.rings - 1 - from_top;
+        if into < gap + 1.0 { Part::RingTop(i) } else { Part::Ring(i) }
     }
 
     /// The terminal, by how far a px is from the middle of the top: a little
@@ -465,8 +473,14 @@ impl Battery {
                     Lip::Dark => mix(metal, BLACK, LIP_DARK),
                 }
             }
+            Part::RingTop(i) => mix(self.ring(i).at(stripe(u)), WHITE, self.bevel),
             Part::Ring(i) => self.ring(i).at(stripe(u)),
-            Part::Groove(i) => mix(self.ring(i).at(stripe(u)), BLACK, self.groove),
+            // striped across the core, which is narrower than the battery
+            Part::Core => {
+                let half = self.w as f32 / 2.0;
+                let across = u * half / (half - self.core_inset as f32);
+                mix(self.metal.at(stripe(across)), BLACK, self.core_shade)
+            }
         }
     }
 
@@ -507,6 +521,7 @@ impl Hooks for Battery {
     fn num(&self, var: &str) -> f64 {
         match var {
             "Charging" => f64::from(u8::from(self.shown.charging)),
+            "OnBattery" => f64::from(u8::from(self.shown.on_battery)),
             _ => 0.0,
         }
     }
@@ -514,8 +529,7 @@ impl Hooks for Battery {
     fn text(&self, var: &str, out: &mut String) {
         out.push_str(match var {
             "BattPct" => &self.shown.percent,
-            "BattSource" => self.shown.source,
-            "BattStatus" => &self.shown.status,
+            "BattTime" => &self.shown.time,
             _ => "",
         });
     }
@@ -534,12 +548,12 @@ impl Widget for Battery {
 
     fn about(&self) -> &'static str {
         "Win98 Battery\n\n\
-         How much charge the battery has left, where the power is coming \
-         from, and what the battery is doing.\n\n\
-         The rings run from red at the foot of the battery, through yellow, \
-         to green at the top: the less is left, the redder it is.  A bolt \
-         on the battery says it is charging.  The time left is Windows' own \
-         estimate, shown on battery once it has made one."
+         How much charge the battery has left.  The sections run from red at \
+         the foot of the battery, through yellow, to green at the top: the \
+         less is left, the redder it is.\n\n\
+         Status shows a plug while it is plugged in, with a bolt beside it \
+         while it charges -- the bolt is on the battery too.  On battery it \
+         shows the time left, Windows' own estimate, once it has made one."
     }
 
     fn tick(&mut self, _ctx: &mut Ctx) -> Dirty {
@@ -590,7 +604,8 @@ impl Widget for Battery {
             rim: mix(shadow, light, 45),
         };
         self.glint = mix(hilite, WHITE, 60);
-        self.groove = pct("CellGroove", 55);
+        self.core_shade = pct("CoreShade", 25);
+        self.bevel = pct("CellBevel", 30);
         self.paint();
     }
 }
@@ -632,37 +647,47 @@ mod tests {
     }
 
     #[test]
-    fn there_is_always_a_source_and_a_status_to_show() {
-        let lines = |reading| {
-            let p = power(&reported(reading));
-            (source(&p), status(&p))
+    fn the_status_row_has_the_plug_or_the_time_left() {
+        let mut settings = Settings::in_memory();
+        let mut b = battery(&mut settings);
+        // (on battery, so no plug; the words; the bolt)
+        let mut row = |reading| {
+            b.set_fixed(reading);
+            (b.num("OnBattery"), b.shown.time.clone(), b.num("Charging"))
         };
-        assert_eq!(lines(Some((76, false, false, Some(8100)))), ("On battery", "2 hr 15 min left".into()));
-        assert_eq!(lines(Some((76, false, false, None))), ("On battery", "Estimating...".into()));
-        assert_eq!(lines(Some((35, true, true, None))), ("Plugged in", "Charging".into()));
-        assert_eq!(lines(Some((100, true, false, None))), ("Plugged in", "Fully charged".into()));
+        // on battery: the time left, or "..." until Windows has worked it out
+        assert_eq!(row(Some((76, false, false, Some(8100)))), (1.0, "2h 15m".into(), 0.0));
+        assert_eq!(row(Some((76, false, false, None))), (1.0, "...".into(), 0.0));
+        // plugged in: the plug, with the bolt while it charges, and no words
+        assert_eq!(row(Some((35, true, true, None))), (0.0, String::new(), 1.0));
+        assert_eq!(row(Some((100, true, false, None))), (0.0, String::new(), 0.0));
         // held short of full, as a laptop that looks after its battery does
-        assert_eq!(lines(Some((80, true, false, None))), ("Plugged in", "Not charging".into()));
-        assert_eq!(lines(None), ("Plugged in", "No battery".into()));
+        assert_eq!(row(Some((80, true, false, None))), (0.0, String::new(), 0.0));
+        // no battery: on the mains, so the plug
+        assert_eq!(row(None), (0.0, String::new(), 0.0));
     }
 
     #[test]
-    fn a_ring_is_a_tenth_and_any_charge_shows_one() {
-        let rings = |p: u8| lit(Some(p), 10);
-        assert_eq!(lit(None, 10), 0);
-        assert_eq!([rings(0), rings(1), rings(4), rings(5), rings(14), rings(15)], [0, 1, 1, 1, 1, 2]);
-        assert_eq!([rings(50), rings(94), rings(95), rings(100)], [5, 9, 10, 10]);
+    fn the_charge_to_the_nearest_section_and_any_charge_lights_one() {
+        let five = |p: u8| lit(Some(p), 5);
+        assert_eq!(lit(None, 5), 0);
+        assert_eq!([five(0), five(1), five(10), five(29), five(30), five(49)], [0, 1, 1, 1, 2, 2]);
+        assert_eq!([five(50), five(89), five(90), five(100)], [3, 4, 5, 5]);
+        // and as many sections as the skin has
+        let ten = |p: u8| lit(Some(p), 10);
+        assert_eq!([ten(4), ten(5), ten(15), ten(94), ten(95)], [1, 1, 2, 9, 10]);
     }
 
     #[test]
-    fn the_time_left_is_in_hours_and_minutes() {
-        assert_eq!(time_left(8100), "2 hr 15 min left");
-        assert_eq!(time_left(7200), "2 hr left");
+    fn the_time_left_is_in_hours_and_minutes_short() {
+        assert_eq!(time_left(8100), "2h 15m");
+        assert_eq!(time_left(7200), "2h");
         // to the nearest minute
-        assert_eq!(time_left(7170), "2 hr left");
-        assert_eq!(time_left(45 * 60 + 29), "45 min left");
+        assert_eq!(time_left(7170), "2h");
+        assert_eq!(time_left(45 * 60 + 29), "45m");
+        assert_eq!(time_left(LONGEST), "99h");
         // and never none
-        assert_eq!(time_left(0), "1 min left");
+        assert_eq!(time_left(0), "1m");
     }
 
     #[test]
@@ -690,19 +715,19 @@ mod tests {
         };
 
         b.set_fixed(Some((76, false, false, Some(8100))));
-        assert_eq!((read(&b, "BattPct"), read(&b, "BattSource"), read(&b, "BattStatus")), ("76%".into(), "On battery".into(), "2 hr 15 min left".into()));
-        assert_eq!((b.shown.lit, b.num("Charging")), (8, 0.0));
+        assert_eq!((read(&b, "BattPct"), read(&b, "BattTime")), ("76%".into(), "2h 15m".into()));
+        assert_eq!((b.shown.lit, b.num("Charging")), (4, 0.0));
         assert!(!b.show(power(&reported(Some((76, false, false, Some(8100)))))));
 
         b.set_fixed(Some((35, true, true, None)));
-        assert_eq!((read(&b, "BattSource"), read(&b, "BattStatus")), ("Plugged in".into(), "Charging".into()));
-        assert_eq!((b.shown.lit, b.num("Charging")), (4, 1.0));
+        assert_eq!((read(&b, "BattPct"), read(&b, "BattTime")), ("35%".into(), String::new()));
+        assert_eq!((b.shown.lit, b.num("Charging")), (2, 1.0));
 
         b.set_fixed(Some((12, false, false, Some(1500))));
-        assert_eq!((b.shown.lit, read(&b, "BattStatus")), (1, "25 min left".into()));
+        assert_eq!((b.shown.lit, read(&b, "BattTime")), (1, "25m".into()));
 
         b.set_fixed(None);
-        assert_eq!((read(&b, "BattPct"), read(&b, "BattStatus"), b.shown.lit, b.num("Charging")), ("--".into(), "No battery".into(), 0, 0.0));
+        assert_eq!((read(&b, "BattPct"), read(&b, "BattTime"), b.shown.lit, b.num("Charging")), ("--".into(), String::new(), 0, 0.0));
     }
 
     /// The parts down one column of the battery, top to bottom and a row
@@ -714,13 +739,14 @@ mod tests {
     }
 
     #[test]
-    fn metal_bands_at_either_end_and_the_rings_curving_round_between_them() {
+    fn metal_bands_at_either_end_and_the_sections_standing_apart_between_them() {
         let mut settings = Settings::in_memory();
         let b = battery(&mut settings);
         // down the middle: the top with the terminal standing on it, its
-        // front edge, the band at the top stepping in to the rings, the rings
-        // with a groove between each two, and the band at the foot, light
-        // along its upper edge and dark along its lower
+        // front edge, the band at the top, the sections with the core in the
+        // space before each and after the last, each section's top row
+        // catching the light, and the band at the foot, light along its
+        // upper edge and dark along its lower
         let middle = down(&b, b.w / 2);
         let band = middle.iter().position(|p| matches!(p, Part::Band(_))).expect("a band");
         assert_eq!(middle[band - 1], Part::RimFront);
@@ -729,17 +755,24 @@ mod tests {
         }
         let mut side = vec![Part::Band(Lip::None), Part::Band(Lip::Dark)];
         for i in (0..b.rings).rev() {
-            side.push(Part::Ring(i));
-            if i > 0 {
-                side.push(Part::Groove(i - 1));
-            }
+            side.extend([Part::Core, Part::RingTop(i), Part::Ring(i)]);
         }
-        side.extend([Part::Band(Lip::Light), Part::Band(Lip::None), Part::Band(Lip::Dark), Part::Out]);
+        side.extend([Part::Core, Part::Band(Lip::Light), Part::Band(Lip::None), Part::Band(Lip::Dark), Part::Out]);
         assert_eq!(&middle[band..], &side[..]);
         // the edges across the side are lower in the middle than at the sides
         let first = |x: i32, part: Part| (0..b.h).find(|&y| b.part(x, y) == part).unwrap();
         assert!(first(b.w / 2, Part::Ring(0)) > first(1, Part::Ring(0)) + 3);
         assert_eq!((b.part(-1, b.h / 2), b.part(b.w, b.h / 2), b.part(b.w / 2, b.h)), (Part::Out, Part::Out, Part::Out));
+        // In the spaces the core is narrower than the battery: its edge steps
+        // in there, and the face shows -- space, not a line drawn across.
+        // At either edge, between one section and the next, is face.
+        for x in [0, 1, b.w - 2, b.w - 1] {
+            let column = down(&b, x);
+            let at = |part: Part| column.iter().position(|&p| p == part).unwrap();
+            assert_eq!(&column[at(Part::Ring(1)) + 1..at(Part::RingTop(0))], &[Part::Out], "column {x}: {column:?}");
+        }
+        // and in the middle, the core
+        assert_eq!(first(b.w / 2, Part::Core) + b.gap, first(b.w / 2, Part::RingTop(b.rings - 1)));
     }
 
     #[test]
@@ -770,30 +803,26 @@ mod tests {
     }
 
     #[test]
-    fn the_rings_light_up_with_a_groove_between_each_two_and_nothing_outside() {
+    fn the_sections_light_up_apart_and_nothing_is_drawn_outside() {
         let mut settings = Settings::in_memory();
         let mut b = battery(&mut settings);
         let half = b.w as f32 / 2.0;
         let middle = b.w / 2;
         let first = |b: &Battery, part: Part| (0..b.h).find(|&y| b.part(middle, y) == part).unwrap();
-        for (percent, showing) in [(0, 0), (30, 3), (76, 8), (100, 10)] {
+        for (percent, showing) in [(0, 0), (30, 2), (76, 4), (100, 5)] {
             b.set_fixed(Some((percent, false, false, None)));
             let at = |b: &Battery, x: i32, y: i32| b.picture[(y * b.w + x) as usize];
-            // each ring in its colour, lit or not, and the groove on top of it
-            // a darker shade of it -- never black
+            // each section in its colour, lit or not, its top row lighter,
+            // and the core above it a shade of the metal -- never black
             let u = (middle as f32 + 0.5 - half) / half;
             for i in 0..b.rings {
-                let y = first(&b, Part::Ring(i));
+                let top = first(&b, Part::RingTop(i));
                 let want = if i < showing { b.lit_rings[i as usize].at(stripe(u)) } else { b.off.at(stripe(u)) };
-                assert_eq!(at(&b, middle, y + 1), want, "{percent}%: ring {i}");
-                let above = at(&b, middle, y - 1);
-                if i + 1 < b.rings {
-                    assert_eq!(above, mix(want, BLACK, b.groove), "{percent}%: the groove on ring {i}");
-                    assert!(above & 0xFF_FFFF != 0 && above != want);
-                } else {
-                    // the top band's lip, stepping in to the rings
-                    assert_eq!(above, mix(b.metal.at(stripe(u)), BLACK, LIP_DARK));
-                }
+                assert_eq!(at(&b, middle, top + 2), want, "{percent}%: section {i}");
+                assert_eq!(at(&b, middle, top), mix(want, WHITE, b.bevel), "{percent}%: section {i}'s top row");
+                assert_eq!(b.part(middle, top - 1), Part::Core);
+                let core = at(&b, middle, top - 1);
+                assert!((0..3).all(|k| (core >> (8 * k) & 255) > 60), "{percent}%: the core is too dark: {core:08X}");
             }
             // every px of the picture is the battery, in a solid colour, or
             // nothing at all
@@ -822,8 +851,10 @@ mod tests {
         let mut settings = Settings::in_memory();
         let mut b = battery(&mut settings);
         let mut ctx = Ctx { now: 1_000, settings: &mut settings, locked: false, signed_in: None };
-        // with a battery or without one, it has something to say
+        // with a battery or without one, it has something to say: the plug,
+        // or on battery the time left (or "...")
         assert_eq!(b.tick(&mut ctx), Dirty::All);
-        assert!(!b.shown.source.is_empty() && !b.shown.status.is_empty());
+        assert!(!b.shown.percent.is_empty());
+        assert_eq!(b.shown.on_battery, !b.shown.time.is_empty());
     }
 }
