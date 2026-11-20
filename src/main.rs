@@ -1,10 +1,11 @@
-//! Win98 Widgets -- nine Windows 98 style desktop widgets as one small
+//! Win98 Widgets -- ten Windows 98 style desktop widgets as one small
 //! native program.
 //!
 //! Date/Time Properties, Resource Meter, Sticky Note, Weather, Rain Window,
-//! Disk Space, World Clock, Battery and Countdown, drawn from the .ini files
-//! in `skins/` -- with no Direct2D and no script engine underneath.  One of
-//! each, and as many more Sticky Notes and Countdowns as are asked for.
+//! Disk Space, World Clock, Battery, Countdown and Claude Usage, drawn from
+//! the .ini files in `skins/` -- with no Direct2D and no script engine
+//! underneath.  One of each, and as many more Sticky Notes and Countdowns as
+//! are asked for.
 //!
 //! # Where things are
 //!
@@ -21,7 +22,7 @@
 //!   tools/         for working on the program
 //!     dump           off-screen rendering, for checking a change
 //!
-//!   widgets/       what a widget is, and the nine there are
+//!   widgets/       what a widget is, and the ten there are
 //!     widget         what the host asks of a widget -- the one thing about
 //!                    them it knows
 //!     field          a one-line field, typed on where it stands: the
@@ -39,6 +40,7 @@
 //!                    time zone)
 //!     battery        Battery
 //!     countdown      Countdown
+//!     claude         Claude Usage     (and the child that asks for it)
 //!
 //!   input/        typing
 //!     keys           the window that holds the keyboard for a widget
@@ -90,7 +92,7 @@ use net::{geocode, http};
 use platform::{clock, grid, screens, sys};
 use storage::{settings, usage};
 use tools::dump;
-use widgets::{battery, calendar, countdown, datetime, disk, field, notes, rain, resources, weather, widget, world};
+use widgets::{battery, calendar, claude, countdown, datetime, disk, field, notes, rain, resources, weather, widget, world};
 
 fn main() {
     // There is no console to complain to: if something does go wrong, leave
@@ -106,6 +108,7 @@ fn main() {
         Some("--fetch-weather") => weather::fetch_main(&args[2..]),
         Some("--find-city") => weather::find_main(&args[2..]),
         Some("--find-zone") => world::find_main(&args[2..]),
+        Some("--fetch-claude") => claude::fetch_main(&args[2..]),
         Some("--dump") => dump::run(&args[2..]),
         _ => app::run(),
     };

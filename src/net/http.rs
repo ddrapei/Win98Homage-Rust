@@ -8,6 +8,13 @@ use crate::sys;
 
 /// The body of the answer, if the answer was 200.
 pub fn get(host: &str, port: u16, secure: bool, path: &str) -> Option<String> {
+    fetch(host, port, secure, path, "").ok()
+}
+
+/// One GET with `headers` sent along -- "Name: value" lines, each ended by
+/// CRLF, or nothing.  The body of the answer if it was 200; otherwise the
+/// status it was, or 0 when there was no answer at all.
+pub fn fetch(host: &str, port: u16, secure: bool, path: &str, headers: &str) -> Result<String, u32> {
     type H = *mut c_void;
     type Open = unsafe extern "system" fn(*const u16, u32, *const u16, *const u16, u32) -> H;
     type SetTimeouts = unsafe extern "system" fn(H, i32, i32, i32, i32) -> i32;
@@ -22,8 +29,11 @@ pub fn get(host: &str, port: u16, secure: bool, path: &str) -> Option<String> {
     const FLAG_SECURE: u32 = 0x0080_0000;
     const QUERY_STATUS_NUMBER: u32 = 19 | 0x2000_0000;
 
+    // Kept for the whole of the call: WinHTTP reads it while it sends.
+    let extra = sys::wide(headers);
+
     unsafe {
-        let f = |name: &'static [u8]| sys::proc_address("winhttp.dll", name);
+        let f = |name: &'static [u8]| sys::proc_address("winhttp.dll", name).ok_or(0u32);
         let open: Open = core::mem::transmute(f(b"WinHttpOpen\0")?);
         let set_timeouts: SetTimeouts = core::mem::transmute(f(b"WinHttpSetTimeouts\0")?);
         let connect: Connect = core::mem::transmute(f(b"WinHttpConnect\0")?);
@@ -37,10 +47,10 @@ pub fn get(host: &str, port: u16, secure: bool, path: &str) -> Option<String> {
         // 4 = WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY: whatever the system uses
         let session = open(sys::wide("Win98Widgets").as_ptr(), 4, null(), null(), 0);
         if session.is_null() {
-            return None;
+            return Err(0);
         }
         set_timeouts(session, 8000, 8000, 8000, 12000);
-        let mut body = None;
+        let mut body = Err(0);
         let connection = connect(session, sys::wide(host).as_ptr(), port, 0);
         if !connection.is_null() {
             let request = open_request(
@@ -48,10 +58,14 @@ pub fn get(host: &str, port: u16, secure: bool, path: &str) -> Option<String> {
                 null(), null(), null(), if secure { FLAG_SECURE } else { 0 },
             );
             if !request.is_null() {
-                if send(request, null(), 0, null(), 0, 0, 0) != 0 && receive(request, null_mut()) != 0 {
+                // u32::MAX: the headers run to their nul
+                let (extra, extra_len) = if headers.is_empty() { (null(), 0) } else { (extra.as_ptr(), u32::MAX) };
+                if send(request, extra, extra_len, null(), 0, 0, 0) != 0 && receive(request, null_mut()) != 0 {
                     let (mut status, mut len) = (0u32, 4u32);
                     query(request, QUERY_STATUS_NUMBER, null(), &mut status as *mut u32 as *mut c_void, &mut len, null_mut());
-                    if status == 200 {
+                    if status != 200 {
+                        body = Err(status);
+                    } else {
                         let mut bytes = Vec::new();
                         let mut chunk = [0u8; 4096];
                         loop {
@@ -64,7 +78,7 @@ pub fn get(host: &str, port: u16, secure: bool, path: &str) -> Option<String> {
                                 break;
                             }
                         }
-                        body = Some(String::from_utf8_lossy(&bytes).into_owned());
+                        body = Ok(String::from_utf8_lossy(&bytes).into_owned());
                     }
                 }
                 close(request);

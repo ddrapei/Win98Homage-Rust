@@ -318,6 +318,11 @@ Enabled=1
 ; what it is (typed into the field under the count)
 Date=
 Name=
+
+[Claude]
+; the figures Claude Code's /usage shows, asked for with Claude Code's own
+; sign-in; nothing to set
+Enabled=1
 ",
         week_start = dt.var("WeekStart"),
         use24 = dt.var("Use24Hour"),

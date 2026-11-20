@@ -14,6 +14,7 @@ pub mod calendar;
 pub mod field;
 
 pub mod battery;
+pub mod claude;
 pub mod countdown;
 pub mod datetime;
 pub mod disk;

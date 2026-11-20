@@ -271,9 +271,64 @@ pub fn parse_local(s: &str) -> Option<i64> {
     Some(mktime(d.next()??, d.next()??, d.next()??, t.next()??, t.next()??, t.next()??))
 }
 
+/// A moment as the web writes one -- "2026-11-20T19:00:00.123456+00:00", or
+/// with a Z for the offset, or none at all, which is UTC -- as a timestamp.
+/// Fractions of a second are dropped.
+pub fn parse_iso_utc(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (date, rest) = s.split_once(['T', 't', ' '])?;
+    let mut d = date.split('-').map(|p| p.parse::<i32>().ok());
+    let (year, month, day) = (d.next()??, d.next()??, d.next()??);
+    if d.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // the clock, then the offset: Z, +hh:mm, -hh:mm, +hhmm, or nothing
+    let at = rest.find(['Z', 'z', '+', '-']).unwrap_or(rest.len());
+    let (time, zone) = rest.split_at(at);
+    let time = time.split('.').next()?;
+    let mut t = time.split(':').map(|p| p.parse::<i32>().ok());
+    let (hour, min) = (t.next()??, t.next()??);
+    let sec = t.next().map_or(Some(0), |v| v)?;
+    if t.next().is_some() || !(0..=23).contains(&hour) || !(0..=59).contains(&min) || !(0..=60).contains(&sec) {
+        return None;
+    }
+    let ahead = match zone.as_bytes().first() {
+        None | Some(b'Z' | b'z') if zone.len() <= 1 => 0,
+        Some(&sign @ (b'+' | b'-')) => {
+            let digits: String = zone[1..].chars().filter(|c| *c != ':').collect();
+            if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let minutes = digits[..2].parse::<i64>().ok()? * 60 + digits[2..].parse::<i64>().ok()?;
+            if sign == b'+' { minutes * 60 } else { -minutes * 60 }
+        }
+        _ => return None,
+    };
+    Some(days_from_civil(year, month, day) * 86_400 + (hour * 3600 + min * 60 + sec) as i64 - ahead)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_a_moment_as_the_web_writes_it() {
+        // 2026-11-20 19:00:00 UTC
+        let at = 1_795_201_200;
+        assert_eq!(days_from_civil(2026, 11, 20) * 86_400 + 19 * 3600, at);
+        assert_eq!(parse_iso_utc("2026-11-20T19:00:00.943648+00:00"), Some(at));
+        assert_eq!(parse_iso_utc("2026-11-20T19:00:00Z"), Some(at));
+        assert_eq!(parse_iso_utc("2026-11-20T19:00:00"), Some(at));
+        assert_eq!(parse_iso_utc("2026-11-20T19:00Z"), Some(at));
+        // an offset is how far ahead of UTC the clock that wrote it was
+        assert_eq!(parse_iso_utc("2026-11-20T21:00:00+02:00"), Some(at));
+        assert_eq!(parse_iso_utc("2026-11-20T14:30:00.5-0430"), Some(at));
+        // into the next day, and the year after
+        assert_eq!(parse_iso_utc("2026-12-31T23:59:59Z").map(|t| t + 1), parse_iso_utc("2027-01-01T00:00:00Z"));
+        for bad in ["", "null", "2026-11-20", "2026-13-01T00:00:00Z", "2026-11-20T25:00:00Z", "2026-11-20T19:00:00+2", "2026-11-20T19:00:00Q"] {
+            assert_eq!(parse_iso_utc(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn mktime_rolls_a_time_past_its_end_into_the_next_day() {

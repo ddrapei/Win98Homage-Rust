@@ -1,4 +1,4 @@
-//! Compiles the nine widgets' skins into static Rust tables.
+//! Compiles the ten widgets' skins into static Rust tables.
 //!
 //! The .ini files in `skins/` are the single source of truth for every
 //! pixel: each meter's position, shapes, colours, text options and mouse
@@ -556,6 +556,10 @@ fn dyn_battery(n: &str) -> bool {
     matches!(n, "BattPct" | "BattTime" | "Charging" | "OnBattery")
 }
 
+fn dyn_claude(n: &str) -> bool {
+    matches!(n, "SessionPct" | "SessionReset" | "WeekPct" | "WeekReset")
+}
+
 fn dyn_countdown(n: &str) -> bool {
     const NAMES: &[&str] = &[
         "MonthName", "YearText", "MLHide", "MLMonth", "SelCol", "SelRow", "SelHide", "Today", "Count", "EventDate",
@@ -563,7 +567,7 @@ fn dyn_countdown(n: &str) -> bool {
     NAMES.contains(&n) || numbered(n, "D") || numbered(n, "W")
 }
 
-const SKINS: [SkinDef; 9] = [
+const SKINS: [SkinDef; 10] = [
     SkinDef { module: "datetime", file: "Win98DateTime.ini", dynamic: dyn_datetime },
     SkinDef { module: "resources", file: "Win98Resources.ini", dynamic: dyn_resources },
     SkinDef { module: "notes", file: "Win98Notes.ini", dynamic: dyn_notes },
@@ -574,6 +578,7 @@ const SKINS: [SkinDef; 9] = [
     SkinDef { module: "world", file: "Win98World.ini", dynamic: dyn_world },
     SkinDef { module: "battery", file: "Win98Battery.ini", dynamic: dyn_battery },
     SkinDef { module: "countdown", file: "Win98Countdown.ini", dynamic: dyn_countdown },
+    SkinDef { module: "claude", file: "Win98Claude.ini", dynamic: dyn_claude },
 ];
 
 /// Compile one skin into `out`; its `Tint` -- the colour its palette is drawn

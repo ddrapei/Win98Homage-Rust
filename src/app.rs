@@ -1,11 +1,11 @@
 //! The host: one small process, one thread, a layered window for each widget.
 //!
-//! There is one of each of the nine, and as many more Sticky Notes and
+//! There is one of each of the ten, and as many more Sticky Notes and
 //! Countdowns as have been asked for: a note after the first is a window like
 //! any other, made from the same skin, with a section of settings.ini and a
 //! text file of its own (see `notes`), and a countdown after the first is the
 //! same with a section and no file (see `countdown`).  Those two kinds are
-//! the families (`FAMILIES`).  The windows are numbered -- the nine first,
+//! the families (`FAMILIES`).  The windows are numbered -- the ten first,
 //! then the other notes and countdowns as they were made -- and a number is
 //! never handed on: a deleted one's stays its own, unused, until the program
 //! ends.
@@ -47,6 +47,7 @@ use std::path::PathBuf;
 
 use crate::battery::Battery;
 use crate::canvas::{self, Canvas, Rect};
+use crate::claude::Claude;
 use crate::clock;
 use crate::countdown::{self, Countdown};
 use crate::datetime::DateTime;
@@ -77,6 +78,7 @@ enum Kind {
     World,
     Battery,
     Countdown,
+    Claude,
 }
 
 impl Kind {
@@ -91,6 +93,7 @@ impl Kind {
             Kind::World => &skin::world::SKIN,
             Kind::Battery => &skin::battery::SKIN,
             Kind::Countdown => &skin::countdown::SKIN,
+            Kind::Claude => &skin::claude::SKIN,
         }
     }
 
@@ -103,7 +106,7 @@ impl Kind {
 /// The widgets there is always one of, in the order their windows are
 /// numbered: what each is, its section of settings.ini, and what the menus
 /// call it.  The notes and countdowns after the first follow these.
-const FIXED: [(Kind, &str, &str); 9] = [
+const FIXED: [(Kind, &str, &str); 10] = [
     (Kind::DateTime, "DateTime", "Date/Time"),
     (Kind::Resources, "Resources", "Resource Meter"),
     (Kind::Notes, notes::FIRST, "Sticky Note"),
@@ -113,6 +116,7 @@ const FIXED: [(Kind, &str, &str); 9] = [
     (Kind::World, "World", "World Clock"),
     (Kind::Battery, "Battery", "Battery"),
     (Kind::Countdown, countdown::FIRST, "Countdown"),
+    (Kind::Claude, "Claude", "Claude Usage"),
 ];
 const DATETIME: usize = 0;
 const NOTE: usize = 2;
@@ -122,6 +126,7 @@ const DISK: usize = 5;
 const WORLD: usize = 6;
 const BATTERY: usize = 7;
 const COUNTDOWN: usize = 8;
+const CLAUDE: usize = 9;
 
 /// A kind of widget there can be any number of: the first is in FIXED, and
 /// the others are made from the menu, each with a section of settings.ini of
@@ -737,6 +742,7 @@ impl App {
                 Kind::World => Box::new(World::new(&ctx)),
                 Kind::Battery => Box::new(Battery::new(&ctx)),
                 Kind::Countdown => Box::new(Countdown::new(&ctx, &section)),
+                Kind::Claude => Box::new(Claude::new(&ctx)),
             };
             widget.tick(&mut ctx);
             widgets.0[i] = Some(widget);
@@ -1689,15 +1695,16 @@ impl App {
         tint::set(self.settings.tint());
     }
 
-    /// Which windows there are -- the nine, and a note or a countdown for
+    /// Which windows there are -- the ten, and a note or a countdown for
     /// every other section of settings.ini that is one's -- and where each
     /// sits: where it was left, or -- the first time -- on the grid, in a
     /// column down the right-hand side of the screen: the date and time in
     /// the top corner, the resource meter under it, and under that the
     /// weather, the note to its left, the rain to the left of the note, the
-    /// disk to the left of the rain and the battery to the left of the disk;
-    /// the world clock heads a second column, to the left of the date and
-    /// time, and the countdown stands under it, against the first column.
+    /// disk to the left of the rain, the battery to the left of the disk and
+    /// the Claude usage to the left of the battery; the world clock heads a
+    /// second column, to the left of the date and time, and the countdown
+    /// stands under it, against the first column.
     /// Called with every window shut: at the start, and when settings.ini is
     /// read again.
     fn read_slots(&mut self) {
@@ -1729,6 +1736,7 @@ impl App {
         let note = weather - step - size(NOTE).0;
         let rain = note - step - size(RAIN).0;
         let disk = rain - step - size(DISK).0;
+        let battery = disk - step - size(BATTERY).0;
         let defaults = [
             (x0, y0),
             (x0, y1),
@@ -1737,8 +1745,9 @@ impl App {
             (rain, y2),
             (disk, y2),
             (x0 - step - size(WORLD).0, y0),
-            (disk - step - size(BATTERY).0, y2),
+            (battery, y2),
             (x0 - step - size(COUNTDOWN).0, y0 + size(WORLD).1 + step),
+            (battery - step - size(CLAUDE).0, y2),
         ];
         for i in 0..self.slots.len() {
             // A note or a countdown after the first was put somewhere when it
@@ -2447,7 +2456,7 @@ mod tests {
         // one entry for more of them wherever the menu is opened, in the list
         // of widgets, and none that ticks a note on and off
         for at in [None, Some(NOTE), Some(WEATHER)] {
-            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +"]);
+            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", "Claude Usage"]);
             assert_eq!(app.menu(at).iter().filter(|m| m.0 == CMD_MORE_NOTES).count(), 1);
             assert!(!app.menu(at).iter().any(|m| m.0 == CMD_TOGGLE + NOTE));
         }
@@ -2457,7 +2466,7 @@ mod tests {
         // the first comes out, and with it the way to put one back
         app.menu_command(None, CMD_MORE_NOTES);
         assert_eq!((running(&app), app.slots.len()), (1, FIXED.len()));
-        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +"]);
+        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", "Claude Usage"]);
         // with none closed, more is a new one each time
         app.menu_command(None, CMD_MORE_NOTES);
         app.menu_command(Some(WEATHER), CMD_MORE_NOTES);
@@ -2513,7 +2522,7 @@ mod tests {
         let (notes_minus, minus) = ("Sticky Note \u{2212}", "Countdown \u{2212}");
         assert_eq!(
             listed(&app),
-            ["Date/Time", "Resource Meter", "Sticky Note +", notes_minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", minus]
+            ["Date/Time", "Resource Meter", "Sticky Note +", notes_minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", minus, "Claude Usage"]
         );
 
         // only one after the first can be deleted, and each by its own entry
@@ -2668,7 +2677,7 @@ mod tests {
         assert_eq!((at(1).y0 - at(DATETIME).y1, at(WEATHER).y0 - at(1).y1), (gap, gap));
         assert_eq!((at(1).x1, at(WEATHER).x1), (at(DATETIME).x1, at(DATETIME).x1));
         // along the foot and along the top, a gap apart
-        for (left, right) in [(NOTE, WEATHER), (RAIN, NOTE), (DISK, RAIN), (BATTERY, DISK), (WORLD, DATETIME)] {
+        for (left, right) in [(NOTE, WEATHER), (RAIN, NOTE), (DISK, RAIN), (BATTERY, DISK), (CLAUDE, BATTERY), (WORLD, DATETIME)] {
             assert_eq!((at(right).x0 - at(left).x1, at(right).y0), (gap, at(left).y0), "slot {left} to slot {right}");
         }
         // the countdown under the world clock, against the first column, and

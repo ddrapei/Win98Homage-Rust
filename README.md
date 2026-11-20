@@ -1,8 +1,8 @@
 # Win98 Widgets
 
-Nine Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
-Weather, Rain Window, Disk Space, World Clock, Battery and Countdown — as one small Rust
-program. There is one of each, and as many more Sticky Notes and Countdowns as you ask for.
+Ten Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
+Weather, Rain Window, Disk Space, World Clock, Battery, Countdown and Claude Usage — as one
+small Rust program. There is one of each, and as many more Sticky Notes and Countdowns as you ask for.
 
 ![All seven widgets on a desktop, in the default rust colour](screenshots/rust.png)
 
@@ -11,8 +11,8 @@ memory is), **Date/Time Properties** (a calendar, a clock and a graph of when th
 was in use today) and, along the bottom, **Disk Space** and **Weather**. In the middle the
 **World Clock** keeps the time in three cities, with the **Rain Window** under it; on the
 right, a **Sticky Note**. The same desktop in two of the other colours is further down,
-under *Colour*. The **Battery**, the smallest, and the **Countdown** came after these
-pictures were taken.
+under *Colour*. The **Battery**, the smallest, the **Countdown** and **Claude Usage** came
+after these pictures were taken.
 
 | | |
 |--------------------------|---------|
@@ -37,13 +37,13 @@ Run the .exe. Nothing is installed: it can live anywhere. Only one copy runs at 
 
 Each widget's layout is an `.ini` file in [`skins/`](skins): a `[Variables]` section for the
 palette and the layout figures, then one section per meter — a shape, a line of text or an
-image — in the order they are painted. `build.rs` compiles the nine of them into static
+image — in the order they are painted. `build.rs` compiles the ten of them into static
 tables — every meter's position, shapes, colours, text options and mouse actions — so
 **the `.ini` files are the single source of truth for the layout**. Change a colour or move
 a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
 runs: the logic behind each widget is plain Rust in `src/widgets/` (`datetime.rs`,
 `resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`, `world.rs`, `battery.rs`,
-`countdown.rs`), and a mouse action in a skin, such as
+`countdown.rs`, `claude.rs`), and a mouse action in a skin, such as
 `LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
 Text is laid out by DirectWrite and rasterised with aliased glyphs, set the way Windows 98's
@@ -108,11 +108,12 @@ choice is kept in `settings.ini` as `Tint=` under
 `[General]` — `R,G,B` or `#RRGGBB`, written there by hand if you like and picked up with
 *Reload settings*; empty is the rust. The colour is the accents': the title bars, the
 calendar's heading and the selected day, the clocks' hands and dots, the usage bars, the
-used part of the disk pie, the rain. The greys and whites of the windows themselves —
-faces, bevels, fields — and the text stay exactly as they are, and so do the note's
-papers with the red margin printed on them, the weather's icons, the countdown's
-hourglass and its red pen ring, and the battery's sections, red to green, which have to
-mean the same whatever the colour. An accent takes the
+used part of the disk pie, the rain, the Claude Usage needles. The greys and whites of the
+windows themselves — faces, bevels, fields — and the text stay exactly as they are, and so
+do the note's papers with the red margin printed on them, the weather's icons, the
+countdown's hourglass and its red pen ring, the battery's sections, red to green, and the
+Claude Usage scales, green to red, which have to mean the same whatever the colour. An
+accent takes the
 colour's hue and how colourful it is, but keeps its own lightness, so the white text on
 a title bar stays as readable as it was; a very pale or very dark colour therefore comes
 out in between (navy gives a title bar that runs from navy to blue). The swatches show
@@ -229,6 +230,29 @@ week starts on the day the Date/Time widget's starts on. Each countdown keeps it
 its name in `settings.ini` as `Date=2026-11-27` and `Name=` under its own section,
 `[Countdown]`, `[Countdown2]`, …
 
+**Claude Usage** shows how much of a Claude plan's two usage limits has been used: the
+*session*, which lasts five hours from its first message, and the *week*. Each is a gauge
+in a box of its own, side by side, after a car's fuel gauge and drawn in the Battery's
+light: a dark face under glass in a raised metal bezel, a scale of ten rounded segments
+round it, a tenth of the limit each, that light up from green through yellow to red as far
+as the reading goes — the Battery's colours the other way about, so the more is used the
+redder it is — and a needle in the accent colour on a domed hub, throwing its shadow on
+the face. Nothing is outlined. The percentage stands at the foot of the face, and under
+each gauge is how long until that limit resets: "3h 57m till reset", "14h till reset",
+"1d 8h till reset". They are the same figures as `/usage` in Claude Code, and they are
+asked for the same way: with
+the sign-in Claude Code keeps in `%USERPROFILE%\.claude\.credentials.json` (or in the
+folder `CLAUDE_CONFIG_DIR` names), from api.anthropic.com, every five minutes and a minute
+after a limit resets. Nothing else is sent anywhere. That address is the one Claude Code
+itself uses and is not a published API, so a change at Anthropic's end can stop the widget
+until it is updated; the line under each gauge then says *Unreadable*. The sign-in is only
+ever read, never renewed — renewing it would use up the renewal Claude Code holds and sign
+Claude Code out — so when it runs out the figures stay as they were and the line says
+*Signed out*; open Claude Code, and as soon as it has signed in again they are brought up
+to date. While there is no answer it says *Offline*. Right-click → *Refresh now* asks at
+once. The gauges' shape, colours and shading are the `Dial*`, `Scale*`, `Needle*` and
+`Segment*` variables in `skins/Win98Claude.ini`.
+
 **Position** (right-click → Position): *On desktop* (default) keeps the widgets behind
 every window; *Normal*; *Always on top*.
 
@@ -241,6 +265,7 @@ every window; *Normal*; *Always on top*.
 | `%APPDATA%\Win98Widgets\Notes2.txt`, `Notes3.txt`, … | the notes after the first, each with a `[Notes2]`, `[Notes3]`, … section of its own in settings.ini |
 | `%LOCALAPPDATA%\Win98DateTime\Usage.log`, or `%LOCALAPPDATA%\Win98DateTime.log` | the usage log |
 | `%LOCALAPPDATA%\Win98Widgets\weather.txt` | the last forecast |
+| `%LOCALAPPDATA%\Win98Widgets\claude.txt` | the last Claude usage figures (never the sign-in) |
 
 A `settings.ini` beside the .exe is used instead, if there is one (a portable copy).
 
@@ -261,6 +286,10 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 - **Battery** asks Windows how the power stands once a second, which is one call, and
   repaints only when something it shows has changed: a tenth of the charge, a percent, the
   power source, or a minute of the time left.
+- **Claude Usage** asks for its figures from a short-lived child process, like the
+  weather, every five minutes; in between it only moves the reset times on, once a
+  minute. While Claude Code's sign-in has run out it asks nothing, and only looks every
+  15 seconds at when the sign-in file was last changed — never at what is in it.
 - **Disk Space** asks a drive on this machine for its figures every five seconds, and
   repaints only when a figure it shows has changed. A network drive, a disc or a card can
   take many seconds to answer, so those are asked every half minute from a thread that
@@ -273,7 +302,7 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 ## Layout of the source
 
 ```text
-skins/       the nine layouts (.ini), the weather icons and the tray icon
+skins/       the ten layouts (.ini), the weather icons and the tray icon
 screenshots/ the pictures in this file
 build.rs     those .ini files compiled into static tables
 src/
@@ -282,7 +311,7 @@ src/
                mouse, menus, tray, the once-a-second tick, the frames in between
   tools/       for working on the program
     dump         off-screen rendering, for checking a change
-  widgets/     what a widget is, and the nine there are
+  widgets/     what a widget is, and the ten there are
     widget       the Widget trait: all the host knows about a widget
     field        a one-line field, typed on where it stands: the weather's city,
                  the world clock's three, a countdown's name
@@ -297,6 +326,7 @@ src/
     world        World Clock (and the child that finds a city's time zone)
     battery      Battery
     countdown    Countdown (also: which sections of settings.ini are countdowns)
+    claude       Claude Usage (and the child that asks for it)
   input/       typing
     keys         the window that holds the keyboard for a widget
     editor       a text and what the keys do to it: the note's, the one-line fields'

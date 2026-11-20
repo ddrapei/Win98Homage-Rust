@@ -31,6 +31,12 @@
 //!                                      (0/1), seconds left (empty or -1 for
 //!                                      no estimate yet); battery=none, or no
 //!                                      line at all, is a machine with none
+//!   claude=42,2026-11-11 19:45,18,2026-11-14 09:00
+//!                                      the Claude usage: the session's
+//!                                      percentage and when it resets, then
+//!                                      the week's (local times; either may
+//!                                      be empty); claude=none, or no line
+//!                                      at all, is a machine with no sign-in
 //!   set.Notes.Created=30 Jul 2026      any settings.ini value
 //!   set.General.Tint=0,0,128           among them the widgets' colour
 //!   do.datetime=SetPage 1;Select 12    commands to run before drawing
@@ -64,6 +70,7 @@ use std::path::{Path, PathBuf};
 
 use crate::battery::Battery;
 use crate::canvas::{self, Canvas, Rect};
+use crate::claude::Claude;
 use crate::clock;
 use crate::countdown::{self, Countdown};
 use crate::datetime::DateTime;
@@ -304,6 +311,20 @@ pub fn run(args: &[String]) -> i32 {
         type_on(&mut w, get(&format!("type.{tag}")).unwrap_or(""));
         render(&w, &mut text, &dir.join(format!("{tag}.bmp")));
     }
+    {
+        // never this machine's sign-in: with no figures given, there is none
+        let mut w = Claude::new(&ctx);
+        // a local time, with or without its seconds; empty for none
+        let at = |s: &str| clock::parse_local(s).or_else(|| clock::parse_local(&format!("{s}:00")));
+        let reading = get("claude").filter(|v| !v.eq_ignore_ascii_case("none")).map(|v| {
+            let p: Vec<&str> = v.split(',').map(str::trim).collect();
+            let pct = |i: usize| p.get(i).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            let when = |i: usize| p.get(i).and_then(|s| at(s));
+            (pct(0), when(1), pct(2), when(3))
+        });
+        w.set_fixed(reading, now);
+        render(&w, &mut text, &dir.join("claude.bmp"));
+    }
     0
 }
 
@@ -339,6 +360,10 @@ mod tests {
         ctx.settings.set(countdown::FIRST, "Name", "Birthday");
         let mut countdown = Countdown::new(ctx, countdown::FIRST);
         type_on(&mut countdown, "double 115 294");
+        // both bars part full, so that blocks and the field over the rest
+        // are both there
+        let mut claude = Claude::new(ctx);
+        claude.set_fixed(Some((42.0, Some(ctx.now + 8040), 18.0, Some(ctx.now + 3 * 86_400))), ctx.now);
         vec![
             Box::new(datetime),
             Box::new(resources),
@@ -349,6 +374,7 @@ mod tests {
             Box::new(world),
             Box::new(battery),
             Box::new(countdown),
+            Box::new(claude),
         ]
     }
 
