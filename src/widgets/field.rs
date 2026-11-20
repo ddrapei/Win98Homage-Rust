@@ -119,7 +119,7 @@ impl Field {
             // the meter is the inside of the box; its bounds are its place
             rect: skin.meter(meter).map_or(Rect::EMPTY, |m| Rect::new(m.b[0], m.b[1], m.b[2], m.b[3])),
             inset: skin.int("CityInset", 2),
-            down: skin.int("CityDrop", 3) + skin.int("TextDY", 0),
+            down: skin.int("CityDrop", 2) + skin.int("TextDY", 0),
             skin,
             ink,
             select_bg,
