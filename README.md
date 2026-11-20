@@ -44,8 +44,10 @@ runs: the logic behind each widget is plain Rust in `src/widgets/` (`datetime.rs
 `resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`, `world.rs`), and a mouse action in a skin, such as
 `LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
-Text is laid out by DirectWrite and rasterised with aliased glyphs. Shapes are filled by a
-small software canvas.
+Text is laid out by DirectWrite and rasterised with aliased glyphs, set the way Windows 98's
+GDI set it: a whole-pixel font size (8 pt is 11 px), letters a whole number of pixels wide,
+and no kerning, so every glyph starts on a pixel and the gaps between letters are even.
+Shapes are filled by a small software canvas.
 
 `--dump <dir> [--state <file>]` draws each widget off-screen, in a state given by the
 file (which can ask for more than one note), and writes it out as a BMP — for comparing

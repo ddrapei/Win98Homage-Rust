@@ -217,8 +217,10 @@ impl Field {
         let width = self.stops[inked];
         self.fits = width <= room as f32;
         if self.fits {
-            // where the layout's own centring puts it: see `draw`
-            self.left = (room as f32 - width) / 2.0;
+            // where the layout's own centring puts it (see `draw`): the
+            // widths are whole px, and the half an odd room leaves is
+            // dropped, as GDI drops it
+            self.left = ((room as f32 - width) / 2.0).floor();
         } else {
             // Too long to show whole: it runs from the left edge and scrolls,
             // no further than leaves a pixel for the caret after its end, and
