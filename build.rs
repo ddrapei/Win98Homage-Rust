@@ -1,4 +1,4 @@
-//! Compiles the seven widgets' skins into static Rust tables.
+//! Compiles the eight widgets' skins into static Rust tables.
 //!
 //! The .ini files in `skins/` are the single source of truth for every
 //! pixel: each meter's position, shapes, colours, text options and mouse
@@ -552,7 +552,11 @@ fn dyn_world(n: &str) -> bool {
     ["Leg", "Time", "AngleHour", "AngleMin", "NoZone"].iter().any(|prefix| numbered(n, prefix))
 }
 
-const SKINS: [SkinDef; 7] = [
+fn dyn_battery(n: &str) -> bool {
+    matches!(n, "BattPct" | "BattSource" | "BattStatus" | "Charging")
+}
+
+const SKINS: [SkinDef; 8] = [
     SkinDef { module: "datetime", file: "Win98DateTime.ini", dynamic: dyn_datetime },
     SkinDef { module: "resources", file: "Win98Resources.ini", dynamic: dyn_resources },
     SkinDef { module: "notes", file: "Win98Notes.ini", dynamic: dyn_notes },
@@ -561,6 +565,7 @@ const SKINS: [SkinDef; 7] = [
     SkinDef { module: "rain", file: "Win98Rain.ini", dynamic: |_| false },
     SkinDef { module: "disk", file: "Win98Disk.ini", dynamic: dyn_disk },
     SkinDef { module: "world", file: "Win98World.ini", dynamic: dyn_world },
+    SkinDef { module: "battery", file: "Win98Battery.ini", dynamic: dyn_battery },
 ];
 
 /// Compile one skin into `out`; its `Tint` -- the colour its palette is drawn

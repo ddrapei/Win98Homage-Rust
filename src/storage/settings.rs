@@ -294,6 +294,9 @@ City2={city2}
 Zone2={zone2}
 City3={city3}
 Zone3={zone3}
+
+[Battery]
+Enabled=1
 ",
         week_start = dt.var("WeekStart"),
         use24 = dt.var("Use24Hour"),

@@ -284,6 +284,25 @@ pub struct MEMORYSTATUSEX {
     pub ullAvailExtendedVirtual: u64,
 }
 
+/// How the machine is powered, and how its battery stands.  255 in any of
+/// the first three, and u32::MAX in either time, is "not known".
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SYSTEM_POWER_STATUS {
+    /// 0 on battery, 1 on mains.
+    pub ACLineStatus: u8,
+    /// Bits: 1 high, 2 low, 4 critical, 8 charging, 128 no system battery.
+    pub BatteryFlag: u8,
+    /// 0 to 100.
+    pub BatteryLifePercent: u8,
+    /// 1 while battery saver is on.
+    pub SystemStatusFlag: u8,
+    /// Seconds left, on battery.
+    pub BatteryLifeTime: u32,
+    /// Seconds a full charge lasts.
+    pub BatteryFullLifeTime: u32,
+}
+
 /// WTSINFOEXW at level 1: the lock state and the sign-in time in one query.
 #[repr(C)]
 pub struct WTSINFOEXW {
@@ -621,6 +640,7 @@ unsafe extern "system" {
     pub fn GetTimeZoneInformation(tz: *mut TIME_ZONE_INFORMATION) -> u32;
     pub fn GetSystemTimes(idle: *mut FILETIME, kernel: *mut FILETIME, user: *mut FILETIME) -> BOOL;
     pub fn GlobalMemoryStatusEx(status: *mut MEMORYSTATUSEX) -> BOOL;
+    pub fn GetSystemPowerStatus(status: *mut SYSTEM_POWER_STATUS) -> BOOL;
     pub fn GlobalAlloc(flags: u32, bytes: usize) -> HANDLE;
     pub fn GlobalFree(mem: HANDLE) -> HANDLE;
     pub fn GlobalLock(mem: HANDLE) -> *mut c_void;

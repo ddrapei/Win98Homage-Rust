@@ -1,8 +1,8 @@
 # Win98 Widgets
 
-Seven Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
-Weather, Rain Window, Disk Space and World Clock — as one small Rust program. There is one of
-each, and as many more Sticky Notes as you ask for.
+Eight Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
+Weather, Rain Window, Disk Space, World Clock and Battery — as one small Rust program. There
+is one of each, and as many more Sticky Notes as you ask for.
 
 ![All seven widgets on a desktop, in the default rust colour](screenshots/rust.png)
 
@@ -11,7 +11,7 @@ memory is), **Date/Time Properties** (a calendar, a clock and a graph of when th
 was in use today) and, along the bottom, **Disk Space** and **Weather**. In the middle the
 **World Clock** keeps the time in three cities, with the **Rain Window** under it; on the
 right, a **Sticky Note**. The same desktop in two of the other colours is further down,
-under *Colour*.
+under *Colour*. The **Battery**, the smallest, came after these pictures were taken.
 
 | | |
 |--------------------------|---------|
@@ -36,12 +36,12 @@ Run the .exe. Nothing is installed: it can live anywhere. Only one copy runs at 
 
 Each widget's layout is an `.ini` file in [`skins/`](skins): a `[Variables]` section for the
 palette and the layout figures, then one section per meter — a shape, a line of text or an
-image — in the order they are painted. `build.rs` compiles the seven of them into static
+image — in the order they are painted. `build.rs` compiles the eight of them into static
 tables — every meter's position, shapes, colours, text options and mouse actions — so
 **the `.ini` files are the single source of truth for the layout**. Change a colour or move
 a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
 runs: the logic behind each widget is plain Rust in `src/widgets/` (`datetime.rs`,
-`resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`, `world.rs`), and a mouse action in a skin, such as
+`resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`, `world.rs`, `battery.rs`), and a mouse action in a skin, such as
 `LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
 Text is laid out by DirectWrite and rasterised with aliased glyphs, set the way Windows 98's
@@ -108,7 +108,8 @@ choice is kept in `settings.ini` as `Tint=` under
 calendar's heading and the selected day, the clocks' hands and dots, the usage bars, the
 used part of the disk pie, the rain. The greys and whites of the windows themselves —
 faces, bevels, fields — and the text stay exactly as they are, and so do the note's
-papers with the red margin printed on them, and the weather's icons. An accent takes the
+papers with the red margin printed on them, the weather's icons, and the battery's rings,
+red to green, which have to mean the same whatever the colour. An accent takes the
 colour's hue and how colourful it is, but keeps its own lightness, so the white text on
 a title bar stays as readable as it was; a very pale or very dark colour therefore comes
 out in between (navy gives a title bar that runs from navy to blue). The swatches show
@@ -193,6 +194,22 @@ keeps; after that its time is worked out on this machine, summer time and all. T
 are kept in `settings.ini` as `City1`/`Zone1` to `City3`/`Zone3` under `[World]`, and the
 figures follow the Date/Time widget's 12- or 24-hour choice.
 
+**Battery** is the smallest widget, 120 px wide and as tall as Weather and Disk Space. It
+shows how much charge is left as a battery cell standing on end, seen from a little above:
+a flat metal top with the terminal standing up from it, a metal band round the top of the
+side and another round its foot, and between them ten rings that light up from the bottom,
+red at the foot through orange and yellow to green at the top, so the less is left the
+redder it is.
+It is drawn the way pixel art draws a cylinder, with no outline: shaded in stripes down its
+length with the shine of a reflection, and every edge across it curving round. A groove
+parts each two rings. The rings not lit are dark grey, and any charge at all lights at
+least one. A bolt on the battery means it is charging. Under the battery are
+the percentage, where the power is coming from (*On battery* or *Plugged in*), and what the
+battery is doing: how long what is left will last ("2 hr 15 min left", or *Estimating...*
+until Windows has worked it out), *Charging*, *Fully charged* or *Not charging*. A machine
+with no battery shows a dark one and says *No battery*. The battery's shape, colours and
+shading are the `Batt*` and `Cell*` variables in `skins/Win98Battery.ini`.
+
 **Position** (right-click → Position): *On desktop* (default) keeps the widgets behind
 every window; *Normal*; *Always on top*.
 
@@ -222,6 +239,9 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
   its pane only, from a timer that runs only while there is rain to show — not while it
   is paused or closed, nor while the workstation is locked. A frame takes about a fifth
   of a millisecond to draw.
+- **Battery** asks Windows how the power stands once a second, which is one call, and
+  repaints only when something it shows has changed: a tenth of the charge, a percent, the
+  power source, or a minute of the time left.
 - **Disk Space** asks a drive on this machine for its figures every five seconds, and
   repaints only when a figure it shows has changed. A network drive, a disc or a card can
   take many seconds to answer, so those are asked every half minute from a thread that
@@ -234,7 +254,7 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 ## Layout of the source
 
 ```text
-skins/       the seven layouts (.ini), the weather icons and the tray icon
+skins/       the eight layouts (.ini), the weather icons and the tray icon
 screenshots/ the pictures in this file
 build.rs     those .ini files compiled into static tables
 src/
@@ -243,7 +263,7 @@ src/
                tray, the once-a-second tick, the frames in between
   tools/       for working on the program
     dump         off-screen rendering, for checking a change
-  widgets/     what a widget is, and the seven there are
+  widgets/     what a widget is, and the eight there are
     widget       the Widget trait: all the host knows about a widget
     field        a city field, typed on where it stands: the weather's and the
                  world clock's three
@@ -254,6 +274,7 @@ src/
     rain         Rain Window (the one that is animated)
     disk         Disk Space
     world        World Clock (and the child that finds a city's time zone)
+    battery      Battery
   input/       typing
     keys         the window that holds the keyboard for a widget
     editor       a text and what the keys do to it: the note's, the city fields'

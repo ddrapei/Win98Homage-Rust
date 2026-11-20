@@ -1,10 +1,10 @@
-//! Win98 Widgets -- seven Windows 98 style desktop widgets as one small
+//! Win98 Widgets -- eight Windows 98 style desktop widgets as one small
 //! native program.
 //!
 //! Date/Time Properties, Resource Meter, Sticky Note, Weather, Rain Window,
-//! Disk Space and World Clock, drawn from the .ini files in `skins/` -- with
-//! no Direct2D and no script engine underneath.  One of each, and as many
-//! more Sticky Notes as are asked for.
+//! Disk Space, World Clock and Battery, drawn from the .ini files in `skins/`
+//! -- with no Direct2D and no script engine underneath.  One of each, and as
+//! many more Sticky Notes as are asked for.
 //!
 //! # Where things are
 //!
@@ -21,7 +21,7 @@
 //!   tools/         for working on the program
 //!     dump           off-screen rendering, for checking a change
 //!
-//!   widgets/       what a widget is, and the seven there are
+//!   widgets/       what a widget is, and the eight there are
 //!     widget         what the host asks of a widget -- the one thing about
 //!                    them it knows
 //!     field          a city field, typed on where it stands: the weather's
@@ -34,6 +34,7 @@
 //!     disk           Disk Space
 //!     world          World Clock      (and the child that finds a city's
 //!                    time zone)
+//!     battery        Battery
 //!
 //!   input/        typing
 //!     keys           the window that holds the keyboard for a widget
@@ -85,7 +86,7 @@ use net::{geocode, http};
 use platform::{clock, grid, screens, sys};
 use storage::{settings, usage};
 use tools::dump;
-use widgets::{datetime, disk, field, notes, rain, resources, weather, widget, world};
+use widgets::{battery, datetime, disk, field, notes, rain, resources, weather, widget, world};
 
 fn main() {
     // There is no console to complain to: if something does go wrong, leave

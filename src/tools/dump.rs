@@ -27,6 +27,10 @@
 //!                                      letter, kind (2 removable, 3 fixed,
 //!                                      4 network, 5 disc), label, bytes in
 //!                                      all, bytes free
+//!   battery=76,0,0,8100                percent, plugged in (0/1), charging
+//!                                      (0/1), seconds left (empty or -1 for
+//!                                      no estimate yet); battery=none, or no
+//!                                      line at all, is a machine with none
 //!   set.Notes.Created=30 Jul 2026      any settings.ini value
 //!   set.General.Tint=0,0,128           among them the widgets' colour
 //!   do.datetime=SetPage 1;Select 12    commands to run before drawing
@@ -47,6 +51,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::battery::Battery;
 use crate::canvas::{self, Canvas, Rect};
 use crate::clock;
 use crate::datetime::DateTime;
@@ -265,6 +270,19 @@ pub fn run(args: &[String]) -> i32 {
         type_on(&mut w, get("type.world").unwrap_or(""));
         render(&w, &mut text, &dir.join("world.bmp"));
     }
+    {
+        // never this machine's battery: with no figures given, no battery
+        let mut w = Battery::new(&ctx);
+        let reading = get("battery").filter(|v| !v.eq_ignore_ascii_case("none")).map(|v| {
+            let p: Vec<&str> = v.split(',').map(str::trim).collect();
+            let num = |i: usize| p.get(i).and_then(|s| s.parse::<i64>().ok());
+            let flag = |i: usize| num(i).is_some_and(|n| n != 0);
+            let percent = num(0).map_or(0, |n| n.clamp(0, 255) as u8);
+            (percent, flag(1), flag(2), num(3).filter(|&n| n >= 0).map(|n| n.min(u32::MAX as i64) as u32))
+        });
+        w.set_fixed(reading);
+        render(&w, &mut text, &dir.join("battery.bmp"));
+    }
     0
 }
 
@@ -292,6 +310,8 @@ mod tests {
         disk.set_fixed(b'C', 3, "Windows", 511_000_000_000, 118_000_000_000);
         let mut world = World::new(ctx);
         world.set_fixed();
+        let mut battery = Battery::new(ctx);
+        battery.set_fixed(Some((35, true, true, None)));
         vec![
             Box::new(datetime),
             Box::new(resources),
@@ -300,6 +320,7 @@ mod tests {
             Box::new(rain),
             Box::new(disk),
             Box::new(world),
+            Box::new(battery),
         ]
     }
 

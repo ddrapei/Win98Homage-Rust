@@ -1,9 +1,9 @@
 //! The host: one small process, one thread, a layered window for each widget.
 //!
-//! There is one of each of the seven, and as many more Sticky Notes as have
+//! There is one of each of the eight, and as many more Sticky Notes as have
 //! been asked for: a note after the first is a window like any other, made
 //! from the same skin, with a section of settings.ini and a text file of its
-//! own (see `notes`).  The windows are numbered -- the seven first, then the
+//! own (see `notes`).  The windows are numbered -- the eight first, then the
 //! other notes -- and a number is never handed on: a deleted note's stays
 //! its own, unused, until the program ends.
 //!
@@ -42,6 +42,7 @@ use core::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering::Relaxed};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 
+use crate::battery::Battery;
 use crate::canvas::{self, Canvas, Rect};
 use crate::clock;
 use crate::datetime::DateTime;
@@ -70,6 +71,7 @@ enum Kind {
     Rain,
     Disk,
     World,
+    Battery,
 }
 
 impl Kind {
@@ -82,6 +84,7 @@ impl Kind {
             Kind::Rain => &skin::rain::SKIN,
             Kind::Disk => &skin::disk::SKIN,
             Kind::World => &skin::world::SKIN,
+            Kind::Battery => &skin::battery::SKIN,
         }
     }
 }
@@ -89,7 +92,7 @@ impl Kind {
 /// The widgets there is always one of, in the order their windows are
 /// numbered: what each is, its section of settings.ini, and what the menus
 /// call it.  The notes after the first follow these.
-const FIXED: [(Kind, &str, &str); 7] = [
+const FIXED: [(Kind, &str, &str); 8] = [
     (Kind::DateTime, "DateTime", "Date/Time"),
     (Kind::Resources, "Resources", "Resource Meter"),
     (Kind::Notes, notes::FIRST, "Sticky Note"),
@@ -97,6 +100,7 @@ const FIXED: [(Kind, &str, &str); 7] = [
     (Kind::Rain, "Rain", "Rain Window"),
     (Kind::Disk, "Disk", "Disk Space"),
     (Kind::World, "World", "World Clock"),
+    (Kind::Battery, "Battery", "Battery"),
 ];
 const DATETIME: usize = 0;
 const NOTE: usize = 2;
@@ -104,6 +108,7 @@ const WEATHER: usize = 3;
 const RAIN: usize = 4;
 const DISK: usize = 5;
 const WORLD: usize = 6;
+const BATTERY: usize = 7;
 
 const WIDGET_CLASS: &str = "Win98Widget";
 const MAIN_CLASS: &str = "Win98WidgetsMain";
@@ -651,6 +656,7 @@ impl App {
                 Kind::Rain => Box::new(Rain::new(&ctx)),
                 Kind::Disk => Box::new(Disk::new(&ctx)),
                 Kind::World => Box::new(World::new(&ctx)),
+                Kind::Battery => Box::new(Battery::new(&ctx)),
             };
             widget.tick(&mut ctx);
             widgets.0[i] = Some(widget);
@@ -1594,15 +1600,15 @@ impl App {
         tint::set(self.settings.tint());
     }
 
-    /// Which windows there are -- the seven, and a note for every other
+    /// Which windows there are -- the eight, and a note for every other
     /// section of settings.ini that is a note's -- and where each sits: where
     /// it was left, or -- the first time -- on the grid, in a column down the
     /// right-hand side of the screen: the date and time in the top corner,
     /// the resource meter under it, and under that the weather, the note to
-    /// its left, the rain to the left of the note and the disk to the left
-    /// of the rain; the world clock heads a second column, to the left of the
-    /// date and time.  Called with every window shut: at the start, and when
-    /// settings.ini is read again.
+    /// its left, the rain to the left of the note, the disk to the left of
+    /// the rain and the battery to the left of the disk; the world clock
+    /// heads a second column, to the left of the date and time.  Called with
+    /// every window shut: at the start, and when settings.ini is read again.
     fn read_slots(&mut self) {
         self.slots = FIXED.iter().map(|&(kind, section, title)| Slot::new(kind, section, title.to_owned())).collect();
         for section in notes::others(&self.settings) {
@@ -1629,14 +1635,16 @@ impl App {
         let weather = x0 + size(DATETIME).0 - size(WEATHER).0;
         let note = weather - step - size(NOTE).0;
         let rain = note - step - size(RAIN).0;
+        let disk = rain - step - size(DISK).0;
         let defaults = [
             (x0, y0),
             (x0, y1),
             (note, y2),
             (weather, y2),
             (rain, y2),
-            (rain - step - size(DISK).0, y2),
+            (disk, y2),
             (x0 - step - size(WORLD).0, y0),
+            (disk - step - size(BATTERY).0, y2),
         ];
         for i in 0..self.slots.len() {
             // A note after the first was put somewhere when it was made.  One
@@ -2332,7 +2340,7 @@ mod tests {
         // one entry for more of them wherever the menu is opened, in the list
         // of widgets, and none that ticks a note on and off
         for at in [None, Some(NOTE), Some(WEATHER)] {
-            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", "Weather", "Rain Window", "Disk Space", "World Clock"]);
+            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery"]);
             assert_eq!(app.menu(at).iter().filter(|m| m.0 == CMD_MORE_NOTES).count(), 1);
             assert!(!app.menu(at).iter().any(|m| m.0 == CMD_TOGGLE + NOTE));
         }
@@ -2342,7 +2350,7 @@ mod tests {
         // the first comes out, and with it the way to put one back
         app.menu_command(None, CMD_MORE_NOTES);
         assert_eq!((running(&app), app.slots.len()), (1, FIXED.len()));
-        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", minus, "Weather", "Rain Window", "Disk Space", "World Clock"]);
+        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery"]);
         // with none closed, more is a new one each time
         app.menu_command(None, CMD_MORE_NOTES);
         app.menu_command(Some(WEATHER), CMD_MORE_NOTES);
@@ -2499,7 +2507,7 @@ mod tests {
         assert_eq!((at(1).y0 - at(DATETIME).y1, at(WEATHER).y0 - at(1).y1), (gap, gap));
         assert_eq!((at(1).x1, at(WEATHER).x1), (at(DATETIME).x1, at(DATETIME).x1));
         // along the foot and along the top, a gap apart
-        for (left, right) in [(NOTE, WEATHER), (RAIN, NOTE), (DISK, RAIN), (WORLD, DATETIME)] {
+        for (left, right) in [(NOTE, WEATHER), (RAIN, NOTE), (DISK, RAIN), (BATTERY, DISK), (WORLD, DATETIME)] {
             assert_eq!((at(right).x0 - at(left).x1, at(right).y0), (gap, at(left).y0), "slot {left} to slot {right}");
         }
         let _ = std::fs::remove_dir_all(&dir);

@@ -11,6 +11,7 @@ pub mod widget;
 
 pub mod field;
 
+pub mod battery;
 pub mod datetime;
 pub mod disk;
 pub mod notes;
