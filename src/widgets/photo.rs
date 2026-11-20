@@ -36,10 +36,12 @@
 //! section, never in another's.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use crate::canvas::{Canvas, Rect};
 use crate::decode;
 use crate::settings::{self, Settings};
+use crate::sys;
 use crate::skin::{self, Hooks, Meter, Skin};
 use crate::text::Text;
 use crate::widget::{Ctx, Dirty, MenuItem, Outcome, Pressed, Request, Widget};
@@ -55,6 +57,12 @@ const INTERVALS: [(u32, &str); 5] =
 const EMPTY_RETRY: u32 = 5;
 /// How many photos back the back button can go.
 const HISTORY: usize = 100;
+/// How many photos read and brought down are kept in memory, 32 KB each: the
+/// one read ahead and the last few shown, so that going on or back to one
+/// of them is a swap and no more.
+const KEPT: usize = 5;
+/// The stack a thread reading a photo is given: WIC takes more than a little.
+const READER_STACK: usize = 1 << 20;
 /// Milliseconds a button takes to move a pixel, down or up.
 const PUSH_MS: u32 = 35;
 
@@ -252,13 +260,57 @@ fn folder_of(settings: &Settings, section: &str) -> (PathBuf, bool) {
     (path, name.eq_ignore_ascii_case(default))
 }
 
-/// The photos in a folder -- not in the folders inside it -- by name.
+/// The photos in a folder -- not in the folders inside it -- by name.  What
+/// each entry is comes with the listing itself, so this asks the disk
+/// nothing more for each file.
 fn photos_in(folder: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
-    let mut found: Vec<PathBuf> =
-        entries.flatten().map(|e| e.path()).filter(|p| decode::is_photo(p) && p.is_file()).collect();
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| decode::is_photo(Path::new(&e.file_name())) && e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.path())
+        .collect();
     found.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
     found
+}
+
+/// A photo read and brought down to the C60's pixels and colours, `w` x `h`;
+/// None if it cannot be read.
+fn read_photo(path: &Path, w: usize, h: usize, bg: u32) -> Option<Vec<u32>> {
+    let mut px = decode::load(path, w as u32, h as u32, bg)?;
+    dither12(&mut px, w);
+    Some(px)
+}
+
+/// Which way the frame is going: on to the next photo, or back to the one
+/// before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Going {
+    Next,
+    Back,
+}
+
+/// What a thread of the frame's has gone to read: a photo, or the list of
+/// the photos in the folder.  The thread ends with the answer.
+struct Reading {
+    /// The photo's path; None for the folder.
+    path: Option<PathBuf>,
+    answer: Receiver<Answer>,
+}
+
+enum Answer {
+    /// The photo brought down, or None if it would not read.
+    Photo(Option<Vec<u32>>),
+    Folder(Vec<PathBuf>),
+}
+
+/// Where the frame would go next.
+enum Upcoming {
+    Photo(PathBuf),
+    /// Nowhere: nothing before, or no photo in the folder.
+    Nowhere,
+    /// Not known until the folder has been looked at.
+    Wait,
 }
 
 pub struct Photo {
@@ -295,6 +347,26 @@ pub struct Photo {
     /// shuffled, so the same one is drawn every time.
     in_order: bool,
 
+    /// Photos read and brought down already, the latest last -- the one read
+    /// ahead, and the last few shown -- and None for a file that would not
+    /// read.  At most `KEPT`.
+    kept: Vec<(PathBuf, Option<Vec<u32>>)>,
+    /// The photo, or the folder, being read, if one is; a folder's list once
+    /// it has been read, for the next round; and where the frame is going
+    /// once what it is waiting for has been read.  The photo up stays up
+    /// while it waits.
+    reading: Option<Reading>,
+    listed: Option<Vec<PathBuf>>,
+    going: Option<Going>,
+    /// Whether the round under way has had a photo put up from it.  A round
+    /// that ends without one -- the folder's files all broken -- is not begun
+    /// again until the folder is next looked at.
+    round_tried: bool,
+    round_shown: bool,
+    /// For --dump and the tests: photos read there and then, on the thread
+    /// that asks, so that what is drawn is the photo asked for.
+    at_once: bool,
+
     /// The three buttons: their shape and colours, where each is in its
     /// travel, the one a press took hold of, and the milliseconds towards
     /// their next pixel of movement.
@@ -306,7 +378,19 @@ pub struct Photo {
 }
 
 impl Photo {
+    /// The frame with this section.  Its photos are read on threads of their
+    /// own, and the first is put up when it has been read.
     pub fn new(ctx: &Ctx, section: &str) -> Photo {
+        Photo::build(ctx, section, false)
+    }
+
+    /// The same, reading each photo there and then, on the thread that asks:
+    /// for --dump and the tests, which draw what is asked for at once.
+    pub fn reading_at_once(ctx: &Ctx, section: &str) -> Photo {
+        Photo::build(ctx, section, true)
+    }
+
+    fn build(ctx: &Ctx, section: &str, at_once: bool) -> Photo {
         let shape = Shape::of(ctx.settings, section);
         let skin = shape.skin();
         let block = skin.int("Block", 2).max(1);
@@ -338,6 +422,13 @@ impl Photo {
             paused: ctx.settings.flag(section, "Paused", skin.int("Paused", 0) != 0),
             rng: seed | 1,
             in_order: false,
+            kept: Vec::new(),
+            reading: None,
+            listed: None,
+            going: None,
+            round_tried: false,
+            round_shown: false,
+            at_once,
             keys: Keys {
                 w: skin.int("BtnW", 22),
                 h: skin.int("BtnH", 16),
@@ -350,7 +441,7 @@ impl Photo {
             since: 0,
         };
         photo.read_colours();
-        photo.show_next();
+        photo.next();
         photo
     }
 
@@ -377,15 +468,21 @@ impl Photo {
     pub fn set_fixed(&mut self) {
         self.in_order = true;
         self.forget_shown();
-        self.show_next();
+        self.next();
     }
 
-    /// Start afresh: no round under way, nothing shown before.
+    /// Start afresh: no round under way, nothing shown or read before, and
+    /// nothing being read -- a thread still reading answers to no one.
     fn forget_shown(&mut self) {
         self.round.clear();
         self.shown = None;
         self.past.clear();
         self.ahead.clear();
+        self.kept.clear();
+        self.reading = None;
+        self.listed = None;
+        self.going = None;
+        (self.round_tried, self.round_shown) = (false, false);
     }
 
     fn random(&mut self) -> u32 {
@@ -397,10 +494,9 @@ impl Photo {
         x
     }
 
-    /// A new round: every photo in the folder, shuffled -- with `last`, the
-    /// one shown last, not first, so that no photo is shown twice running.
-    fn new_round(&mut self, last: Option<&PathBuf>) {
-        let mut all = photos_in(&self.folder);
+    /// A new round: every photo in the folder, `all`, shuffled -- with the
+    /// one shown last not first, so that no photo is shown twice running.
+    fn new_round(&mut self, mut all: Vec<PathBuf>) {
         if self.in_order {
             all.reverse();
         } else {
@@ -408,21 +504,13 @@ impl Photo {
                 let j = self.random() as usize % (i + 1);
                 all.swap(i, j);
             }
-            if all.len() > 1 && all.last() == last {
+            if all.len() > 1 && all.last() == self.shown.as_ref() {
                 let last = all.len() - 1;
                 all.swap(0, last);
             }
         }
+        (self.round_tried, self.round_shown) = (!all.is_empty(), false);
         self.round = all;
-    }
-
-    /// Read `path` and make it the picture, brought down to the C60's
-    /// colours; false, and the picture as it was, if it cannot be read.
-    fn put_up(&mut self, path: &Path) -> bool {
-        let Some(mut px) = decode::load(path, self.w as u32, self.h as u32, self.bg) else { return false };
-        dither12(&mut px, self.w);
-        self.picture = px;
-        true
     }
 
     /// Keep the photo that is going in the past, for the back button.
@@ -435,72 +523,250 @@ impl Photo {
         }
     }
 
-    /// Put up the photo after this one: one the back button went past, if
-    /// there is one, or else the next of the round that can be read --
-    /// starting a new round when this one is done -- or none, if the folder
-    /// has none to show.  Each file is tried at most once a round and the
-    /// folder read at most once, so a folder of broken files costs one look
-    /// and no more.  A file that has gone, or will not read, is passed over.
-    fn show_next(&mut self) {
-        let leaving = self.shown.take();
-        while let Some(path) = self.ahead.pop() {
-            if self.put_up(&path) {
-                self.remember(leaving);
-                self.shown = Some(path);
-                return;
-            }
-        }
-        let mut looked = false;
-        loop {
-            if self.round.is_empty() {
-                if looked {
-                    break;
-                }
-                self.new_round(leaving.as_ref());
-                looked = true;
-            }
-            let Some(path) = self.round.pop() else { break };
-            if self.put_up(&path) {
-                self.remember(leaving);
-                self.shown = Some(path);
-                return;
-            }
-        }
-        // nothing to show; what was shown can still be gone back to
-        self.remember(leaving);
-        self.picture.clear();
-    }
-
-    /// Put up the photo shown before this one, passing over any that has
-    /// gone; false, and nothing changed, if there is none to go back to.
-    fn show_previous(&mut self) -> bool {
-        while let Some(path) = self.past.pop() {
-            if self.put_up(&path) {
-                if let Some(now) = self.shown.replace(path) {
-                    self.ahead.push(now);
-                }
-                return true;
-            }
-        }
-        false
-    }
-
-    /// The next photo now, and the time till the one after starting again.
+    /// On to the next photo: one the back button went past, if there is one,
+    /// or else the next of the round that can be read -- starting a new round
+    /// when this one is done -- or none, if the folder has none to show.
     fn next(&mut self) -> Dirty {
-        let had = !self.picture.is_empty();
-        self.show_next();
-        self.restart_clock();
-        if had || !self.picture.is_empty() { Dirty::Part(self.changed()) } else { Dirty::None }
+        self.going = Some(Going::Next);
+        self.advance()
     }
 
-    /// Back to the photo before, if there is one, and the time till the next
-    /// starting again.
+    /// Back to the photo shown before this one, if there is one.
     fn previous(&mut self) -> Dirty {
-        if !self.show_previous() {
+        self.going = Some(Going::Back);
+        self.advance()
+    }
+
+    /// Carry on towards where the frame is going.  A photo already read is
+    /// put up at once; one that would not read, or has gone from the disk
+    /// since it was read, is passed over; one not read yet is read -- on a
+    /// thread of its own, the photo there is staying up meanwhile (see
+    /// `collect`), or there and then in --dump and the tests.  The folder is
+    /// looked at the same way when a round begins.
+    ///
+    /// Each file is tried at most once a round and the folder looked at
+    /// most once each time, so a folder of broken files costs one look and
+    /// no more.
+    fn advance(&mut self) -> Dirty {
+        let mut looked = false;
+        while let Some(going) = self.going {
+            let path = match self.upcoming(going, &mut looked) {
+                Upcoming::Photo(path) => path,
+                Upcoming::Nowhere => return self.arrive_nowhere(going),
+                Upcoming::Wait => return Dirty::None,
+            };
+            match self.kept.iter().find(|k| k.0 == path).map(|k| k.1.is_some()) {
+                Some(true) if path.exists() => {
+                    self.arrive(going, path);
+                    return Dirty::Part(self.changed());
+                }
+                Some(_) => {
+                    self.take_kept(&path);
+                    self.pass_over(going);
+                }
+                None if self.at_once => {
+                    let px = read_photo(&path, self.w, self.h, self.bg);
+                    self.keep(path, px);
+                }
+                None => {
+                    // one at a time: a photo read ahead finishes first
+                    if self.reading.is_none() {
+                        self.read(path);
+                    }
+                    return Dirty::None;
+                }
+            }
+        }
+        Dirty::None
+    }
+
+    /// The photo the frame would go to next, going this way: the last one
+    /// shown before, going back; going on, the nearest one gone back past,
+    /// or the next of the round, beginning a new round if this one is done
+    /// -- unless the folder has been looked at already (`looked`), or the
+    /// round now done had nothing put up from it.  A new round waits for the
+    /// folder to have been looked at, on a thread of its own.
+    fn upcoming(&mut self, going: Going, looked: &mut bool) -> Upcoming {
+        let photo = |path: Option<&PathBuf>| path.map_or(Upcoming::Nowhere, |p| Upcoming::Photo(p.clone()));
+        match going {
+            Going::Back => photo(self.past.last()),
+            Going::Next => {
+                if !self.ahead.is_empty() {
+                    return photo(self.ahead.last());
+                }
+                if self.round.is_empty() {
+                    if *looked || (self.round_tried && !self.round_shown) {
+                        // looked at afresh the next time
+                        self.round_tried = false;
+                        return Upcoming::Nowhere;
+                    }
+                    let all = match self.listed.take() {
+                        Some(all) => all,
+                        None if self.at_once => photos_in(&self.folder),
+                        None => {
+                            // one at a time: a photo being read finishes first
+                            if self.reading.is_none() {
+                                self.list();
+                            }
+                            return Upcoming::Wait;
+                        }
+                    };
+                    self.new_round(all);
+                    *looked = true;
+                }
+                photo(self.round.last())
+            }
+        }
+    }
+
+    /// Take the photo `upcoming` gave off the list it came from.
+    fn pass_over(&mut self, going: Going) {
+        match going {
+            Going::Back => drop(self.past.pop()),
+            Going::Next if !self.ahead.is_empty() => drop(self.ahead.pop()),
+            Going::Next => drop(self.round.pop()),
+        }
+    }
+
+    /// Put up `path`, read already: the photo that was up kept in memory, and
+    /// in the past going on, or ahead going back.  Then the clock starts
+    /// again, and the photo after it is read ahead.
+    fn arrive(&mut self, going: Going, path: PathBuf) {
+        if going == Going::Next && self.ahead.is_empty() {
+            self.round_shown = true;
+        }
+        self.pass_over(going);
+        let px = self.take_kept(&path).flatten().unwrap_or_default();
+        let old = std::mem::replace(&mut self.picture, px);
+        if let Some(was) = self.shown.replace(path) {
+            if !old.is_empty() {
+                self.keep(was.clone(), Some(old));
+            }
+            match going {
+                Going::Next => self.remember(Some(was)),
+                Going::Back => self.ahead.push(was),
+            }
+        }
+        self.going = None;
+        self.restart_clock();
+        self.read_ahead();
+    }
+
+    /// There is nowhere to go.  Back, nothing changes.  On, the folder has no
+    /// photo to show: the pane says so -- what was up can still be gone back
+    /// to -- and it is looked at again soon.
+    fn arrive_nowhere(&mut self, going: Going) -> Dirty {
+        self.going = None;
+        if going == Going::Back {
             return Dirty::None;
         }
+        let had = !self.picture.is_empty();
+        let was = self.shown.take();
+        self.remember(was);
+        self.picture.clear();
         self.restart_clock();
-        Dirty::Part(self.changed())
+        if had { Dirty::Part(self.changed()) } else { Dirty::None }
+    }
+
+    /// While a photo is up, read the one that comes after it, so that going
+    /// on to it is quick.
+    fn read_ahead(&mut self) {
+        if self.at_once || self.reading.is_some() {
+            return;
+        }
+        let mut looked = false;
+        if let Upcoming::Photo(path) = self.upcoming(Going::Next, &mut looked) {
+            if !self.kept.iter().any(|k| k.0 == path) {
+                self.read(path);
+            }
+        }
+    }
+
+    /// Read a photo on a thread of its own, which ends with it.
+    fn read(&mut self, path: PathBuf) {
+        let (w, h, bg) = (self.w, self.h, self.bg);
+        let file = path.clone();
+        self.start(Some(path), move || Answer::Photo(read_photo(&file, w, h, bg)));
+    }
+
+    /// Look at the folder for the photos in it, on a thread of its own.
+    fn list(&mut self) {
+        let folder = self.folder.clone();
+        self.start(None, move || Answer::Folder(photos_in(&folder)));
+    }
+
+    /// Start a thread doing `work` for `path` (None for the folder), which
+    /// ends with the answer; the frame looks for it as it ticks and frames.
+    /// Without a thread to be had, the work is done here and now, and its
+    /// answer looked for all the same.
+    fn start<F: FnOnce() -> Answer + Send + 'static>(&mut self, path: Option<PathBuf>, work: F) {
+        use std::sync::{Arc, Mutex};
+        let (answer, waiting) = mpsc::channel();
+        // shared, so that it can be taken back if the thread never starts
+        let work = Arc::new(Mutex::new(Some(work)));
+        let (theirs, sender) = (Arc::clone(&work), answer.clone());
+        let started = std::thread::Builder::new().stack_size(READER_STACK).spawn(move || {
+            let job = theirs.lock().ok().and_then(|mut w| w.take());
+            if let Some(job) = job {
+                let found = job();
+                // if WIC started COM on this thread, it ends here
+                sys::com_done();
+                drop(sender.send(found));
+            }
+        });
+        if started.is_err() {
+            if let Some(job) = work.lock().ok().and_then(|mut w| w.take()) {
+                drop(answer.send(job()));
+            }
+        }
+        self.reading = Some(Reading { path, answer: waiting });
+    }
+
+    /// What a thread has read, once it is ready.  A photo is kept, and the
+    /// folder's list kept for the round about to begin; then the frame
+    /// carries on towards where it was going -- or, going nowhere, reads the
+    /// next photo ahead.
+    fn collect(&mut self) -> Dirty {
+        let Some(reading) = &self.reading else { return Dirty::None };
+        let answer = match reading.answer.try_recv() {
+            Ok(answer) => answer,
+            Err(TryRecvError::Empty) => return Dirty::None,
+            // the thread gave up without a word: as good as unreadable
+            Err(TryRecvError::Disconnected) => Answer::Photo(None),
+        };
+        let Some(Reading { path, .. }) = self.reading.take() else { return Dirty::None };
+        match (path, answer) {
+            (Some(path), Answer::Photo(px)) => self.keep(path, px),
+            (None, Answer::Folder(all)) => self.listed = Some(all),
+            // a folder that could not be looked at has no photos in it
+            (None, Answer::Photo(_)) => self.listed = Some(Vec::new()),
+            (Some(_), Answer::Folder(_)) => {}
+        }
+        // with nothing up, the pane was waiting, not saying it had nothing
+        let waiting = self.picture.is_empty() && self.going.is_some();
+        let mut dirty = self.advance();
+        if self.going.is_none() && !self.picture.is_empty() {
+            self.read_ahead();
+        }
+        if waiting {
+            dirty = dirty.and(Dirty::Part(self.changed()));
+        }
+        dirty
+    }
+
+    /// Keep a photo read, or that it would not read, the latest last; the
+    /// oldest goes when there are more than `KEPT`.
+    fn keep(&mut self, path: PathBuf, px: Option<Vec<u32>>) {
+        self.take_kept(&path);
+        if self.kept.len() == KEPT {
+            self.kept.remove(0);
+        }
+        self.kept.push((path, px));
+    }
+
+    fn take_kept(&mut self, path: &Path) -> Option<Option<Vec<u32>>> {
+        let at = self.kept.iter().position(|k| k.0 == path)?;
+        Some(self.kept.remove(at).1)
     }
 
     fn restart_clock(&mut self) {
@@ -674,9 +940,11 @@ impl Photo {
 }
 
 impl Hooks for Photo {
+    /// HasPhoto keeps the pane from saying it has no photo: there is one up,
+    /// or one on its way.
     fn num(&self, var: &str) -> f64 {
         match var {
-            "HasPhoto" => !self.picture.is_empty() as i32 as f64,
+            "HasPhoto" => (!self.picture.is_empty() || self.going.is_some()) as i32 as f64,
             _ => 0.0,
         }
     }
@@ -732,14 +1000,15 @@ impl Widget for Photo {
     }
 
     fn tick(&mut self, ctx: &mut Ctx) -> Dirty {
+        let collected = self.collect();
         if self.paused || ctx.locked {
-            return Dirty::None;
+            return collected;
         }
         self.left = self.left.saturating_sub(1);
         if self.left > 0 {
-            return Dirty::None;
+            return collected;
         }
-        self.next()
+        collected.and(self.next())
     }
 
     /// A press on a button is the button's: it goes down, and the window is
@@ -783,16 +1052,19 @@ impl Widget for Photo {
         outcome
     }
 
-    /// Frames only while a button is moving.
+    /// Frames only while a button is moving, or a photo is being read: each
+    /// frame looks for it, so that it goes up soon after it is ready.
     fn frame_ms(&self) -> u32 {
-        if self.moving() { PUSH_MS } else { 0 }
+        if self.moving() || self.reading.is_some() { PUSH_MS } else { 0 }
     }
 
-    /// A pixel further on for every button on its way, each `PUSH_MS`.
+    /// The photo being read, if it is ready; and a step further on for every
+    /// button on its way, each `PUSH_MS`.
     fn frame(&mut self, ms: u32) -> Dirty {
+        let collected = self.collect();
         self.since += ms;
         if self.since < PUSH_MS {
-            return Dirty::None;
+            return collected;
         }
         self.since = 0;
         let travel = self.keys.travel;
@@ -808,7 +1080,7 @@ impl Widget for Photo {
                 p.owed = false;
             }
         }
-        if moved { Dirty::Part(self.buttons()) } else { Dirty::None }
+        if moved { collected.and(Dirty::Part(self.buttons())) } else { collected }
     }
 
     fn command(&mut self, cmd: &str, _arg: i32, _x: i32, _y: i32, ctx: &mut Ctx) -> Outcome {
@@ -901,7 +1173,7 @@ mod tests {
     /// A frame with this section, on `dir`.
     fn frame(settings: &mut Settings, section: &str, dir: &Path) -> Photo {
         settings.set(section, "Folder", &dir.to_string_lossy());
-        Photo::new(&Ctx { now: 1_000, settings, locked: false, signed_in: None }, section)
+        Photo::reading_at_once(&Ctx { now: 1_000, settings, locked: false, signed_in: None }, section)
     }
 
     fn ctx(settings: &mut Settings) -> Ctx<'_> {
@@ -1440,5 +1712,78 @@ mod tests {
             assert_eq!((lines[1].0 - lines[0].1, lines[2].0 - lines[1].1), (gap, gap), "{shape:?}");
             assert!(gap > 0);
         }
+    }
+
+    /// Frames, as the host gives them while a photo is being read, until
+    /// nothing is.
+    fn settle(photo: &mut Photo) {
+        let start = std::time::Instant::now();
+        while photo.reading.is_some() {
+            assert!(start.elapsed().as_secs() < 20, "a photo took too long to read");
+            photo.frame(PUSH_MS);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// A frame as the host makes it, reading its photos on threads.
+    fn threaded(settings: &mut Settings, dir: &Path) -> Photo {
+        settings.set(FIRST, "Folder", &dir.to_string_lossy());
+        Photo::new(&ctx(settings), FIRST)
+    }
+
+    #[test]
+    fn photos_are_read_on_threads_of_their_own_and_the_next_one_ahead() {
+        let dir = folder("threads");
+        for (name, colour) in [("a.bmp", 0xFF0000), ("b.bmp", 0x00FF00), ("c.bmp", 0x0000FF)] {
+            put(&dir, name, colour);
+        }
+        let mut settings = Settings::in_memory();
+        let mut photo = threaded(&mut settings, &dir);
+        // made with its first photo still being read: nothing up yet, but the
+        // pane does not say there is no photo, and it asks for frames to look
+        assert!(photo.picture.is_empty() && photo.reading.is_some());
+        assert_eq!(photo.num("HasPhoto"), 1.0);
+        assert!(photo.frame_ms() > 0);
+
+        // read, put up, and the one after it read ahead; then nothing moves
+        settle(&mut photo);
+        let first = photo.shown.clone().expect("the first photo never came");
+        assert!(!photo.picture.is_empty());
+        assert_eq!(photo.frame_ms(), 0);
+        let upcoming = photo.round.last().cloned().unwrap();
+        assert!(photo.kept.iter().any(|k| k.0 == upcoming && k.1.is_some()), "the next photo was not read ahead");
+
+        // so going on to it is a swap, there and then, and so is going back
+        assert_eq!(photo.next(), Dirty::Part(photo.changed()));
+        assert_eq!(photo.shown.as_ref(), Some(&upcoming));
+        assert_eq!(photo.previous(), Dirty::Part(photo.changed()));
+        assert_eq!(photo.shown.as_ref(), Some(&first));
+        // never more than a few kept in memory
+        settle(&mut photo);
+        assert!(photo.kept.len() <= KEPT);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_of_broken_files_is_read_once_and_then_left() {
+        let dir = folder("broken");
+        std::fs::write(dir.join("a.jpg"), b"not a jpeg").unwrap();
+        std::fs::write(dir.join("b.png"), b"not a png").unwrap();
+        let mut settings = Settings::in_memory();
+        let mut photo = threaded(&mut settings, &dir);
+        settle(&mut photo);
+        // every file tried once, and then the pane says there is nothing,
+        // asks for no more frames, and waits to look again
+        assert!(photo.picture.is_empty() && photo.going.is_none());
+        assert_eq!((photo.num("HasPhoto"), photo.frame_ms(), photo.left), (0.0, 0, EMPTY_RETRY));
+        // a photo put in it is found at the next look
+        put(&dir, "c.bmp", 0x123456);
+        let mut ctx = ctx(&mut settings);
+        for _ in 0..EMPTY_RETRY {
+            photo.tick(&mut ctx);
+        }
+        settle(&mut photo);
+        assert_eq!(photo.shown, Some(dir.join("c.bmp")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

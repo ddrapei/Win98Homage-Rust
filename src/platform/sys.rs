@@ -749,26 +749,47 @@ pub const CLSCTX_INPROC_SERVER: u32 = 0x1;
 
 thread_local! {
     static COM_READY: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// `com_init` started COM here, and `com_done` is to stop it.
+    static COM_OWED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
 }
 
 /// Start COM on this thread, once: the window thread is a single-threaded
-/// apartment, which is what the folder dialog wants and WIC takes.  It is
-/// never stopped; it ends with the thread.  False if ole32 cannot be had.
+/// apartment, which is what the folder dialog wants and WIC takes.  On the
+/// window thread it is never stopped, and ends with the thread; a thread
+/// that ends before the program does stops it with `com_done`.  False if
+/// ole32 cannot be had.
 pub fn com_init() -> bool {
     if COM_READY.get() {
         return true;
     }
     type Init = unsafe extern "system" fn(*mut c_void, u32) -> HRESULT;
-    let ready = unsafe {
-        proc_address("ole32.dll", b"CoInitializeEx\0").is_some_and(|p| {
-            // S_OK, or S_FALSE if it was started already; RPC_E_CHANGED_MODE
-            // if something started it multi-threaded, which serves as well
-            let hr = core::mem::transmute::<*const c_void, Init>(p)(core::ptr::null_mut(), COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-            hr >= 0 || hr as u32 == 0x8001_0106
+    let hr = unsafe {
+        proc_address("ole32.dll", b"CoInitializeEx\0").map(|p| {
+            core::mem::transmute::<*const c_void, Init>(p)(core::ptr::null_mut(), COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)
         })
     };
+    // S_OK, or S_FALSE if it was started already -- either to be stopped
+    // once -- or RPC_E_CHANGED_MODE if something started it multi-threaded,
+    // which serves as well and is not ours to stop
+    let ready = hr.is_some_and(|hr| hr >= 0 || hr as u32 == 0x8001_0106);
+    COM_OWED.set(hr.is_some_and(|hr| hr >= 0));
     COM_READY.set(ready);
     ready
+}
+
+/// Stop COM on this thread, if `com_init` started it: for a thread that is
+/// about to end.
+pub fn com_done() {
+    COM_READY.set(false);
+    if !COM_OWED.replace(false) {
+        return;
+    }
+    type Uninit = unsafe extern "system" fn();
+    unsafe {
+        if let Some(p) = proc_address("ole32.dll", b"CoUninitialize\0") {
+            core::mem::transmute::<*const c_void, Uninit>(p)();
+        }
+    }
 }
 
 /// CoCreateInstance for an in-process server: the interface `iid` of a new

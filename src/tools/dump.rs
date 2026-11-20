@@ -350,7 +350,7 @@ pub fn run(args: &[String]) -> i32 {
     let sections: Vec<String> = core::iter::once(String::from(photo::FIRST)).chain(photo::others(ctx.settings)).collect();
     for section in sections {
         let tag = section.to_ascii_lowercase();
-        let mut w = Photo::new(&ctx, &section);
+        let mut w = Photo::reading_at_once(&ctx, &section);
         w.set_fixed();
         perform(&mut w, get(&format!("do.{tag}")).unwrap_or(""), &mut ctx);
         type_on(&mut w, get(&format!("type.{tag}")).unwrap_or(""));
@@ -399,7 +399,7 @@ mod tests {
         // leave as it is
         let folder = note.parent().unwrap().to_string_lossy().into_owned();
         ctx.settings.set(photo::FIRST, "Folder", &folder);
-        let mut photo = Photo::new(ctx, photo::FIRST);
+        let mut photo = Photo::reading_at_once(ctx, photo::FIRST);
         photo.set_fixed();
         assert_eq!(photo.num("HasPhoto"), 1.0, "the photo frame could not read {folder}\\photo.bmp");
         vec![

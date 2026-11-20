@@ -333,10 +333,14 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
   weather, every five minutes; in between it only moves the reset times on, once a
   minute. While Claude Code's sign-in has run out it asks nothing, and only looks every
   15 seconds at when the sign-in file was last changed — never at what is in it.
-- **Photo Frame** reads a photo only when it is due, and repaints only its pane. A photo
-  of many megapixels is decoded at a fraction of its size where the format allows (a JPEG
-  does) and brought down from there; between photos the frame only counts the seconds.
-  With no photo to show it looks in its folder every five seconds. A button moving asks
+- **Photo Frame** never reads a photo or its folder on the thread that draws the widgets:
+  a big photo can take a few hundred milliseconds to decode, which would stall the Rain
+  Window. Each is read on a short-lived thread of its own, as Disk Space asks a slow drive,
+  and the next photo is read while the current one is up, so that when its time comes it
+  is swapped in at once; the last few shown are kept too (32 KB each, five at most), so
+  going back is instant. A photo of many megapixels is decoded at a fraction of its size
+  where the format allows (a JPEG does) and brought down from there; only the pane is
+  repainted. With no photo to show it looks in its folder every five seconds. A button moving asks
   for frames, about thirty a second, for the tenth of a second it moves and no longer;
   only its tray is repainted.
 - **Disk Space** asks a drive on this machine for its figures every five seconds, and

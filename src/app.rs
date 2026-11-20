@@ -1358,6 +1358,9 @@ impl App {
             };
             self.paint(i, dirty);
         }
+        // a widget may have begun something that wants frames -- a photo
+        // frame waiting for a photo being read -- or ended it
+        self.pace();
         self.settings.save();
         self.check_desktop();
         // Starting up, a menu, typing: each touches a good deal that is
