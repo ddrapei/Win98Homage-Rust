@@ -34,12 +34,19 @@
 //! and the countdowns: `[Photo]`, then `[Photo2]`, `[Photo3]`, ... in
 //! settings.ini.  Each has its own folder and shape and keeps them in its own
 //! section, never in another's.
+//!
+//! The Dither Frame is the same frame with another picture in it (`Look`): a
+//! photo brought down to one bit a pixel, ink and paper, at the skin's own
+//! pixels (see `dither`).  Its frames are `[Dither]`, `[Dither2]`, ... with a
+//! folder of their own, and a dithering method as well; all the rest -- the
+//! folder, the round, the buttons, the shapes -- is this, as it is.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use crate::canvas::{Canvas, Rect};
 use crate::decode;
+use crate::dither::{self, Method};
 use crate::settings::{self, Settings};
 use crate::sys;
 use crate::skin::{self, Hooks, Meter, Skin};
@@ -48,6 +55,38 @@ use crate::widget::{Ctx, Dirty, MenuItem, Outcome, Pressed, Request, Widget};
 
 /// The first frame's section; the others are `Photo2`, `Photo3`, ...
 pub const FIRST: &str = "Photo";
+
+/// Which frame it is: the Photo Frame, a phone's screen of colour, or the
+/// Dither Frame, a picture of one bit a pixel in ink on paper.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Look {
+    Photo,
+    Dither,
+}
+
+impl Look {
+    /// The first frame's section; the others are numbered after it.
+    pub fn first(self) -> &'static str {
+        match self {
+            Look::Photo => FIRST,
+            Look::Dither => dither::FIRST,
+        }
+    }
+
+    /// What the frames of this look are called in the menus.
+    fn title(self) -> &'static str {
+        match self {
+            Look::Photo => "Photo Frame",
+            Look::Dither => "Dither Frame",
+        }
+    }
+
+    /// The skin a frame of this look starts in, whose [Variables] say what
+    /// a frame starts with.
+    fn defaults(self) -> &'static Skin {
+        Shape::Wide.skin(self)
+    }
+}
 
 /// Seconds a photo stays, as the menu offers them.
 const INTERVALS: [(u32, &str); 5] =
@@ -127,6 +166,8 @@ const MENU_INTERVAL: u32 = 20;
 const MENU_PAUSE: u32 = 30;
 const MENU_CHOOSE: u32 = 31;
 const MENU_OPEN: u32 = 32;
+/// From here, the Dither Frame's methods, in the order of `Method::ALL`.
+const MENU_METHOD: u32 = 40;
 /// What the folder dialog asks.
 const CHOOSE_PROMPT: &str = "Choose the folder of photos this frame shows:";
 
@@ -158,11 +199,14 @@ impl Shape {
         }
     }
 
-    pub fn skin(self) -> &'static Skin {
-        match self {
-            Shape::Tall => &skin::photo_tall::SKIN,
-            Shape::Wide => &skin::photo_wide::SKIN,
-            Shape::Square => &skin::photo_square::SKIN,
+    pub fn skin(self, look: Look) -> &'static Skin {
+        match (look, self) {
+            (Look::Photo, Shape::Tall) => &skin::photo_tall::SKIN,
+            (Look::Photo, Shape::Wide) => &skin::photo_wide::SKIN,
+            (Look::Photo, Shape::Square) => &skin::photo_square::SKIN,
+            (Look::Dither, Shape::Tall) => &skin::dither_tall::SKIN,
+            (Look::Dither, Shape::Wide) => &skin::dither_wide::SKIN,
+            (Look::Dither, Shape::Square) => &skin::dither_square::SKIN,
         }
     }
 
@@ -176,7 +220,12 @@ impl Shape {
 
 /// The skin of the frame with this section: the one for its shape.
 pub fn skin_of(settings: &Settings, section: &str) -> &'static Skin {
-    Shape::of(settings, section).skin()
+    look_skin(Look::Photo, settings, section)
+}
+
+/// The same for a frame of either look.
+pub fn look_skin(look: Look, settings: &Settings, section: &str) -> &'static Skin {
+    Shape::of(settings, section).skin(look)
 }
 
 /// The 4 x 4 Bayer matrix: where in each 4 x 4 square a level in between
@@ -199,25 +248,35 @@ pub fn dither12(px: &mut [u32], w: usize) {
     }
 }
 
-/// Which frame a section is: 1 for `[Photo]`, n for `[Photo<n>]`, and None
-/// for a section that is not a frame's.
-fn number(section: &str) -> Option<u32> {
-    settings::numbered(section, FIRST)
+/// Which frame of a look a section is: 1 for `[Photo]`, n for `[Photo<n>]`,
+/// and None for a section that is not a frame's.
+fn number(look: Look, section: &str) -> Option<u32> {
+    settings::numbered(section, look.first())
 }
 
 /// What a frame is called in the menus: the first is the Photo Frame, and the
 /// others have their numbers.
 pub fn name(section: &str) -> String {
-    match number(section) {
-        Some(n) if n > 1 => format!("Photo Frame {n}"),
-        _ => String::from("Photo Frame"),
+    name_of(Look::Photo, section)
+}
+
+/// The same for a frame of either look.
+pub fn name_of(look: Look, section: &str) -> String {
+    match number(look, section) {
+        Some(n) if n > 1 => format!("{} {n}", look.title()),
+        _ => String::from(look.title()),
     }
 }
 
 /// The sections of the frames after the first, in the order of their numbers.
 pub fn others(settings: &Settings) -> Vec<String> {
+    others_of(Look::Photo, settings)
+}
+
+/// The same for the frames of either look.
+pub fn others_of(look: Look, settings: &Settings) -> Vec<String> {
     let mut found: Vec<(u32, &str)> =
-        settings.sections().filter_map(|s| Some((number(s).filter(|&n| n > 1)?, s))).collect();
+        settings.sections().filter_map(|s| Some((number(look, s).filter(|&n| n > 1)?, s))).collect();
     found.sort();
     found.dedup_by_key(|f| f.0);
     found.into_iter().map(|(_, s)| s.to_owned()).collect()
@@ -227,10 +286,15 @@ pub fn others(settings: &Settings) -> Vec<String> {
 /// has, on the folder and in the shape a frame starts with.  Returns the
 /// section.
 pub fn create(settings: &mut Settings) -> String {
-    let taken: Vec<u32> = settings.sections().filter_map(number).collect();
+    create_in(Look::Photo, settings)
+}
+
+/// The same for a frame of either look.
+pub fn create_in(look: Look, settings: &mut Settings) -> String {
+    let taken: Vec<u32> = settings.sections().filter_map(|s| number(look, s)).collect();
     let n = (2..).find(|n| !taken.contains(n)).unwrap_or(u32::MAX);
-    let section = format!("{FIRST}{n}");
-    let defaults = &skin::photo_wide::SKIN;
+    let section = format!("{}{n}", look.first());
+    let defaults = look.defaults();
     settings.set(&section, "Folder", defaults.var("Folder"));
     settings.set(&section, "Shape", defaults.var("Shape"));
     section
@@ -248,8 +312,8 @@ pub fn forget(settings: &mut Settings, section: &str) -> Vec<PathBuf> {
 /// frame starts with, which the program may make.  Settings kept nowhere (the
 /// test harness's) have nothing beside them: a name that does not say where
 /// is no folder at all.
-fn folder_of(settings: &Settings, section: &str) -> (PathBuf, bool) {
-    let default = skin::photo_wide::SKIN.var("Folder");
+fn folder_of(look: Look, settings: &Settings, section: &str) -> (PathBuf, bool) {
+    let default = look.defaults().var("Folder");
     let name = settings.text(section, "Folder", default);
     let name = if name.trim().is_empty() { default } else { name.trim() };
     let path = PathBuf::from(name);
@@ -276,11 +340,16 @@ fn photos_in(folder: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// A photo read and brought down to the C60's pixels and colours, `w` x `h`;
-/// None if it cannot be read.
-fn read_photo(path: &Path, w: usize, h: usize, bg: u32) -> Option<Vec<u32>> {
+/// A photo read and brought down, `w` x `h`; None if it cannot be read.  For
+/// the Photo Frame, to the C60's pixels and colours; for the Dither Frame, to
+/// the light of each pixel, which is brought down to one bit when it is put
+/// up (`Photo::develop`).
+fn read_photo(look: Look, path: &Path, w: usize, h: usize, bg: u32) -> Option<Vec<u32>> {
     let mut px = decode::load(path, w as u32, h as u32, bg)?;
-    dither12(&mut px, w);
+    match look {
+        Look::Photo => dither12(&mut px, w),
+        Look::Dither => px = dither::tones(&px),
+    }
     Some(px)
 }
 
@@ -316,6 +385,7 @@ enum Upcoming {
 }
 
 pub struct Photo {
+    look: Look,
     section: String,
     shape: Shape,
     skin: &'static Skin,
@@ -324,11 +394,20 @@ pub struct Photo {
     w: usize,
     h: usize,
     block: i32,
-    /// The photo shown, `w` x `h` of 0xFFRRGGBB already brought down to the
-    /// C60's colours; empty while there is none.
+    /// The photo shown, `w` x `h`, as it was read and brought down
+    /// (`read_photo`); empty while there is none.
+    source: Vec<u32>,
+    /// The same, as it is drawn: 0xFFRRGGBB.  For the Photo Frame it is the
+    /// source as it is; for the Dither Frame, the source brought down to one
+    /// bit and painted, again whenever the method or the tint changes.
     picture: Vec<u32>,
     /// What a transparent part of a photo is laid on.
     bg: u32,
+    /// The Dither Frame's: how it brings a photo down to one bit, and the
+    /// ink and the paper it paints it in.
+    method: Method,
+    ink: u32,
+    paper: u32,
 
     folder: PathBuf,
     /// Still to come this round, the next one last.
@@ -380,23 +459,23 @@ pub struct Photo {
 }
 
 impl Photo {
-    /// The frame with this section.  Its photos are read on threads of their
-    /// own, and the first is put up when it has been read.
-    pub fn new(ctx: &Ctx, section: &str) -> Photo {
-        Photo::build(ctx, section, false)
+    /// The frame of `look` with this section.  Its photos are read on threads
+    /// of their own, and the first is put up when it has been read.
+    pub fn new(ctx: &Ctx, look: Look, section: &str) -> Photo {
+        Photo::build(ctx, look, section, false)
     }
 
     /// The same, reading each photo there and then, on the thread that asks:
     /// for --dump and the tests, which draw what is asked for at once.
-    pub fn reading_at_once(ctx: &Ctx, section: &str) -> Photo {
-        Photo::build(ctx, section, true)
+    pub fn reading_at_once(ctx: &Ctx, look: Look, section: &str) -> Photo {
+        Photo::build(ctx, look, section, true)
     }
 
-    fn build(ctx: &Ctx, section: &str, at_once: bool) -> Photo {
+    fn build(ctx: &Ctx, look: Look, section: &str, at_once: bool) -> Photo {
         let shape = Shape::of(ctx.settings, section);
-        let skin = shape.skin();
+        let skin = shape.skin(look);
         let block = skin.int("Block", 2).max(1);
-        let (folder, is_default) = folder_of(ctx.settings, section);
+        let (folder, is_default) = folder_of(look, ctx.settings, section);
         // The folder a frame starts on is made for it, beside settings.ini,
         // so that there is somewhere to put the photos.
         if is_default && !folder.as_os_str().is_empty() && !folder.exists() {
@@ -406,14 +485,20 @@ impl Photo {
         // a different order for each frame, even on the same folder
         let seed = section.bytes().fold(ctx.now as u32, |s, b| s.wrapping_mul(31).wrapping_add(b as u32));
         let mut photo = Photo {
+            look,
             section: section.to_owned(),
             shape,
             skin,
             w: (skin.int("PicW", 202) / block) as usize,
             h: (skin.int("PicH", 160) / block) as usize,
             block,
+            source: Vec::new(),
             picture: Vec::new(),
-            bg: skin.colour("PhotoBg"),
+            // the colours, just below
+            bg: 0,
+            method: Method::of(ctx.settings, section, skin),
+            ink: 0,
+            paper: 0,
             folder,
             round: Vec::new(),
             shown: None,
@@ -447,11 +532,15 @@ impl Photo {
         photo
     }
 
-    /// The colours of the pane and the buttons, from the skin: at the start,
-    /// and again for every change of tint (though none of them is tinted).
+    /// The colours of the pane, the buttons and the Dither Frame's picture,
+    /// from the skin: at the start, and again for every change of tint.  Of
+    /// them only the Dither Frame's ink is tinted.  A transparent part of a
+    /// photo is laid on the pane's dark in the Photo Frame, and on the paper
+    /// in the Dither Frame.
     fn read_colours(&mut self) {
         let c = |name: &str| self.skin.colour(name);
-        self.bg = c("PhotoBg");
+        (self.ink, self.paper) = (c("DitherInk"), c("DitherPaper"));
+        self.bg = if self.look == Look::Dither { self.paper } else { c("PhotoBg") };
         self.colours = KeyColours {
             line: c("BtnLine"),
             hi: c("BtnHi"),
@@ -463,6 +552,15 @@ impl Photo {
             lit: c("GlyphLit"),
             off: c("GlyphOff"),
         };
+    }
+
+    /// The photo as it is drawn, from what was read of it: the Photo Frame's
+    /// as it is, the Dither Frame's brought down to one bit and painted.
+    fn develop(&self, source: &[u32]) -> Vec<u32> {
+        match self.look {
+            Look::Photo => source.to_vec(),
+            Look::Dither => dither::render(source, self.w, self.method, self.ink, self.paper),
+        }
     }
 
     /// For the test harness: the first photo by name, and the rest in the
@@ -567,7 +665,7 @@ impl Photo {
                     self.pass_over(going);
                 }
                 None if self.at_once => {
-                    let px = read_photo(&path, self.w, self.h, self.bg);
+                    let px = read_photo(self.look, &path, self.w, self.h, self.bg);
                     self.keep(path, px);
                 }
                 None => {
@@ -639,7 +737,8 @@ impl Photo {
         }
         self.pass_over(going);
         let px = self.take_kept(&path).flatten().unwrap_or_default();
-        let old = std::mem::replace(&mut self.picture, px);
+        let old = std::mem::replace(&mut self.source, px);
+        self.picture = self.develop(&self.source);
         if let Some(was) = self.shown.replace(path) {
             if !old.is_empty() {
                 self.keep(was.clone(), Some(old));
@@ -665,6 +764,7 @@ impl Photo {
         let had = !self.picture.is_empty();
         let was = self.shown.take();
         self.remember(was);
+        self.source.clear();
         self.picture.clear();
         self.restart_clock();
         if had { Dirty::Part(self.changed()) } else { Dirty::None }
@@ -686,9 +786,9 @@ impl Photo {
 
     /// Read a photo on a thread of its own, which ends with it.
     fn read(&mut self, path: PathBuf) {
-        let (w, h, bg) = (self.w, self.h, self.bg);
+        let (look, w, h, bg) = (self.look, self.w, self.h, self.bg);
         let file = path.clone();
-        self.start(Some(path), move || Answer::Photo(read_photo(&file, w, h, bg)));
+        self.start(Some(path), move || Answer::Photo(read_photo(look, &file, w, h, bg)));
     }
 
     /// Look at the folder for the photos in it, on a thread of its own.
@@ -952,15 +1052,24 @@ impl Hooks for Photo {
     }
 
     /// [MeterPhoto]: a `block` x `block` square for each of the photo's
-    /// pixels -- with none, the pane's own dark shows, and the skin says why.
-    /// [MeterButtons]: the three buttons, as far down as each is pressed.
+    /// pixels, a run of the same colour along a row at a time -- with none,
+    /// the pane's own dark shows, and the skin says why.  [MeterButtons]: the
+    /// three buttons, as far down as each is pressed.
     fn custom(&self, meter: &Meter, x: i32, y: i32, canvas: &mut Canvas, _text: &mut Text) {
         match meter.name {
             "MeterPhoto" => {
                 let b = self.block;
-                for (i, &colour) in self.picture.iter().enumerate() {
-                    let (px, py) = ((i % self.w) as i32, (i / self.w) as i32);
-                    canvas.fill(x + px * b, y + py * b, b, b, colour);
+                for (row, line) in self.picture.chunks(self.w.max(1)).enumerate() {
+                    let top = y + row as i32 * b;
+                    if top + b <= canvas.clip.y0 || top >= canvas.clip.y1 {
+                        continue;
+                    }
+                    let mut start = 0;
+                    while start < line.len() {
+                        let end = start + line[start..].iter().take_while(|&&c| c == line[start]).count();
+                        canvas.fill(x + start as i32 * b, top, (end - start) as i32 * b, b, line[start]);
+                        start = end;
+                    }
                 }
             }
             "MeterButtons" => {
@@ -985,6 +1094,21 @@ impl Widget for Photo {
     }
 
     fn about(&self) -> &'static str {
+        if self.look == Look::Dither {
+            return "Win98 Dither Frame\n\n\
+                    The photos in a folder, one after another, each brought down to \
+                    one bit a pixel -- ink or paper, nothing between -- as a Macintosh \
+                    of 1984 showed a scanned photo.  The ink is the colour the widgets \
+                    are drawn in, so it turns with the colour picked in the menu.\n\n\
+                    Put photos in its folder (right-click, Open folder), or choose \
+                    another.  JPEG, PNG, BMP, GIF, TIFF and WebP photos are shown.\n\n\
+                    Right-click for how it dithers: Atkinson's, the Macintosh's own, \
+                    crisp and contrasty; Floyd and Steinberg's, with the most detail; \
+                    or Bayer's even cross-hatching.  And, as on the Photo Frame, for \
+                    the frame's shape and how long each photo stays; the buttons under \
+                    the photo go back, stop and go on.  Dither Frame + in the Widgets \
+                    menu makes another frame.";
+        }
         "Win98 Photo Frame\n\n\
          The photos in a folder, one after another, each shown as the screen \
          of a Siemens C60 would have shown it: 101 x 80 pixels and 4096 \
@@ -1107,6 +1231,12 @@ impl Widget for Photo {
             items.push(MenuItem { id: MENU_SHAPE + k as u32, label: shape.label(), checked: shape == self.shape });
         }
         items.push(line());
+        if self.look == Look::Dither {
+            for (k, method) in Method::ALL.into_iter().enumerate() {
+                items.push(MenuItem { id: MENU_METHOD + k as u32, label: method.label(), checked: method == self.method });
+            }
+            items.push(line());
+        }
         for (k, &(seconds, label)) in INTERVALS.iter().enumerate() {
             items.push(MenuItem { id: MENU_INTERVAL + k as u32, label, checked: seconds == self.interval });
         }
@@ -1134,6 +1264,17 @@ impl Widget for Photo {
                 ctx.settings.set_int(&self.section, "Interval", self.interval as i32);
                 Outcome::none()
             }
+            _ if self.look == Look::Dither && (MENU_METHOD..MENU_METHOD + Method::ALL.len() as u32).contains(&id) => {
+                let method = Method::ALL[(id - MENU_METHOD) as usize];
+                if method == self.method {
+                    return Outcome::none();
+                }
+                self.method = method;
+                ctx.settings.set(&self.section, "Method", method.key());
+                // the photo up, again, from its tones: nothing is read
+                self.picture = self.develop(&self.source);
+                Outcome::dirty(Dirty::Part(self.pane()))
+            }
             MENU_PAUSE => self.set_stopped(!self.paused, ctx),
             MENU_CHOOSE => Outcome::request(Request::ChooseFolder(self.folder.clone(), CHOOSE_PROMPT)),
             MENU_OPEN if self.folder.is_dir() => Outcome::request(Request::Open(self.folder.clone())),
@@ -1150,9 +1291,12 @@ impl Widget for Photo {
         Dirty::Part(self.changed())
     }
 
+    /// The colours read again.  The Dither Frame's ink is the tint, so the
+    /// photo up is painted again in it -- the Photo Frame's is in its own
+    /// colours, and stays as it is.
     fn retint(&mut self) {
-        // untinted, but read again with the rest, as every widget's are
         self.read_colours();
+        self.picture = self.develop(&self.source);
     }
 }
 
@@ -1176,11 +1320,99 @@ mod tests {
     /// A frame with this section, on `dir`.
     fn frame(settings: &mut Settings, section: &str, dir: &Path) -> Photo {
         settings.set(section, "Folder", &dir.to_string_lossy());
-        Photo::reading_at_once(&Ctx { now: 1_000, settings, locked: false, signed_in: None }, section)
+        Photo::reading_at_once(&Ctx { now: 1_000, settings, locked: false, signed_in: None }, Look::Photo, section)
     }
 
     fn ctx(settings: &mut Settings) -> Ctx<'_> {
         Ctx { now: 1_000, settings, locked: false, signed_in: None }
+    }
+
+    /// A photo of a grey ramp, dark on the left to light on the right, in
+    /// `dir`: something for a dither frame to dither.
+    fn put_ramp(dir: &Path, name: &str) {
+        let grey = |v: u32| 0xFF00_0000 | v << 16 | v << 8 | v;
+        std::fs::write(dir.join(name), decode::bmp(64, 48, |x, _| grey(x as u32 * 4))).unwrap();
+    }
+
+    /// A dither frame on `dir`.
+    fn dither_frame(settings: &mut Settings, dir: &Path) -> Photo {
+        settings.set(dither::FIRST, "Folder", &dir.to_string_lossy());
+        Photo::reading_at_once(&ctx(settings), Look::Dither, dither::FIRST)
+    }
+
+    #[test]
+    fn a_dither_frame_is_one_bit_a_skin_pixel_in_ink_and_paper() {
+        let dir = folder("dither-bits");
+        put_ramp(&dir, "ramp.bmp");
+        let mut settings = Settings::in_memory();
+        for shape in Shape::ALL {
+            settings.set(dither::FIRST, "Shape", shape.key());
+            let photo = dither_frame(&mut settings, &dir);
+            // as many 1-bit pixels as the skin has, each drawn as one of its own
+            let skin = shape.skin(Look::Dither);
+            assert_eq!((photo.block, photo.w, photo.h), (1, skin.int("PicW", 0) as usize, skin.int("PicH", 0) as usize));
+            assert_eq!(skin.w, shape.skin(Look::Photo).w, "{shape:?}: the same frame as the Photo Frame's");
+            assert_eq!(photo.picture.len(), photo.w * photo.h);
+            // ink and paper and nothing between, dark on the left and light
+            // on the right
+            assert!(photo.picture.iter().all(|&p| p == photo.ink || p == photo.paper));
+            let row = &photo.picture[photo.w * (photo.h / 2)..][..photo.w];
+            assert_eq!((row[0], row[photo.w - 1]), (photo.ink, photo.paper));
+        }
+        // its own folder, beside settings.ini, not the Photo Frame's
+        assert_eq!(Look::Dither.defaults().var("Folder"), "Dither");
+        assert_ne!(Look::Dither.defaults().var("Folder"), Look::Photo.defaults().var("Folder"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dither_frame_dithers_as_its_menu_says_and_keeps_it() {
+        let dir = folder("dither-method");
+        put_ramp(&dir, "ramp.bmp");
+        let mut settings = Settings::in_memory();
+        let mut photo = dither_frame(&mut settings, &dir);
+        let mut items = Vec::new();
+        photo.menu(&mut items);
+        let methods: Vec<(&str, bool)> = items.iter().filter(|i| (MENU_METHOD..MENU_METHOD + 3).contains(&i.id)).map(|i| (i.label, i.checked)).collect();
+        assert_eq!(methods, [("Atkinson dither", true), ("Floyd-Steinberg dither", false), ("Bayer dither", false)]);
+        let atkinson = photo.picture.clone();
+
+        // Bayer's: another picture, at once, from the same photo -- nothing
+        // read again -- and kept for the next run
+        let outcome = photo.menu_command(MENU_METHOD + 2, &mut ctx(&mut settings));
+        assert_eq!(outcome.dirty, Dirty::Part(photo.pane()));
+        assert_ne!(photo.picture, atkinson);
+        assert_eq!((photo.method, settings.text(dither::FIRST, "Method", "")), (Method::Bayer, String::from("bayer")));
+        let again = dither_frame(&mut settings, &dir);
+        assert_eq!((again.method, &again.picture), (Method::Bayer, &photo.picture));
+
+        // and the Photo Frame has no such entries
+        let mut settings = Settings::in_memory();
+        let plain = frame(&mut settings, FIRST, &dir);
+        let mut items = Vec::new();
+        plain.menu(&mut items);
+        assert!(!items.iter().any(|i| (MENU_METHOD..MENU_METHOD + 3).contains(&i.id)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dither_frames_ink_is_the_tint() {
+        let dir = folder("dither-tint");
+        put_ramp(&dir, "ramp.bmp");
+        let mut settings = Settings::in_memory();
+        crate::tint::set(crate::tint::BASE);
+        let mut photo = dither_frame(&mut settings, &dir);
+        let (ink, paper) = (photo.ink, photo.paper);
+        let navy = crate::tint::PRESETS.iter().find(|p| p.0 == "Navy").unwrap().1;
+        crate::tint::set(navy);
+        photo.retint();
+        // the ink turns with the tint, and the photo up is painted in it;
+        // the paper is the fields' cream whatever the tint
+        assert_ne!(photo.ink, ink);
+        assert_eq!(photo.paper, paper);
+        assert!(photo.picture.contains(&photo.ink) && !photo.picture.contains(&ink));
+        crate::tint::set(crate::tint::BASE);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1188,7 +1420,7 @@ mod tests {
         for (shape, pixels, frame) in
             [(Shape::Wide, (101, 80), (218, 223)), (Shape::Tall, (80, 101), (176, 265)), (Shape::Square, (80, 80), (176, 223))]
         {
-            let skin = shape.skin();
+            let skin = shape.skin(Look::Photo);
             let block = skin.int("Block", 0);
             assert_eq!(block, 2);
             assert_eq!((skin.int("PicW", 0) / block, skin.int("PicH", 0) / block), pixels, "{shape:?}");
@@ -1388,14 +1620,14 @@ mod tests {
     fn the_folder_is_beside_settings_ini_unless_it_says_where() {
         let dir = folder("beside");
         let mut settings = Settings::in_memory_at(&dir);
-        assert_eq!(folder_of(&settings, FIRST), (dir.join("Photos"), true));
+        assert_eq!(folder_of(Look::Photo, &settings, FIRST), (dir.join("Photos"), true));
         // the folder a frame starts on is made for it
-        let _ = Photo::new(&ctx(&mut settings), FIRST);
+        let _ = Photo::new(&ctx(&mut settings), Look::Photo, FIRST);
         assert!(dir.join("Photos").is_dir());
         settings.set(FIRST, "Folder", "C:\\Pictures\\Holiday");
-        assert_eq!(folder_of(&settings, FIRST), (PathBuf::from("C:\\Pictures\\Holiday"), false));
+        assert_eq!(folder_of(Look::Photo, &settings, FIRST), (PathBuf::from("C:\\Pictures\\Holiday"), false));
         settings.set(FIRST, "Folder", "Mine");
-        assert_eq!(folder_of(&settings, FIRST), (dir.join("Mine"), false));
+        assert_eq!(folder_of(Look::Photo, &settings, FIRST), (dir.join("Mine"), false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1692,7 +1924,7 @@ mod tests {
         for shape in Shape::ALL {
             let mut settings = Settings::in_memory();
             settings.set(FIRST, "Shape", shape.key());
-            let photo = Photo::new(&ctx(&mut settings), FIRST);
+            let photo = Photo::new(&ctx(&mut settings), Look::Photo, FIRST);
             let skin = photo.skin;
             let pad = skin.int("Pad", 0);
             let frame_h = skin.h - 2 * pad;
@@ -1731,7 +1963,7 @@ mod tests {
     /// A frame as the host makes it, reading its photos on threads.
     fn threaded(settings: &mut Settings, dir: &Path) -> Photo {
         settings.set(FIRST, "Folder", &dir.to_string_lossy());
-        Photo::new(&ctx(settings), FIRST)
+        Photo::new(&ctx(settings), Look::Photo, FIRST)
     }
 
     #[test]

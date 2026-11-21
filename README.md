@@ -1,9 +1,10 @@
 # Win98 Widgets
 
-Thirteen Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky
+Fourteen Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky
 Note, Weather, Rain Window, Disk Space, World Clock, Battery, Countdown, Claude Usage,
-Photo Frame, Folders and Flip Clock — as one small Rust program. There is one of each, and
-as many more Sticky Notes, Countdowns, Photo Frames and Folders as you ask for.
+Photo Frame, Folders, Flip Clock and Dither Frame — as one small Rust program. There is one
+of each, and as many more Sticky Notes, Countdowns, Photo Frames, Folders and Dither Frames
+as you ask for.
 
 ![All seven widgets on a desktop, in the default rust colour](screenshots/rust.png)
 
@@ -13,7 +14,8 @@ was in use today) and, along the bottom, **Disk Space** and **Weather**. In the 
 **World Clock** keeps the time in three cities, with the **Rain Window** under it; on the
 right, a **Sticky Note**. The same desktop in two of the other colours is further down,
 under *Colour*. The **Battery**, the smallest, the **Countdown**, **Claude Usage**, the
-**Photo Frame**, **Folders** and the **Flip Clock** came after these pictures were taken.
+**Photo Frame**, **Folders**, the **Flip Clock** and the **Dither Frame** came after these
+pictures were taken.
 
 | | |
 |--------------------------|---------|
@@ -40,7 +42,9 @@ Each widget's layout is an `.ini` file in [`skins/`](skins): a `[Variables]` sec
 palette and the layout figures, then one section per meter — a shape, a line of text or an
 image — in the order they are painted. `build.rs` compiles the thirteen of them into static
 tables (the Photo Frame's three times, once for each of its shapes, with its `PicW` and
-`PicH` given in `build.rs`, and the Folders' three times, with its `Cols` and `FrameW`) —
+`PicH` given in `build.rs`, and three times more as the Dither Frame's, with its `Block`,
+`Look`, `Title` and `Folder` given there too; and the Folders' three times, with its `Cols`
+and `FrameW`) —
 every meter's position, shapes, colours, text options and mouse actions — so
 **the `.ini` files are the single source of truth for the layout**. Change a colour or move
 a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
@@ -79,7 +83,7 @@ name, while you type in them).
 | | |
 |--|--|
 | drag anywhere | move a widget; it snaps onto the grid — the screen margin and the gap between widgets — and into line with the others (hold Ctrl or Shift not to). The note's text is the exception: dragging there selects |
-| right-click | menu: the widget's own options, Position, Snap, Screen margin, Gap between widgets, Colour, Lock, Close, the list of widgets (those there is one of, ticked when shown, then together at the foot under a line, *Sticky Note +* and *−* for the notes, *Countdown +* and *−* for the countdowns, *Photo Frame +* and *−* for the photo frames, and *Folders +* and *−* for the Folders), Start with Windows, settings, Exit |
+| right-click | menu: the widget's own options, Position, Snap, Screen margin, Gap between widgets, Colour, Lock, Close, the list of widgets (those there is one of, ticked when shown, then together at the foot under a line, *Sticky Note +* and *−* for the notes, *Countdown +* and *−* for the countdowns, *Photo Frame +* and *−* for the photo frames, *Dither Frame +* and *−* for the dither frames, and *Folders +* and *−* for the Folders), Start with Windows, settings, Exit |
 | tray icon | the same menu — this is how a closed widget is brought back |
 | `X` | closes that widget (it stops costing anything); `?` says what it does |
 
@@ -179,7 +183,9 @@ written on it. The first note is the one that is always there: it can be closed 
 deleted. Countdowns are counted the same way, with *Countdown +* and *Countdown −*, and
 one after the first can be deleted with *Delete this countdown* (after a question if it
 counts to a day or has a name). So are photo frames, with *Photo Frame +* and *Photo
-Frame −*; *Delete this photo frame* asks nothing, as its photos stay in their folder. And so
+Frame −*; *Delete this photo frame* asks nothing, as its photos stay in their folder. So are
+dither frames, with *Dither Frame +* and *Dither Frame −*, and *Delete this dither frame*.
+And so
 are Folders, with *Folders +* and *Folders −*; *Delete this Folders widget* asks first if
 it holds any folder, and only forgets them — the folders themselves stay where they are.
 
@@ -302,6 +308,22 @@ Microsoft Store that it does not come with. Each frame keeps its folder, shape a
 `Paused=` under its own section, `[Photo]`, `[Photo2]`, … The pane is dark, like the Rain
 Window's, and with no photo to show it says so.
 
+**Dither Frame** is the Photo Frame's twin in one bit: the same frame, folder, buttons,
+shapes and menu, but each photo brought down to a single bit a pixel — ink or paper, nothing
+between — as a 1984 Macintosh showed a scanned photo, and at the frame's full 202 × 160
+pixels on its side (160 × 202 upright, 160 × 160 square), one to each of the skin's. The
+ink is the title bar's deep colour, so it turns with the colour picked in *Colour*; the
+paper is the cream of the widgets' fields. A photo's light is measured in linear light,
+weighed as the eye weighs red, green and blue, and stretched so that the darkest and the
+lightest hundredth of it are ink and paper; then it is dithered by the method picked in the
+right-click menu: *Atkinson dither* (the default, the Macintosh's own: crisp and
+contrasty), *Floyd-Steinberg dither* (the most detail and the truest tones) or *Bayer
+dither* (an even 8 × 8 cross-hatch). A change of method or of colour redraws the photo up at
+once, without reading it again. Each frame keeps `Method=` (`atkinson`, `floyd-steinberg`
+or `bayer`) beside the Photo Frame's `Folder=`, `Shape=`, `Interval=` and `Paused=` under
+its own section, `[Dither]`, `[Dither2]`, …; the first starts on a folder of its own,
+`Dither` beside `settings.ini`.
+
 **Folders** keeps folders of your own at hand: each is a Windows icon with its name under
 it, standing on a white pane like the large icons of an Explorer window, and as on a Win98
 desktop a click selects one — its icon dithered half and half with the accent colour, its
@@ -383,8 +405,9 @@ every window; *Normal*; *Always on top*.
 
 | | |
 |--|--|
-| `%APPDATA%\Win98Widgets\settings.ini` | positions, which widgets are shown, each widget's knobs, the countdowns' days and names, the photo frames' folders and shapes, and each Folders' title, folders, icons and names |
+| `%APPDATA%\Win98Widgets\settings.ini` | positions, which widgets are shown, each widget's knobs, the countdowns' days and names, the photo and dither frames' folders and shapes, the dither frames' methods, and each Folders' title, folders, icons and names |
 | `%APPDATA%\Win98Widgets\Photos\` | the photos the first photo frame shows, unless it is given another folder |
+| `%APPDATA%\Win98Widgets\Dither\` | the photos the first dither frame shows, unless it is given another folder |
 | `%APPDATA%\Win98Widgets\Notes.txt` | the note (`NoteFile=` in settings.ini to keep it elsewhere) |
 | `%APPDATA%\Win98Widgets\Notes2.txt`, `Notes3.txt`, … | the notes after the first, each with a `[Notes2]`, `[Notes3]`, … section of its own in settings.ini |
 | `%LOCALAPPDATA%\Win98DateTime\Usage.log`, or `%LOCALAPPDATA%\Win98DateTime.log` | the usage log |
@@ -414,7 +437,9 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
   weather, every five minutes; in between it only moves the reset times on, once a
   minute. While Claude Code's sign-in has run out it asks nothing, and only looks every
   15 seconds at when the sign-in file was last changed — never at what is in it.
-- **Photo Frame** never reads a photo or its folder on the thread that draws the widgets:
+- **Photo Frame**, and the **Dither Frame** with it, never reads a photo or its folder on
+  the thread that draws the widgets (the Dither Frame measures a photo's light there too,
+  and only the dithering, a few milliseconds, is left for the drawing thread):
   a big photo can take a few hundred milliseconds to decode, which would stall the Rain
   Window. Each is read on a short-lived thread of its own, as Disk Space asks a slow drive,
   and the next photo is read while the current one is up, so that when its time comes it
@@ -458,7 +483,7 @@ src/
                in between
   tools/       for working on the program
     dump         off-screen rendering, for checking a change
-  widgets/     what a widget is, and the thirteen there are
+  widgets/     what a widget is, and the fourteen there are
     widget       the Widget trait: all the host knows about a widget
     field        a one-line field, typed on where it stands: the weather's city,
                  the world clock's three, a countdown's name
@@ -474,9 +499,12 @@ src/
     battery      Battery
     countdown    Countdown (also: which sections of settings.ini are countdowns)
     claude       Claude Usage (and the child that asks for it)
-    photo        Photo Frame (also: which sections of settings.ini are photo frames)
+    photo        Photo Frame (also: which sections of settings.ini are photo frames),
+                 and the Dither Frame's frame, which is the same
     folders      Folders
     flip         Flip Clock
+    dither       Dither Frame: its 1-bit picture (and which sections of
+                 settings.ini are dither frames)
   input/       typing
     keys         the window that holds the keyboard for a widget
     editor       a text and what the keys do to it: the note's, the one-line fields'

@@ -81,6 +81,13 @@
 //!                                      holds one down: pressed it gives a
 //!                                      pixel, and each frame sinks it one
 //!                                      more, to the bottom.
+//!   set.Dither.Folder=C:\path\photos   the dither frame's folder, shape
+//!   set.Dither.Method=bayer            and method (atkinson, floyd-steinberg
+//!                                      or bayer): drawn to dither.bmp, as the
+//!                                      photo frame is to photo.bmp, and any
+//!                                      other the state sets anything for
+//!                                      (set.Dither2.Folder=...) to
+//!                                      dither2.bmp, and so on.
 //!   set.Folders.Shape=6                the folders' shape (2, 4 or 6), its
 //!   set.Folders.Title=Work             title, and each spot's folder, icon
 //!   set.Folders.Path1=C:\path          and name, as settings.ini has them;
@@ -113,7 +120,8 @@ use crate::flip::Flip;
 use crate::folders::{self, Folders};
 use crate::keys::Key;
 use crate::notes::{self, Notes};
-use crate::photo::{self, Photo};
+use crate::photo::{self, Look, Photo};
+use crate::dither;
 use crate::rain::Rain;
 use crate::resources::Resources;
 use crate::settings::Settings;
@@ -370,7 +378,19 @@ pub fn run(args: &[String]) -> i32 {
     let sections: Vec<String> = core::iter::once(String::from(photo::FIRST)).chain(photo::others(ctx.settings)).collect();
     for section in sections {
         let tag = section.to_ascii_lowercase();
-        let mut w = Photo::reading_at_once(&ctx, &section);
+        let mut w = Photo::reading_at_once(&ctx, Look::Photo, &section);
+        w.set_fixed();
+        perform(&mut w, get(&format!("do.{tag}")).unwrap_or(""), &mut ctx);
+        type_on(&mut w, get(&format!("type.{tag}")).unwrap_or(""));
+        render(&w, &mut text, &dir.join(format!("{tag}.bmp")));
+    }
+    // and the same for the dither frames: the first, then every other the
+    // state sets anything for (set.Dither2.Folder=...), each in the method
+    // its section names (set.Dither.Method=bayer)
+    let sections: Vec<String> = core::iter::once(String::from(dither::FIRST)).chain(dither::others(ctx.settings)).collect();
+    for section in sections {
+        let tag = section.to_ascii_lowercase();
+        let mut w = Photo::reading_at_once(&ctx, Look::Dither, &section);
         w.set_fixed();
         perform(&mut w, get(&format!("do.{tag}")).unwrap_or(""), &mut ctx);
         type_on(&mut w, get(&format!("type.{tag}")).unwrap_or(""));
@@ -443,9 +463,14 @@ mod tests {
         // leave as it is
         let folder = note.parent().unwrap().to_string_lossy().into_owned();
         ctx.settings.set(photo::FIRST, "Folder", &folder);
-        let mut photo = Photo::reading_at_once(ctx, photo::FIRST);
+        let mut photo = Photo::reading_at_once(ctx, Look::Photo, photo::FIRST);
         photo.set_fixed();
         assert_eq!(photo.num("HasPhoto"), 1.0, "the photo frame could not read {folder}\\photo.bmp");
+        // and the same photo in one bit, whose ink is the tint
+        ctx.settings.set(dither::FIRST, "Folder", &folder);
+        let mut dithered = Photo::reading_at_once(ctx, Look::Dither, dither::FIRST);
+        dithered.set_fixed();
+        assert_eq!(dithered.num("HasPhoto"), 1.0, "the dither frame could not read {folder}\\photo.bmp");
         // a folder selected, for the selection's colours, one not, and an
         // empty spot
         ctx.settings.set(folders::FIRST, "Path1", &folder);
@@ -468,6 +493,7 @@ mod tests {
             Box::new(photo),
             Box::new(group),
             Box::new(Flip::new(ctx)),
+            Box::new(dithered),
         ]
     }
 

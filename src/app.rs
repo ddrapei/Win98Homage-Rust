@@ -1,13 +1,15 @@
 //! The host: one small process, one thread, a layered window for each widget.
 //!
-//! There is one of each of the thirteen, and as many more Sticky Notes,
-//! Countdowns, Photo Frames and Folders as have been asked for: a note after
+//! There is one of each of the fourteen, and as many more Sticky Notes,
+//! Countdowns, Photo Frames, Folders and Dither Frames as have been asked
+//! for: a note after
 //! the first is a window like any other, made from the same skin, with a
 //! section of settings.ini and a text file of its own (see `notes`), and a
-//! countdown, a photo frame or a Folders after the first is the same with a
-//! section and no file (see `countdown`, `photo`, `folders`).  Those four
+//! countdown, a photo frame, a Folders or a dither frame after the first is
+//! the same with a section and no file (see `countdown`, `photo`, `folders`,
+//! `dither`).  Those five
 //! kinds are the families
-//! (`FAMILIES`).  The windows are numbered -- the thirteen first, then the
+//! (`FAMILIES`).  The windows are numbered -- the fourteen first, then the
 //! others as they were made -- and a number is never handed on: a deleted
 //! one's stays its own, unused, until the program ends.
 //!
@@ -58,12 +60,13 @@ use crate::clock;
 use crate::countdown::{self, Countdown};
 use crate::datetime::DateTime;
 use crate::disk::Disk;
+use crate::dither;
 use crate::flip::{self, Flip};
 use crate::folders::{self, Folders};
 use crate::grid::{self, Spacing};
 use crate::keys::{self, Axis, Input, Key, Keys};
 use crate::notes::{self, Notes};
-use crate::photo::{self, Photo};
+use crate::photo::{self, Look, Photo};
 use crate::rain::Rain;
 use crate::resources::Resources;
 use crate::screens::{self, work_area};
@@ -91,6 +94,7 @@ enum Kind {
     Photo,
     Folders,
     Flip,
+    Dither,
 }
 
 impl Kind {
@@ -111,6 +115,7 @@ impl Kind {
             Kind::Photo => &skin::photo_wide::SKIN,
             Kind::Folders => &skin::folders_4::SKIN,
             Kind::Flip => &skin::flip::SKIN,
+            Kind::Dither => &skin::dither_wide::SKIN,
         }
     }
 
@@ -122,6 +127,7 @@ impl Kind {
             Kind::Photo => photo::skin_of(settings, section),
             Kind::Folders => folders::skin_of(settings, section),
             Kind::Flip => flip::skin_of(settings, section),
+            Kind::Dither => dither::skin_of(settings, section),
             _ => self.skin(),
         }
     }
@@ -136,7 +142,7 @@ impl Kind {
 /// numbered: what each is, its section of settings.ini, and what the menus
 /// call it.  The notes, countdowns and photo frames after the first follow
 /// these.
-const FIXED: [(Kind, &str, &str); 13] = [
+const FIXED: [(Kind, &str, &str); 14] = [
     (Kind::DateTime, "DateTime", "Date/Time"),
     (Kind::Resources, "Resources", "Resource Meter"),
     (Kind::Notes, notes::FIRST, "Sticky Note"),
@@ -150,6 +156,7 @@ const FIXED: [(Kind, &str, &str); 13] = [
     (Kind::Photo, photo::FIRST, "Photo Frame"),
     (Kind::Folders, folders::FIRST, "Folders"),
     (Kind::Flip, "Flip", "Flip Clock"),
+    (Kind::Dither, dither::FIRST, "Dither Frame"),
 ];
 const DATETIME: usize = 0;
 const NOTE: usize = 2;
@@ -162,6 +169,7 @@ const COUNTDOWN: usize = 8;
 const CLAUDE: usize = 9;
 const PHOTO: usize = 10;
 const FOLDERS: usize = 11;
+const DITHER: usize = 13;
 /// The flip clock stands where its slot in `defaults` puts it, so only a test
 /// has cause to name it.
 #[cfg(test)]
@@ -194,7 +202,7 @@ struct Family {
     ask: fn(&Settings, &str) -> Option<String>,
 }
 
-const FAMILIES: [Family; 4] = [
+const FAMILIES: [Family; 5] = [
     Family {
         kind: Kind::Notes,
         first: NOTE,
@@ -240,6 +248,20 @@ const FAMILIES: [Family; 4] = [
         others: photo::others,
         create: photo::create,
         forget: photo::forget,
+        // nothing is lost: the photos stay in their folder
+        ask: |_, _| None,
+    },
+    Family {
+        kind: Kind::Dither,
+        first: DITHER,
+        more: CMD_MORE_DITHERS,
+        fewer: CMD_FEWER_DITHERS,
+        delete: CMD_DELETE_DITHER,
+        delete_label: "Delete this dither frame",
+        name: |_, section| dither::name(section),
+        others: dither::others,
+        create: dither::create,
+        forget: dither::forget,
         // nothing is lost: the photos stay in their folder
         ask: |_, _| None,
     },
@@ -322,6 +344,9 @@ const CMD_FEWER_PHOTOS: usize = 48;
 const CMD_MORE_FOLDERS: usize = 55;
 const CMD_DELETE_FOLDERS: usize = 56;
 const CMD_FEWER_FOLDERS: usize = 57;
+const CMD_MORE_DITHERS: usize = 61;
+const CMD_DELETE_DITHER: usize = 62;
+const CMD_FEWER_DITHERS: usize = 63;
 const CMD_AUTOSTART: usize = 50;
 const CMD_SETTINGS: usize = 51;
 const CMD_RELOAD: usize = 52;
@@ -425,6 +450,9 @@ fn largest_skin() -> (i32, i32) {
         &skin::folders_4::SKIN,
         &skin::folders_6::SKIN,
         &skin::flip_secs::SKIN,
+        &skin::dither_wide::SKIN,
+        &skin::dither_tall::SKIN,
+        &skin::dither_square::SKIN,
     ];
     FIXED.iter().map(|f| f.0.skin()).chain(shapes).fold((0, 0), |(w, h), s| (w.max(s.w), h.max(s.h)))
 }
@@ -909,9 +937,10 @@ impl App {
                 Kind::Battery => Box::new(Battery::new(&ctx)),
                 Kind::Countdown => Box::new(Countdown::new(&ctx, &section)),
                 Kind::Claude => Box::new(Claude::new(&ctx)),
-                Kind::Photo => Box::new(Photo::new(&ctx, &section)),
+                Kind::Photo => Box::new(Photo::new(&ctx, Look::Photo, &section)),
                 Kind::Folders => Box::new(Folders::new(&ctx, &section)),
                 Kind::Flip => Box::new(Flip::new(&ctx)),
+                Kind::Dither => Box::new(Photo::new(&ctx, Look::Dither, &section)),
             };
             widget.tick(&mut ctx);
             widgets.0[i] = Some(widget);
@@ -2007,8 +2036,9 @@ impl App {
         tint::set(self.settings.tint());
     }
 
-    /// Which windows there are -- the thirteen, and a note, a countdown or a
-    /// photo frame for every other section of settings.ini that is one's --
+    /// Which windows there are -- the fourteen, and a note, a countdown, a
+    /// photo frame, a Folders or a dither frame for every other section of
+    /// settings.ini that is one's --
     /// and where each sits: where it was left, or -- the first time -- on the
     /// grid, in a column down the right-hand side of the screen: the date and
     /// time in the top corner, the resource meter under it, and under that
@@ -2019,7 +2049,8 @@ impl App {
     /// a second column, to the left of the date and time, and the countdown
     /// stands under it, against the first column; the photo frame heads a
     /// third, to the left of the world clock, and the flip clock stands
-    /// under it.
+    /// under it; the dither frame heads a fourth, to the left of the photo
+    /// frame.
     /// Called with every window shut: at the start, and when settings.ini is
     /// read again.
     fn read_slots(&mut self) {
@@ -2069,6 +2100,7 @@ impl App {
             (photo, y0),
             (claude - step - size(FOLDERS).0, y2),
             (photo, y0 + size(PHOTO).1 + step),
+            (photo - step - size(DITHER).0, y0),
         ];
         for i in 0..self.slots.len() {
             // A note, a countdown or a photo frame after the first was put
@@ -2861,7 +2893,7 @@ mod tests {
         // one entry for more of them wherever the menu is opened, in the list
         // of widgets, and none that ticks a note on and off
         for at in [None, Some(NOTE), Some(WEATHER)] {
-            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Flip Clock", "Sticky Note +", "Countdown +", "Photo Frame +", "Folders +"]);
+            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Flip Clock", "Sticky Note +", "Countdown +", "Photo Frame +", "Dither Frame +", "Folders +"]);
             assert_eq!(app.menu(at).iter().filter(|m| m.0 == CMD_MORE_NOTES).count(), 1);
             assert!(!app.menu(at).iter().any(|m| m.0 == CMD_TOGGLE + NOTE));
             // a line between the ones there is one of and the ones counted
@@ -2875,7 +2907,7 @@ mod tests {
         // the first comes out, and with it the way to put one back
         app.menu_command(None, CMD_MORE_NOTES);
         assert_eq!((running(&app), app.slots.len()), (1, FIXED.len()));
-        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Flip Clock", "Sticky Note +", minus, "Countdown +", "Photo Frame +", "Folders +"]);
+        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Flip Clock", "Sticky Note +", minus, "Countdown +", "Photo Frame +", "Dither Frame +", "Folders +"]);
         // with none closed, more is a new one each time
         app.menu_command(None, CMD_MORE_NOTES);
         app.menu_command(Some(WEATHER), CMD_MORE_NOTES);
@@ -2931,7 +2963,7 @@ mod tests {
         let (notes_minus, minus) = ("Sticky Note \u{2212}", "Countdown \u{2212}");
         assert_eq!(
             listed(&app),
-            ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Flip Clock", "Sticky Note +", notes_minus, "Countdown +", minus, "Photo Frame +", "Folders +"]
+            ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Flip Clock", "Sticky Note +", notes_minus, "Countdown +", minus, "Photo Frame +", "Dither Frame +", "Folders +"]
         );
 
         // only one after the first can be deleted, and each by its own entry
@@ -2976,7 +3008,12 @@ mod tests {
         let second = FIXED.len();
         assert_eq!(family_titles(&app, PHOTOS), ["Photo Frame", "Photo Frame 2"]);
         assert_eq!(app.slots[second].section, "Photo2");
-        assert!(listed(&app).ends_with(&[String::from("Photo Frame +"), String::from("Photo Frame \u{2212}"), String::from("Folders +")]));
+        assert!(listed(&app).ends_with(&[
+            String::from("Photo Frame +"),
+            String::from("Photo Frame \u{2212}"),
+            String::from("Dither Frame +"),
+            String::from("Folders +"),
+        ]));
 
         // its own entries in its menu, a line between the groups of them
         let menu = app.menu(Some(second));
@@ -3080,8 +3117,8 @@ mod tests {
     #[test]
     fn folders_come_and_go_as_photo_frames_do_and_go_by_their_titles() {
         let (mut app, dir) = app("folder-family");
-        let group = &FAMILIES[3];
-        assert!(group.kind == Kind::Folders && group.first == FOLDERS);
+        let group = Kind::Folders.family().unwrap();
+        assert!(group.first == FOLDERS);
 
         // the first, then another beside it, in a section of its own
         app.menu_command(None, CMD_MORE_FOLDERS);
@@ -3245,7 +3282,7 @@ mod tests {
         assert_eq!((at(1).y0 - at(DATETIME).y1, at(WEATHER).y0 - at(1).y1), (gap, gap));
         assert_eq!((at(1).x1, at(WEATHER).x1), (at(DATETIME).x1, at(DATETIME).x1));
         // along the foot and along the top, a gap apart
-        for (left, right) in [(NOTE, WEATHER), (RAIN, NOTE), (DISK, RAIN), (BATTERY, DISK), (CLAUDE, BATTERY), (FOLDERS, CLAUDE), (WORLD, DATETIME), (PHOTO, WORLD)] {
+        for (left, right) in [(NOTE, WEATHER), (RAIN, NOTE), (DISK, RAIN), (BATTERY, DISK), (CLAUDE, BATTERY), (FOLDERS, CLAUDE), (WORLD, DATETIME), (PHOTO, WORLD), (DITHER, PHOTO)] {
             assert_eq!((at(right).x0 - at(left).x1, at(right).y0), (gap, at(left).y0), "slot {left} to slot {right}");
         }
         // the countdown under the world clock, against the first column, and
@@ -3255,7 +3292,7 @@ mod tests {
         // the photo frame, heading a third column, and the flip clock under
         // it, on top of none of them
         assert_eq!((at(FLIP).y0 - at(PHOTO).y1, at(FLIP).x0), (gap, at(PHOTO).x0));
-        for top in [PHOTO, FLIP] {
+        for top in [PHOTO, FLIP, DITHER] {
             assert!((0..FIXED.len()).filter(|&i| i != top).all(|i| !at(top).intersects(&at(i))), "slot {top} overlaps");
         }
         let _ = std::fs::remove_dir_all(&dir);

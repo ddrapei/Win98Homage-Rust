@@ -1,7 +1,7 @@
-//! Compiles the thirteen widgets' skins into static Rust tables -- the photo
-//! frame's three times, once for each of its shapes, the folders' three
-//! times, once for each of theirs, and the flip clock's twice, with and
-//! without the seconds.
+//! Compiles the fourteen widgets' skins into static Rust tables -- the photo
+//! frame's six times, once for each of its shapes and the same three again
+//! as the dither frame, the folders' three times, once for each of theirs,
+//! and the flip clock's twice, with and without the seconds.
 //!
 //! The .ini files in `skins/` are the single source of truth for every
 //! pixel: each meter's position, shapes, colours, text options and mouse
@@ -587,7 +587,13 @@ fn dyn_flip(n: &str) -> bool {
     matches!(n, "DateText" | "AmPm")
 }
 
-const SKINS: [SkinDef; 18] = [
+/// What makes the Photo Frame's skin the Dither Frame's.
+const DITHER_BLOCK: (&str, &str) = ("Block", "1");
+const DITHER_LOOK: (&str, &str) = ("Look", "1");
+const DITHER_TITLE: (&str, &str) = ("Title", "Dither Frame");
+const DITHER_FOLDER: (&str, &str) = ("Folder", "Dither");
+
+const SKINS: [SkinDef; 21] = [
     SkinDef { module: "datetime", file: "Win98DateTime.ini", dynamic: dyn_datetime, overrides: &[] },
     SkinDef { module: "resources", file: "Win98Resources.ini", dynamic: dyn_resources, overrides: &[] },
     SkinDef { module: "notes", file: "Win98Notes.ini", dynamic: dyn_notes, overrides: &[] },
@@ -605,6 +611,11 @@ const SKINS: [SkinDef; 18] = [
     SkinDef { module: "photo_wide", file: "Win98Photo.ini", dynamic: dyn_photo, overrides: &[("PicW", "202"), ("PicH", "160")] },
     SkinDef { module: "photo_tall", file: "Win98Photo.ini", dynamic: dyn_photo, overrides: &[("PicW", "160"), ("PicH", "202")] },
     SkinDef { module: "photo_square", file: "Win98Photo.ini", dynamic: dyn_photo, overrides: &[("PicW", "160"), ("PicH", "160")] },
+    // And the Dither Frame's three, from the same file: the same frame, a
+    // 1-bit pixel to each of the skin's, its own title, icon and folder.
+    SkinDef { module: "dither_wide", file: "Win98Photo.ini", dynamic: dyn_photo, overrides: &[("PicW", "202"), ("PicH", "160"), DITHER_BLOCK, DITHER_LOOK, DITHER_TITLE, DITHER_FOLDER] },
+    SkinDef { module: "dither_tall", file: "Win98Photo.ini", dynamic: dyn_photo, overrides: &[("PicW", "160"), ("PicH", "202"), DITHER_BLOCK, DITHER_LOOK, DITHER_TITLE, DITHER_FOLDER] },
+    SkinDef { module: "dither_square", file: "Win98Photo.ini", dynamic: dyn_photo, overrides: &[("PicW", "160"), ("PicH", "160"), DITHER_BLOCK, DITHER_LOOK, DITHER_TITLE, DITHER_FOLDER] },
     // The folders' three shapes, from the one file: one column of two
     // folders, two columns, three.  Of the skin, only whether the title is
     // being typed changes while it runs: folders.rs draws every cell, and
