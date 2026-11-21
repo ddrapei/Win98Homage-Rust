@@ -1,6 +1,7 @@
 //! Compiles the thirteen widgets' skins into static Rust tables -- the photo
-//! frame's three times, once for each of its shapes, and the folders' three
-//! times, once for each of theirs.
+//! frame's three times, once for each of its shapes, the folders' three
+//! times, once for each of theirs, and the flip clock's twice, with and
+//! without the seconds.
 //!
 //! The .ini files in `skins/` are the single source of truth for every
 //! pixel: each meter's position, shapes, colours, text options and mouse
@@ -586,7 +587,7 @@ fn dyn_flip(n: &str) -> bool {
     matches!(n, "DateText" | "AmPm")
 }
 
-const SKINS: [SkinDef; 17] = [
+const SKINS: [SkinDef; 18] = [
     SkinDef { module: "datetime", file: "Win98DateTime.ini", dynamic: dyn_datetime, overrides: &[] },
     SkinDef { module: "resources", file: "Win98Resources.ini", dynamic: dyn_resources, overrides: &[] },
     SkinDef { module: "notes", file: "Win98Notes.ini", dynamic: dyn_notes, overrides: &[] },
@@ -611,8 +612,11 @@ const SKINS: [SkinDef; 17] = [
     SkinDef { module: "folders_2", file: "Win98Folders.ini", dynamic: dyn_folders, overrides: &[("Cols", "1"), ("FrameW", "120")] },
     SkinDef { module: "folders_4", file: "Win98Folders.ini", dynamic: dyn_folders, overrides: &[("Cols", "2"), ("FrameW", "190")] },
     SkinDef { module: "folders_6", file: "Win98Folders.ini", dynamic: dyn_folders, overrides: &[("Cols", "3"), ("FrameW", "262")] },
-    // only the day over the cards changes: flip.rs draws every card
+    // the flip clock, the one with no window round it: only the day under the
+    // cards changes while it runs, and flip.rs draws every card.  Six cards
+    // with the seconds on, in the one file, as the photo frame's shapes are
     SkinDef { module: "flip", file: "Win98Flip.ini", dynamic: dyn_flip, overrides: &[] },
+    SkinDef { module: "flip_secs", file: "Win98Flip.ini", dynamic: dyn_flip, overrides: &[("Cards", "6"), ("CardsW", "249")] },
 ];
 
 /// Compile one skin into `out`; its `Tint` -- the colour its palette is drawn

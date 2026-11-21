@@ -117,8 +117,8 @@ windows themselves — faces, bevels, fields — and the text stay exactly as th
 do the note's papers with the red margin printed on them, the weather's icons, the
 countdown's hourglass and its red pen ring, the battery's sections, red to green, and the
 Claude Usage scales, green to red, which have to mean the same whatever the colour — and
-the photos in a Photo Frame, which are shown in their own colours, and the Flip Clock's
-cards, which are paper. An
+the photos in a Photo Frame, which are shown in their own colours, and the Flip Clock,
+whose case is the gauges' grey and whose cards are paper. An
 accent takes the
 colour's hue and how colourful it is, but keeps its own lightness, so the white text on
 a title bar stays as readable as it was; a very pale or very dark colour therefore comes
@@ -342,17 +342,39 @@ or `6`), `Title=` (empty for *Folders*), and for each spot *n* `Pathn=`, `Iconn=
 kept it: a card for each figure, split across the middle into two leaves on a hinge, and on
 the minute the top leaf of each card that changes falls forwards and down — the next
 figure's top half already on the leaf behind it, its bottom half on the back of the leaf
-that fell — each card a moment after the one to its right, as on the mechanism. The day
-is written over the cards, and AM or PM at their right on the 12-hour clock; the hours are
-on 12 or 24 as the Date/Time widget is. It is 190 px wide and 114 px tall — the Rain
-Window's width and the Resource Meter's height. The figures are a pixel font of its own, and
-the leaves are drawn as the rain is: every pixel one of the skin's card colours, a leaf on
-its way down foreshortened by leaving rows out rather than squeezing them together, and one
-turned from the light drawn a step or two down the ramp of them. The cards are paper, not
-accent, so they stay cream and ink whatever colour is picked, and only the title bar
-follows it. Between the flips it asks for no frames, and costs nothing. The cards are
-restyled from the `Card*` variables in `skins/Win98Flip.ini`, as the rain is from its
-`Rain*`.
+that fell — each card a moment after the one to its right, as on the mechanism.
+
+It is the one widget with no window at all — no frame, no title bar, no accent — but an
+object on the desktop: a plastic case in the warm grey of the Claude gauges' bezels, with a
+rounded rim, the cards set into a dark recess in its front — the colons are only dots, with
+no card, as nothing there turns — the day printed on the strip over them (AM or PM at its
+right-hand end on the 12-hour clock), and a soft shadow under it on the wallpaper. It is
+192 × 96 px, or
+281 px wide with the seconds on. Right-click anywhere → *Show seconds* adds a card for each
+figure of the seconds, the same size as the others, with a second colon between them; the
+choice is kept in `settings.ini` as `[Flip] Seconds=` (`1` or `0`, four cards or six) and
+the wider clock comes up where the clock stands. The hours are on 12 or 24 as the Date/Time
+widget is.
+
+The figures are a pixel font of its own, and everything else is drawn as the Battery and
+the Claude Usage gauges are, in the same light — from the upper left and a little in front,
+each pixel in the step of light its surface is turned to: the case's rim catches it along
+its top and left and turns from it along its foot and right; the recess's wall is in shade
+along its head and lit along its foot, and its floor lies in the walls' shadow; each leaf
+is a slab of paper with its edges rounded over and its face bowed a little, the seam
+between the two a groove; the leaves turn on metal pins, and under each card the edges of
+those that have fallen show. A leaf on its way over turns in the light as it turns in
+fact: it falls forwards about its foot, like the flap of a letterbox, so its face turns to
+the floor and out of the light, and past edge-on its back, which faced up, comes down in
+it. It is foreshortened by leaving rows out rather than squeezing them together. And the
+leaves round it move too, as on the mechanism: the next one, which leaned back against it,
+comes up after it into place, and the landing pushes the bottom leaf and those hanging
+behind it back at their foot, so that they swing forward and back again before they are
+still. The case is the gauges' grey and the cards paper, so they stay as they are whatever
+colour is picked — this is the one widget a colour changes nothing in. Between the flips
+it asks for no frames, and costs nothing — a turn takes a third of a second. Each
+material's steps of light are the `Case*`, `Paper*` and `Metal*` variables in
+`skins/Win98Flip.ini`, and the case's measures are there too.
 
 **Position** (right-click → Position): *On desktop* (default) keeps the widgets behind
 every window; *Normal*; *Always on top*.

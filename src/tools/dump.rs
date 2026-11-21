@@ -97,6 +97,8 @@
 //!                                      from the minute before `now`: the
 //!                                      cards that change on their way down.
 //!                                      Without it, the clock at `now`, still.
+//!   set.Flip.Seconds=1                 the clock with a card for each figure
+//!                                      of the seconds, six cards wide
 
 use std::path::{Path, PathBuf};
 
@@ -504,6 +506,13 @@ mod tests {
             if let Some(at) = after.iter().zip(&want).position(|(a, b)| a != b) {
                 let (x, y) = (at as i32 % skin.w, at as i32 / skin.w);
                 panic!("{name} ({}x{}): retinted, {x},{y} is {:08X}; made in the tint, {:08X}", skin.w, skin.h, after[at], want[at]);
+            }
+            // The flip clock is the one widget with no accent to turn: its
+            // cards are paper and the day is ink, so it is the same picture in
+            // every colour, and has no Accent2 or TitleB to have left behind
+            if name == "Win98 Flip Clock" {
+                assert_eq!(&after, before, "{name}: a tint changed it after all");
+                continue;
             }
             assert_ne!(&after, before, "{name}: the tint changed nothing");
             // nothing left over in the skins' own accent or title bar

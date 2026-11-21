@@ -43,7 +43,8 @@
 //!     claude         Claude Usage     (and the child that asks for it)
 //!     photo          Photo Frame
 //!     folders        Folders
-//!     flip           Flip Clock       (animated, as a card falls)
+//!     flip           Flip Clock       (animated, as a card falls; the one
+//!                    widget with no window)
 //!
 //!   input/        typing
 //!     keys           the window that holds the keyboard for a widget

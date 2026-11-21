@@ -58,7 +58,7 @@ use crate::clock;
 use crate::countdown::{self, Countdown};
 use crate::datetime::DateTime;
 use crate::disk::Disk;
-use crate::flip::Flip;
+use crate::flip::{self, Flip};
 use crate::folders::{self, Folders};
 use crate::grid::{self, Spacing};
 use crate::keys::{self, Axis, Input, Key, Keys};
@@ -114,12 +114,14 @@ impl Kind {
         }
     }
 
-    /// The skin of the one of this kind with `section`: for a photo frame,
-    /// or the folders, the one its shape asks for.
+    /// The skin of the one of this kind with `section`: for a photo frame or
+    /// the folders, the one its shape asks for, and for the flip clock the one
+    /// its seconds do.
     fn skin_in(self, settings: &Settings, section: &str) -> &'static Skin {
         match self {
             Kind::Photo => photo::skin_of(settings, section),
             Kind::Folders => folders::skin_of(settings, section),
+            Kind::Flip => flip::skin_of(settings, section),
             _ => self.skin(),
         }
     }
@@ -412,7 +414,8 @@ fn settled_scale(skin: &Skin, x: i32, y: i32, n: i32) -> i32 {
 }
 
 /// One copy of every skin fits in this many pixels across and down: each
-/// kind's, and each shape of photo frame and of the folders.
+/// kind's, and each shape of photo frame, of the folders, and of the flip
+/// clock.
 fn largest_skin() -> (i32, i32) {
     let shapes = [
         &skin::photo_wide::SKIN,
@@ -421,6 +424,7 @@ fn largest_skin() -> (i32, i32) {
         &skin::folders_2::SKIN,
         &skin::folders_4::SKIN,
         &skin::folders_6::SKIN,
+        &skin::flip_secs::SKIN,
     ];
     FIXED.iter().map(|f| f.0.skin()).chain(shapes).fold((0, 0), |(w, h), s| (w.max(s.w), h.max(s.h)))
 }
