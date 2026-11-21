@@ -287,10 +287,12 @@ photo stays (5, 10, 30 seconds, a minute or five; 10 to begin with) and *Pause*,
 the stop button; *Choose folder...* opens the Browse for Folder dialog, and *Open folder*
 opens the folder in Explorer. To begin with the folder is `Photos`, beside
 `settings.ini`, made the first time the frame starts; the photos in it are shown, not those
-in the folders inside it. JPEG, PNG, BMP, GIF (its first frame) and TIFF photos are shown,
-decoded by the Windows Imaging Component that comes with Windows. HEIC photos (an iPhone's)
-and WebP are not: Windows decodes those only with extensions from the Microsoft Store, which
-a machine may or may not have. Each frame keeps its folder, shape and interval in
+in the folders inside it. JPEG, PNG, BMP, GIF and TIFF photos are shown, decoded by the
+Windows Imaging Component that comes with Windows, and WebP photos as well, by the WebP
+extension Windows 10 and 11 come with (a GIF or an animated WebP: its first frame). Where that
+extension has been taken off, a WebP is passed over like any file that will not read. HEIC
+photos (an iPhone's) are not shown: Windows decodes those only with extensions from the
+Microsoft Store that it does not come with. Each frame keeps its folder, shape and interval in
 `settings.ini` as `Folder=`, `Shape=` (`wide`, `tall` or `square`), `Interval=` and
 `Paused=` under its own section, `[Photo]`, `[Photo2]`, … The pane is dark, like the Rain
 Window's, and with no photo to show it says so.

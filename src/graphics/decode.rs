@@ -2,10 +2,12 @@
 //! Component that comes with Windows, and brought down to a few thousand
 //! pixels, cut to fill the shape asked for and stood the right way up.
 //!
-//! Only the codecs WIC has of its own are used -- JPEG, PNG, BMP, GIF and
-//! TIFF (`FORMATS`).  HEIC, WebP and camera RAW files are decoded on Windows
-//! only by extensions from the Microsoft Store, which a machine may or may not
-//! have, so they are left alone.
+//! The codecs WIC has of its own are used -- JPEG, PNG, BMP, GIF and TIFF --
+//! and WebP's, which Windows 10 and 11 come with as an extension from the
+//! Microsoft Store (`FORMATS`).  On a machine where that extension has been
+//! taken off, a WebP simply does not decode, and is passed over like any
+//! file that will not read.  HEIC and camera RAW files need extensions that
+//! do not come with Windows (HEIC a paid one as well), so they are left alone.
 //!
 //! The scaler is handed the decoder's frame itself where it can be: a JPEG is
 //! then decoded at an eighth, a quarter or half of its size before it is
@@ -20,8 +22,8 @@ use std::path::Path;
 
 use crate::sys::{self, release, slot, Com, GUID, HRESULT};
 
-/// The extensions of the files WIC decodes with what Windows itself has.
-pub const FORMATS: [&str; 8] = ["jpg", "jpeg", "jpe", "png", "bmp", "gif", "tif", "tiff"];
+/// The extensions of the files WIC decodes with what Windows comes with.
+pub const FORMATS: [&str; 9] = ["jpg", "jpeg", "jpe", "png", "bmp", "gif", "tif", "tiff", "webp"];
 
 /// Whether a file is one of `FORMATS`, by its extension.
 pub fn is_photo(path: &Path) -> bool {
@@ -365,11 +367,29 @@ mod tests {
     }
 
     #[test]
-    fn only_what_windows_decodes_itself_is_a_photo() {
-        for name in ["a.jpg", "b.JPEG", "c.png", "d.bmp", "e.gif", "f.tif", "g.TIFF", "h.jpe"] {
+    fn a_webp_is_read_and_its_transparency_laid_on_the_background() {
+        let dir = std::env::temp_dir().join(format!("win98-decode-webp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // a lossless WebP of one pixel, wholly transparent
+        const CLEAR: [u8; 34] = [
+            0x52, 0x49, 0x46, 0x46, 0x1a, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4c, 0x0d,
+            0x00, 0x00, 0x00, 0x2f, 0x00, 0x00, 0x00, 0x10, 0x07, 0x10, 0x11, 0x11, 0x88, 0x88, 0xfe, 0x07, 0x00,
+        ];
+        let file = dir.join("clear.webp");
+        std::fs::write(&file, CLEAR).unwrap();
+        let bg = 0x10_2030;
+        let px = load(&file, 20, 20, bg);
+        let _ = std::fs::remove_dir_all(&dir);
+        let px = px.expect("WIC could not read a WebP: is the WebP extension Windows comes with (Webp Image Extensions) missing?");
+        assert_eq!(px, vec![0xFF00_0000 | bg; 400]);
+    }
+
+    #[test]
+    fn only_what_windows_can_decode_is_a_photo() {
+        for name in ["a.jpg", "b.JPEG", "c.png", "d.bmp", "e.gif", "f.tif", "g.TIFF", "h.jpe", "i.webp", "j.WEBP"] {
             assert!(is_photo(Path::new(name)), "{name}");
         }
-        for name in ["a.heic", "b.webp", "c.cr2", "d.txt", "noext"] {
+        for name in ["a.heic", "c.cr2", "d.txt", "noext"] {
             assert!(!is_photo(Path::new(name)), "{name}");
         }
     }

@@ -988,9 +988,10 @@ impl Widget for Photo {
          of a Siemens C60 would have shown it: 101 x 80 pixels and 4096 \
          colours.\n\n\
          Put photos in its folder (right-click, Open folder), or choose \
-         another.  JPEG, PNG, BMP, GIF and TIFF photos are shown.  HEIC and \
-         WebP photos are not: Windows reads those only with extensions from \
-         the Microsoft Store.\n\n\
+         another.  JPEG, PNG, BMP, GIF, TIFF and WebP photos are shown \
+         (WebP with the extension for it that Windows comes with).  HEIC \
+         photos are not: Windows reads those only with extensions from the \
+         Microsoft Store.\n\n\
          The buttons under the photo go back to the one before, stop the \
          photos changing (and start them again), and go on to the next; a \
          click on the photo goes on to the next as well.  Right-click for \
