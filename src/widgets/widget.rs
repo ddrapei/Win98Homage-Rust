@@ -44,9 +44,9 @@ pub enum Request {
     /// turned to another shape): its window is made again, the size of that
     /// one, where it was.
     Reshape,
-    /// Ask for a folder, starting from this one: what is chosen comes back
-    /// through `folder_chosen`.
-    ChooseFolder(PathBuf),
+    /// Ask for a folder, starting from this one, with this line over the
+    /// tree of folders: what is chosen comes back through `folder_chosen`.
+    ChooseFolder(PathBuf, &'static str),
 }
 
 pub struct Outcome {
@@ -95,6 +95,30 @@ pub struct MenuItem {
     pub id: u32,
     pub label: &'static str,
     pub checked: bool,
+}
+
+impl MenuItem {
+    /// The id of an entry that opens a submenu -- the entries after it, up
+    /// to the next one with this id and no label, which closes it.
+    pub const SUB: u32 = u32::MAX;
+
+    pub fn new(id: u32, label: &'static str, checked: bool) -> MenuItem {
+        MenuItem { id, label, checked }
+    }
+
+    /// A line between entries.
+    pub fn line() -> MenuItem {
+        MenuItem { id: 0, label: "", checked: false }
+    }
+
+    /// The submenu `label`: the entries that follow, up to `end_sub`.
+    pub fn sub(label: &'static str) -> MenuItem {
+        MenuItem { id: MenuItem::SUB, label, checked: false }
+    }
+
+    pub fn end_sub() -> MenuItem {
+        MenuItem { id: MenuItem::SUB, label: "", checked: false }
+    }
 }
 
 pub trait Widget: Hooks {
@@ -182,9 +206,33 @@ pub trait Widget: Hooks {
     /// tinted as they are drawn.)
     fn retint(&mut self) {}
 
+    /// Whether it holds something a press anywhere outside its frame ends --
+    /// a selection, as a press off a Win98 desktop icon ends that one.  For
+    /// as long as any widget says so, the host watches every press on the
+    /// screen (and no longer: that costs every click a call into this
+    /// process).
+    fn watches_presses(&self) -> bool {
+        false
+    }
+    /// A mouse button has gone down outside its frame, anywhere on the
+    /// screen -- another widget, the desktop, another program.
+    fn pressed_elsewhere(&mut self) -> Dirty {
+        Dirty::None
+    }
+    /// The right button has come up at this point of the window, and its
+    /// menu is about to be shown: what the menu says may be about what is
+    /// there.
+    fn context(&mut self, _x: i32, _y: i32) -> Dirty {
+        Dirty::None
+    }
     /// Its own entries for the right-click menu; one with id 0 is a line
-    /// between them.
+    /// between them, and `MenuItem::SUB` opens a submenu and closes it.
     fn menu(&self, _items: &mut Vec<MenuItem>) {}
+    /// A picture to show beside one of its own entries, as near `px` px
+    /// square as it has one: its side, and its premultiplied BGRA.
+    fn menu_picture(&self, _id: u32, _px: i32) -> Option<(i32, &'static [u8])> {
+        None
+    }
     fn menu_command(&mut self, _id: u32, _ctx: &mut Ctx) -> Outcome {
         Outcome::none()
     }

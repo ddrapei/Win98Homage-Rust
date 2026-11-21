@@ -1,18 +1,20 @@
 //! The host: one small process, one thread, a layered window for each widget.
 //!
-//! There is one of each of the eleven, and as many more Sticky Notes,
-//! Countdowns and Photo Frames as have been asked for: a note after the
-//! first is a window like any other, made from the same skin, with a section
-//! of settings.ini and a text file of its own (see `notes`), and a countdown
-//! or a photo frame after the first is the same with a section and no file
-//! (see `countdown`, `photo`).  Those three kinds are the families
-//! (`FAMILIES`).  The windows are numbered -- the eleven first, then the
+//! There is one of each of the twelve, and as many more Sticky Notes,
+//! Countdowns, Photo Frames and Folders as have been asked for: a note after
+//! the first is a window like any other, made from the same skin, with a
+//! section of settings.ini and a text file of its own (see `notes`), and a
+//! countdown, a photo frame or a Folders after the first is the same with a
+//! section and no file (see `countdown`, `photo`, `folders`).  Those four
+//! kinds are the families
+//! (`FAMILIES`).  The windows are numbered -- the twelve first, then the
 //! others as they were made -- and a number is never handed on: a deleted
 //! one's stays its own, unused, until the program ends.
 //!
-//! A window's skin is its slot's: for every kind but one that is the kind's,
-//! and a photo frame's is the one for the shape its section asks for.
-//! Turned to another shape, its window is made again at the new size.
+//! A window's skin is its slot's: for every kind but two that is the kind's,
+//! and a photo frame's, or the folders', is the one for the shape its section
+//! asks for.  Turned to another shape, its window is made again at the new
+//! size.
 //!
 //! Each widget is a borderless layered window that never takes the keyboard
 //! and never shows in the taskbar or Alt-Tab -- a desktop widget, not an
@@ -45,7 +47,7 @@
 
 use core::ffi::c_void;
 use core::ptr::{null, null_mut};
-use core::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU32, Ordering::Relaxed};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 
@@ -56,6 +58,7 @@ use crate::clock;
 use crate::countdown::{self, Countdown};
 use crate::datetime::DateTime;
 use crate::disk::Disk;
+use crate::folders::{self, Folders};
 use crate::grid::{self, Spacing};
 use crate::keys::{self, Axis, Input, Key, Keys};
 use crate::notes::{self, Notes};
@@ -69,7 +72,7 @@ use crate::sys::*;
 use crate::text::Text;
 use crate::tint;
 use crate::weather::Weather;
-use crate::widget::{Ctx, Dirty, Outcome, Pressed, Request, Widget};
+use crate::widget::{Ctx, Dirty, MenuItem, Outcome, Pressed, Request, Widget};
 use crate::world::World;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,11 +88,12 @@ enum Kind {
     Countdown,
     Claude,
     Photo,
+    Folders,
 }
 
 impl Kind {
-    /// The kind's skin.  A photo frame's is the one for its shape, which
-    /// `skin_in` knows; this is the shape a frame starts in.
+    /// The kind's skin.  A photo frame's, and the folders', is the one for
+    /// its shape, which `skin_in` knows; this is the shape it starts in.
     fn skin(self) -> &'static Skin {
         match self {
             Kind::DateTime => &skin::datetime::SKIN,
@@ -103,14 +107,16 @@ impl Kind {
             Kind::Countdown => &skin::countdown::SKIN,
             Kind::Claude => &skin::claude::SKIN,
             Kind::Photo => &skin::photo_wide::SKIN,
+            Kind::Folders => &skin::folders_4::SKIN,
         }
     }
 
     /// The skin of the one of this kind with `section`: for a photo frame,
-    /// the one its shape asks for.
+    /// or the folders, the one its shape asks for.
     fn skin_in(self, settings: &Settings, section: &str) -> &'static Skin {
         match self {
             Kind::Photo => photo::skin_of(settings, section),
+            Kind::Folders => folders::skin_of(settings, section),
             _ => self.skin(),
         }
     }
@@ -125,7 +131,7 @@ impl Kind {
 /// numbered: what each is, its section of settings.ini, and what the menus
 /// call it.  The notes, countdowns and photo frames after the first follow
 /// these.
-const FIXED: [(Kind, &str, &str); 11] = [
+const FIXED: [(Kind, &str, &str); 12] = [
     (Kind::DateTime, "DateTime", "Date/Time"),
     (Kind::Resources, "Resources", "Resource Meter"),
     (Kind::Notes, notes::FIRST, "Sticky Note"),
@@ -137,6 +143,7 @@ const FIXED: [(Kind, &str, &str); 11] = [
     (Kind::Countdown, countdown::FIRST, "Countdown"),
     (Kind::Claude, "Claude", "Claude Usage"),
     (Kind::Photo, photo::FIRST, "Photo Frame"),
+    (Kind::Folders, folders::FIRST, "Folders"),
 ];
 const DATETIME: usize = 0;
 const NOTE: usize = 2;
@@ -148,11 +155,12 @@ const BATTERY: usize = 7;
 const COUNTDOWN: usize = 8;
 const CLAUDE: usize = 9;
 const PHOTO: usize = 10;
+const FOLDERS: usize = 11;
 
 /// A kind of widget there can be any number of: the first is in FIXED, and
 /// the others are made from the menu, each with a section of settings.ini of
-/// its own -- `[Notes2]`, `[Countdown3]`, `[Photo2]` -- that its own module
-/// looks after.
+/// its own -- `[Notes2]`, `[Countdown3]`, `[Photo2]`, `[Folders2]` -- that
+/// its own module looks after.
 struct Family {
     kind: Kind,
     /// The first's window.
@@ -163,8 +171,9 @@ struct Family {
     fewer: usize,
     delete: usize,
     delete_label: &'static str,
-    /// What one with this section is called in the menus.
-    name: fn(&str) -> String,
+    /// What one with this section is called in the menus: for the folders,
+    /// the title typed for it, which settings.ini has.
+    name: fn(&Settings, &str) -> String,
     /// The sections of the ones after the first, in the order of their numbers.
     others: fn(&Settings) -> Vec<String>,
     /// A section for another; it returns the section.
@@ -175,7 +184,7 @@ struct Family {
     ask: fn(&Settings, &str) -> Option<String>,
 }
 
-const FAMILIES: [Family; 3] = [
+const FAMILIES: [Family; 4] = [
     Family {
         kind: Kind::Notes,
         first: NOTE,
@@ -183,7 +192,7 @@ const FAMILIES: [Family; 3] = [
         fewer: CMD_FEWER_NOTES,
         delete: CMD_DELETE_NOTE,
         delete_label: "Delete this note",
-        name: notes::name,
+        name: |_, section| notes::name(section),
         others: notes::others,
         create: notes::create,
         forget: notes::forget,
@@ -201,7 +210,7 @@ const FAMILIES: [Family; 3] = [
         fewer: CMD_FEWER_COUNTDOWNS,
         delete: CMD_DELETE_COUNTDOWN,
         delete_label: "Delete this countdown",
-        name: countdown::name,
+        name: |_, section| countdown::name(section),
         others: countdown::others,
         create: countdown::create,
         forget: countdown::forget,
@@ -217,12 +226,33 @@ const FAMILIES: [Family; 3] = [
         fewer: CMD_FEWER_PHOTOS,
         delete: CMD_DELETE_PHOTO,
         delete_label: "Delete this photo frame",
-        name: photo::name,
+        name: |_, section| photo::name(section),
         others: photo::others,
         create: photo::create,
         forget: photo::forget,
         // nothing is lost: the photos stay in their folder
         ask: |_, _| None,
+    },
+    Family {
+        kind: Kind::Folders,
+        first: FOLDERS,
+        more: CMD_MORE_FOLDERS,
+        fewer: CMD_FEWER_FOLDERS,
+        delete: CMD_DELETE_FOLDERS,
+        delete_label: "Delete this Folders widget",
+        name: folders::name,
+        others: folders::others,
+        create: folders::create,
+        forget: folders::forget,
+        // The folders themselves are never touched: only what it held is
+        // lost -- which folders, their icons and names, its title.
+        ask: |settings, section| {
+            let held = folders::held(settings, section);
+            (held > 0).then(|| {
+                let them = if held == 1 { String::from("the folder it shows") } else { format!("the {held} folders it shows") };
+                format!("Delete this Folders widget?\n\nIt forgets {them}, which stay where they are on disk.")
+            })
+        },
     },
 ];
 
@@ -237,6 +267,9 @@ const TICK_TIMER: usize = 1;
 /// Runs only while a widget is asking for frames.
 const FRAME_TIMER: usize = 2;
 const WM_TRAY: u32 = WM_APP + 2;
+/// A mouse button has gone down at (wParam, lParam) of the screen: from the
+/// thread that watches the presses (`watch_presses`).
+const WM_PRESSED: u32 = WM_APP + 3;
 /// The tray's icon, the .ico file as it is on disk.
 static TRAY_ICO: &[u8] = include_bytes!("../skins/Icons/gears_tweakui_b.ico");
 /// The grid's margin and gap until settings.ini says otherwise: where
@@ -276,6 +309,9 @@ const CMD_FEWER_COUNTDOWNS: usize = 45;
 const CMD_MORE_PHOTOS: usize = 46;
 const CMD_DELETE_PHOTO: usize = 47;
 const CMD_FEWER_PHOTOS: usize = 48;
+const CMD_MORE_FOLDERS: usize = 55;
+const CMD_DELETE_FOLDERS: usize = 56;
+const CMD_FEWER_FOLDERS: usize = 57;
 const CMD_AUTOSTART: usize = 50;
 const CMD_SETTINGS: usize = 51;
 const CMD_RELOAD: usize = 52;
@@ -312,6 +348,11 @@ static POSITION: AtomicU8 = AtomicU8::new(0);
 static MAIN: AtomicIsize = AtomicIsize::new(0);
 static IN_APP: AtomicBool = AtomicBool::new(false);
 static mut APP: Option<App> = None;
+/// While some widget watches the presses outside it (see `watch_presses`):
+/// the thread that holds the mouse hook, by its id; 0 while none does.
+static PRESS_THREAD: AtomicU32 = AtomicU32::new(0);
+/// One of the menus is up: a press in it is the menu's, and ends nothing.
+static MENU_UP: AtomicBool = AtomicBool::new(false);
 
 /// The App, unless it is already in use further up the stack.
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
@@ -340,8 +381,8 @@ enum Later {
     /// in it is the tint from then on.
     PickColour(u32),
     /// The folder dialog for the widget with this section -- again not its
-    /// number -- starting from this folder.
-    ChooseFolder(String, PathBuf),
+    /// number -- starting from this folder, and what it asks.
+    ChooseFolder(String, PathBuf, &'static str),
     Quit,
 }
 
@@ -363,10 +404,17 @@ fn settled_scale(skin: &Skin, x: i32, y: i32, n: i32) -> i32 {
 }
 
 /// One copy of every skin fits in this many pixels across and down: each
-/// kind's, and each shape of photo frame.
+/// kind's, and each shape of photo frame and of the folders.
 fn largest_skin() -> (i32, i32) {
-    let photos = [&skin::photo_wide::SKIN, &skin::photo_tall::SKIN, &skin::photo_square::SKIN];
-    FIXED.iter().map(|f| f.0.skin()).chain(photos).fold((0, 0), |(w, h), s| (w.max(s.w), h.max(s.h)))
+    let shapes = [
+        &skin::photo_wide::SKIN,
+        &skin::photo_tall::SKIN,
+        &skin::photo_square::SKIN,
+        &skin::folders_2::SKIN,
+        &skin::folders_4::SKIN,
+        &skin::folders_6::SKIN,
+    ];
+    FIXED.iter().map(|f| f.0.skin()).chain(shapes).fold((0, 0), |(w, h), s| (w.max(s.w), h.max(s.h)))
 }
 
 /// A wheel turned `delta` on top of the part of a notch it had turned
@@ -709,6 +757,46 @@ unsafe extern "system" fn foreground_changed(_hook: isize, _event: u32, _wnd: HW
     with_app(|app| app.check_desktop());
 }
 
+/// Every press of a mouse button anywhere on the screen, while a widget
+/// watches for them: passed on to the main window, to be looked at there.
+/// A low-level hook holds up the mouse of the whole machine until it
+/// returns, so it does no more than that -- and it runs on a thread of its
+/// own (`press_watcher`), which is never busy with anything else.  A press
+/// in one of the menus is the menu's, and is not passed on.
+unsafe extern "system" fn press_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        let down = matches!(wp as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN);
+        if code >= 0 && down && lp != 0 && !MENU_UP.load(Relaxed) {
+            let at = (*(lp as *const MSLLHOOKSTRUCT)).pt;
+            PostMessageW(MAIN.load(Relaxed), WM_PRESSED, at.x as isize as usize, at.y as isize);
+        }
+        CallNextHookEx(0, code, wp, lp)
+    }
+}
+
+/// The thread that holds the mouse hook: it hooks, says who it is, and runs
+/// the message loop a low-level hook is called from until it is told to
+/// quit.  Its id, or 0 if no hook could be had.
+fn press_watcher() -> u32 {
+    let (said, heard) = std::sync::mpsc::channel();
+    let started = std::thread::Builder::new().stack_size(64 * 1024).spawn(move || unsafe {
+        // a message queue, before anyone can post to it
+        let mut msg = MSG::default();
+        PeekMessageW(&mut msg, 0, 0, 0, PM_NOREMOVE);
+        let hook = SetWindowsHookExW(WH_MOUSE_LL, press_hook, GetModuleHandleW(null()), 0);
+        let _ = said.send(if hook == 0 { 0 } else { GetCurrentThreadId() });
+        if hook == 0 {
+            return;
+        }
+        while GetMessageW(&mut msg, 0, 0, 0) > 0 {}
+        UnhookWindowsHookEx(hook);
+    });
+    if started.is_err() {
+        return 0;
+    }
+    heard.recv().unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 //  The App
 // ---------------------------------------------------------------------------
@@ -810,6 +898,7 @@ impl App {
                 Kind::Countdown => Box::new(Countdown::new(&ctx, &section)),
                 Kind::Claude => Box::new(Claude::new(&ctx)),
                 Kind::Photo => Box::new(Photo::new(&ctx, &section)),
+                Kind::Folders => Box::new(Folders::new(&ctx, &section)),
             };
             widget.tick(&mut ctx);
             widgets.0[i] = Some(widget);
@@ -897,6 +986,7 @@ impl App {
             }
         };
         self.paint(i, dirty);
+        self.pace();
         self.settings.save();
     }
 
@@ -1080,12 +1170,13 @@ impl App {
     }
 
     /// The windows of a family there are: the first, then the others in the
-    /// order of their numbers -- which, their names being alike but for the
-    /// number, is shortest name first.
+    /// order of their numbers -- which, their sections being alike but for
+    /// the number, is shortest section first.  (Not their names: a Folders
+    /// widget is called whatever title was typed for it.)
     fn members(&self, f: &Family) -> Vec<usize> {
         let mut more: Vec<usize> =
             (FIXED.len()..self.slots.len()).filter(|&j| self.slots[j].kind == f.kind && !self.slots[j].deleted).collect();
-        more.sort_by_key(|&j| (self.slots[j].title.len(), &self.slots[j].title));
+        more.sort_by_key(|&j| (self.slots[j].section.len(), &self.slots[j].section));
         core::iter::once(f.first).chain(more).collect()
     }
 
@@ -1132,7 +1223,7 @@ impl App {
         let is_member = |s: &Slot| s.kind == f.kind && !s.deleted;
         let beside = from.filter(|&i| is_member(&self.slots[i])).or_else(|| self.slots.iter().rposition(is_member)).unwrap_or(f.first);
         let section = (f.create)(&mut self.settings);
-        let title = (f.name)(&section);
+        let title = (f.name)(&self.settings, &section);
         let slot = Slot::new(f.kind, &section, title, &self.settings);
         let (x, y) = self.room_beside(beside, slot.skin);
         self.slots.push(Slot { x, y, n: self.slots[beside].n, ..slot });
@@ -1249,7 +1340,7 @@ impl App {
                 self.reshape(i);
                 Later::Nothing
             }
-            Request::ChooseFolder(start) => Later::ChooseFolder(self.slots[i].section.clone(), start),
+            Request::ChooseFolder(start, prompt) => Later::ChooseFolder(self.slots[i].section.clone(), start, prompt),
         };
         self.settings.save();
         later
@@ -1303,6 +1394,10 @@ impl App {
             widgets.get_mut(i).map_or(Dirty::None, |w| w.blur(&mut ctx))
         };
         self.paint(i, dirty);
+        // what was typed may have been its title, which the menus call it by
+        if let Some(f) = self.slots[i].kind.family() {
+            self.slots[i].title = (f.name)(&self.settings, &self.slots[i].section);
+        }
         self.settings.save();
     }
 
@@ -1382,6 +1477,8 @@ impl App {
     /// locked and nothing would be drawn anyway.  Called whenever either may
     /// have changed -- a widget started or stopped, a command, the lock.
     fn pace(&mut self) {
+        // and whether a widget has something a press elsewhere would end
+        self.watch_presses();
         let asked = self.widgets.0.iter().flatten().map(|w| w.frame_ms()).filter(|&ms| ms > 0).min();
         let want = if self.locked { 0 } else { asked.unwrap_or(0) };
         if want == self.frame_ms {
@@ -1397,6 +1494,38 @@ impl App {
                 KillTimer(main, FRAME_TIMER);
             }
         }
+    }
+
+    /// Watch every press of a mouse button on the screen while a widget has
+    /// something one outside it ends -- a folder selected -- and not a moment
+    /// longer: the hook that sees them costs every click on the machine a
+    /// call into this process.  Only the program running watches; a test,
+    /// with no main window, never does.
+    fn watch_presses(&mut self) {
+        let want = !self.locked && self.widgets.0.iter().flatten().any(|w| w.watches_presses());
+        let running = PRESS_THREAD.load(Relaxed);
+        if want && running == 0 && MAIN.load(Relaxed) != 0 {
+            PRESS_THREAD.store(press_watcher(), Relaxed);
+        } else if !want && running != 0 {
+            unsafe { PostThreadMessageW(running, WM_QUIT, 0, 0) };
+            PRESS_THREAD.store(0, Relaxed);
+        }
+    }
+
+    /// A mouse button has gone down at (x, y) of the screen: each widget
+    /// watching for presses that it is outside the frame of hears of it.
+    fn pressed_at(&mut self, x: i32, y: i32) {
+        for i in 0..self.slots.len() {
+            if self.slots[i].frame().contains(x, y) {
+                continue;
+            }
+            let dirty = match self.widgets.get_mut(i) {
+                Some(w) if w.watches_presses() => w.pressed_elsewhere(),
+                _ => continue,
+            };
+            self.paint(i, dirty);
+        }
+        self.watch_presses();
     }
 
     /// One frame for each widget that wants them, told how long it has been
@@ -1664,8 +1793,12 @@ impl App {
                 w.menu(&mut own);
             }
             for item in &own {
-                // id 0 is a line between its entries
-                let id = if item.id == 0 { 0 } else { CMD_WIDGET + item.id as usize };
+                // id 0 is a line between its entries, and SUB a submenu
+                let id = match item.id {
+                    0 => 0,
+                    MenuItem::SUB => SUB,
+                    id => CMD_WIDGET + id as usize,
+                };
                 m.push((id, item.label.to_owned(), item.checked));
             }
             if !own.is_empty() {
@@ -1707,17 +1840,19 @@ impl App {
         }
         m.push((0, String::new(), false));
         m.push((SUB, String::from("Widgets"), false));
-        for j in 0..FIXED.len() {
-            let Some(f) = FAMILIES.iter().find(|f| f.first == j) else {
-                m.push((CMD_TOGGLE + j, self.slots[j].title.clone(), self.slots[j].hwnd != 0));
-                continue;
-            };
-            // There is one of each of the others, shown or not.  Of notes
-            // and of countdowns there is a number: one more, and -- while any
-            // is showing -- one fewer.
-            m.push((f.more, format!("{} +", FIXED[j].2), false));
+        // There is one of each of the widgets first, shown or not, ticked
+        // when shown.
+        for j in (0..FIXED.len()).filter(|&j| FAMILIES.iter().all(|f| f.first != j)) {
+            m.push((CMD_TOGGLE + j, self.slots[j].title.clone(), self.slots[j].hwnd != 0));
+        }
+        // Then, together under a line, the ones there is a number of: one
+        // more, and -- while any is showing -- one fewer.
+        m.push((0, String::new(), false));
+        for f in &FAMILIES {
+            let name = FIXED[f.first].2;
+            m.push((f.more, format!("{name} +"), false));
             if self.to_close(f, i).is_some() {
-                m.push((f.fewer, format!("{} \u{2212}", FIXED[j].2), false));
+                m.push((f.fewer, format!("{name} \u{2212}"), false));
             }
         }
         m.push((SUB, String::new(), false));
@@ -1727,6 +1862,29 @@ impl App {
         m.push((0, String::new(), false));
         m.push((CMD_EXIT, String::from("Exit"), false));
         m
+    }
+
+    /// The pictures widget `i` shows beside its own entries of the menu, as
+    /// near `px` px square as it has them: (command, side, premultiplied
+    /// BGRA).
+    fn menu_pictures(&self, i: Option<usize>, px: i32) -> Vec<(usize, i32, &'static [u8])> {
+        let Some(w) = i.and_then(|i| self.widgets.get(i)) else { return Vec::new() };
+        let mut own = Vec::new();
+        w.menu(&mut own);
+        own.iter()
+            .filter(|item| item.id != 0 && item.id != MenuItem::SUB)
+            .filter_map(|item| w.menu_picture(item.id, px).map(|(side, bgra)| (CMD_WIDGET + item.id as usize, side, bgra)))
+            .collect()
+    }
+
+    /// The right button has come up at (x, y) of window `i`, in the screen's
+    /// pixels: the widget is told where, before its menu is made.
+    fn context(&mut self, i: usize, x: i32, y: i32) {
+        let (x, y) = self.widget_point(i, x, y);
+        let dirty = self.widgets.get_mut(i).map_or(Dirty::None, |w| w.context(x, y));
+        self.paint(i, dirty);
+        // what it selected there, a press elsewhere ends
+        self.pace();
     }
 
     fn menu_command(&mut self, i: Option<usize>, cmd: usize) -> Later {
@@ -1836,14 +1994,15 @@ impl App {
         tint::set(self.settings.tint());
     }
 
-    /// Which windows there are -- the eleven, and a note, a countdown or a
+    /// Which windows there are -- the twelve, and a note, a countdown or a
     /// photo frame for every other section of settings.ini that is one's --
     /// and where each sits: where it was left, or -- the first time -- on the
     /// grid, in a column down the right-hand side of the screen: the date and
     /// time in the top corner, the resource meter under it, and under that
     /// the weather, the note to its left, the rain to the left of the note,
-    /// the disk to the left of the rain, the battery to the left of the disk
-    /// and the Claude usage to the left of the battery; the world clock heads
+    /// the disk to the left of the rain, the battery to the left of the disk,
+    /// the Claude usage to the left of the battery and the folders to the
+    /// left of that; the world clock heads
     /// a second column, to the left of the date and time, and the countdown
     /// stands under it, against the first column; the photo frame heads a
     /// third, to the left of the world clock.
@@ -1853,7 +2012,7 @@ impl App {
         self.slots = FIXED.iter().map(|&(kind, section, title)| Slot::new(kind, section, title.to_owned(), &self.settings)).collect();
         for f in &FAMILIES {
             for section in (f.others)(&self.settings) {
-                let title = (f.name)(&section);
+                let title = (f.name)(&self.settings, &section);
                 self.slots.push(Slot::new(f.kind, &section, title, &self.settings));
             }
         }
@@ -1879,6 +2038,7 @@ impl App {
         let rain = note - step - size(RAIN).0;
         let disk = rain - step - size(DISK).0;
         let battery = disk - step - size(BATTERY).0;
+        let claude = battery - step - size(CLAUDE).0;
         let world = x0 - step - size(WORLD).0;
         let defaults = [
             (x0, y0),
@@ -1890,8 +2050,9 @@ impl App {
             (world, y0),
             (battery, y2),
             (x0 - step - size(COUNTDOWN).0, y0 + size(WORLD).1 + step),
-            (battery - step - size(CLAUDE).0, y2),
+            (claude, y2),
             (world - step - size(PHOTO).0, y0),
+            (claude - step - size(FOLDERS).0, y2),
         ];
         for i in 0..self.slots.len() {
             // A note, a countdown or a photo frame after the first was put
@@ -2034,8 +2195,8 @@ fn run_later(mut later: Later) {
                 }
                 Later::Nothing
             }
-            Later::ChooseFolder(section, start) => {
-                if let Some(folder) = choose_folder(&start) {
+            Later::ChooseFolder(section, start, prompt) => {
+                if let Some(folder) = choose_folder(&start, prompt) {
                     with_app(|app| app.folder_chosen(&section, folder));
                 }
                 Later::Nothing
@@ -2115,9 +2276,9 @@ fn pick_colour(rgb: u32) -> Option<u32> {
 }
 
 /// The Windows "Browse for Folder" dialog -- the tree of folders Windows 98
-/// had -- open at `start` if it is there: the folder chosen in it, or None if
-/// it was cancelled.
-fn choose_folder(start: &std::path::Path) -> Option<PathBuf> {
+/// had -- open at `start` if it is there, `prompt` over the tree: the folder
+/// chosen in it, or None if it was cancelled.
+fn choose_folder(start: &std::path::Path, prompt: &str) -> Option<PathBuf> {
     /// Once the dialog is up, show it the folder to start from.
     unsafe extern "system" fn callback(wnd: HWND, msg: u32, _lp: LPARAM, data: LPARAM) -> i32 {
         if msg == BFFM_INITIALIZED && data != 0 {
@@ -2129,7 +2290,7 @@ fn choose_folder(start: &std::path::Path) -> Option<PathBuf> {
         return None;
     }
     let start: Vec<u16> = start.as_os_str().encode_wide().chain(Some(0)).collect();
-    let title = wide("Choose the folder of photos this frame shows:");
+    let title = wide(prompt);
     let mut name = [0u16; MAX_PATH];
     let info = BROWSEINFOW {
         hwndOwner: 0,
@@ -2199,8 +2360,34 @@ fn swatch(argb: u32) -> HGDIOBJ {
     bitmap
 }
 
+/// A menu entry's picture: `side` x `side` premultiplied BGRA, as a bitmap
+/// with its alpha.  The caller deletes it.
+fn picture(side: i32, bgra: &[u8]) -> HGDIOBJ {
+    if bgra.len() != (side * side * 4) as usize {
+        return 0;
+    }
+    let header = BITMAPINFOHEADER {
+        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: side,
+        biHeight: -side, // top-down
+        biPlanes: 1,
+        biBitCount: 32,
+        ..Default::default()
+    };
+    let mut bits: *mut c_void = null_mut();
+    let bitmap = unsafe { CreateDIBSection(0, &header, DIB_RGB_COLORS, &mut bits, 0, 0) };
+    if bitmap == 0 || bits.is_null() {
+        return 0;
+    }
+    // SAFETY: the DIB is side x side 32-bit pixels, laid out as BGRA is.
+    unsafe { core::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, bgra.len()) };
+    bitmap
+}
+
 fn show_menu(i: Option<usize>) -> Later {
-    let Some(model) = with_app(|app| app.menu(i)) else { return Later::Nothing };
+    // the pictures as large as the menus show a small icon
+    let px = if unsafe { GetSystemMetrics(SM_CXSMICON) } >= 32 { 32 } else { 16 };
+    let Some((model, pictures)) = with_app(|app| (app.menu(i), app.menu_pictures(i, px))) else { return Later::Nothing };
     let main = MAIN.load(Relaxed);
     let mut swatches: Vec<HGDIOBJ> = Vec::new();
     let chosen = unsafe {
@@ -2223,7 +2410,8 @@ fn show_menu(i: Option<usize>) -> Later {
                 AppendMenuW(menu, MF_SEPARATOR, 0, null());
             } else {
                 AppendMenuW(menu, MF_STRING | if *checked { MF_CHECKED } else { 0 }, *id, wide(label).as_ptr());
-                if let Some(bitmap) = swatch_colour(*id).map(swatch).filter(|&b| b != 0) {
+                let own = || pictures.iter().find(|p| p.0 == *id).map(|&(_, side, bgra)| picture(side, bgra));
+                if let Some(bitmap) = swatch_colour(*id).map(swatch).or_else(own).filter(|&b| b != 0) {
                     let info = MENUITEMINFOW {
                         cbSize: size_of::<MENUITEMINFOW>() as u32,
                         fMask: MIIM_BITMAP,
@@ -2247,7 +2435,11 @@ fn show_menu(i: Option<usize>) -> Later {
         GetCursorPos(&mut at);
         // so that a click anywhere else closes the menu
         SetForegroundWindow(main);
+        // a click on the menu is the menu's: a folder the menu is about
+        // stays selected
+        MENU_UP.store(true, Relaxed);
         let chosen = TrackPopupMenu(root, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, at.x, at.y, 0, main, null());
+        MENU_UP.store(false, Relaxed);
         PostMessageW(main, WM_NULL, 0, 0);
         DestroyMenu(root);
         // a menu does not own its bitmaps
@@ -2308,7 +2500,10 @@ unsafe extern "system" fn widget_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             WM_MOUSEWHEEL => with_app(|app| app.mouse_wheel(i, wnd, x_of(lp), y_of(lp), Axis::Upright, hi_word(wp) as i16 as i32)),
             WM_MOUSEHWHEEL => with_app(|app| app.mouse_wheel(i, wnd, x_of(lp), y_of(lp), Axis::Sideways, hi_word(wp) as i16 as i32)),
             WM_RBUTTONUP => {
-                with_app(|app| app.leave_editor());
+                with_app(|app| {
+                    app.leave_editor();
+                    app.context(i, x_of(lp), y_of(lp));
+                });
                 Some(Later::Menu(Some(i)))
             }
             WM_MOUSELEAVE => with_app(|app| {
@@ -2395,6 +2590,9 @@ unsafe extern "system" fn main_proc(wnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             }
             WM_TIMER if wp == FRAME_TIMER => {
                 with_app(|app| app.animate());
+            }
+            WM_PRESSED => {
+                with_app(|app| app.pressed_at(wp as isize as i32, lp as i32));
             }
             // This window marks the bottom of the stack; it stays there.
             WM_WINDOWPOSCHANGING => (*(lp as *mut WINDOWPOS)).flags |= SWP_NOZORDER,
@@ -2647,9 +2845,13 @@ mod tests {
         // one entry for more of them wherever the menu is opened, in the list
         // of widgets, and none that ticks a note on and off
         for at in [None, Some(NOTE), Some(WEATHER)] {
-            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", "Claude Usage", "Photo Frame +"]);
+            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Sticky Note +", "Countdown +", "Photo Frame +", "Folders +"]);
             assert_eq!(app.menu(at).iter().filter(|m| m.0 == CMD_MORE_NOTES).count(), 1);
             assert!(!app.menu(at).iter().any(|m| m.0 == CMD_TOGGLE + NOTE));
+            // a line between the ones there is one of and the ones counted
+            let menu = app.menu(at);
+            let more = menu.iter().position(|m| m.0 == CMD_MORE_NOTES).unwrap();
+            assert_eq!((menu[more - 1].0, menu[more - 2].1.as_str()), (0, "Claude Usage"));
         }
         let running = |app: &App| app.members(NOTES).into_iter().filter(|&j| app.widgets.get(j).is_some()).count();
         let minus = "Sticky Note \u{2212}";
@@ -2657,7 +2859,7 @@ mod tests {
         // the first comes out, and with it the way to put one back
         app.menu_command(None, CMD_MORE_NOTES);
         assert_eq!((running(&app), app.slots.len()), (1, FIXED.len()));
-        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Sticky Note +", minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", "Claude Usage", "Photo Frame +"]);
+        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Sticky Note +", minus, "Countdown +", "Photo Frame +", "Folders +"]);
         // with none closed, more is a new one each time
         app.menu_command(None, CMD_MORE_NOTES);
         app.menu_command(Some(WEATHER), CMD_MORE_NOTES);
@@ -2709,11 +2911,11 @@ mod tests {
         assert_eq!(sections, ["Countdown2", "Notes2", "Countdown3"]);
         assert_eq!(app.settings.get("Countdown3", "Enabled"), Some("1"));
         assert!(app.settings.get("Countdown3", "X").is_some());
-        // counted up and down where the first stands in the list
+        // counted up and down at the foot of the list, all of them together
         let (notes_minus, minus) = ("Sticky Note \u{2212}", "Countdown \u{2212}");
         assert_eq!(
             listed(&app),
-            ["Date/Time", "Resource Meter", "Sticky Note +", notes_minus, "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Countdown +", minus, "Claude Usage", "Photo Frame +"]
+            ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Sticky Note +", notes_minus, "Countdown +", minus, "Photo Frame +", "Folders +"]
         );
 
         // only one after the first can be deleted, and each by its own entry
@@ -2758,7 +2960,7 @@ mod tests {
         let second = FIXED.len();
         assert_eq!(family_titles(&app, PHOTOS), ["Photo Frame", "Photo Frame 2"]);
         assert_eq!(app.slots[second].section, "Photo2");
-        assert!(listed(&app).ends_with(&[String::from("Photo Frame +"), String::from("Photo Frame \u{2212}")]));
+        assert!(listed(&app).ends_with(&[String::from("Photo Frame +"), String::from("Photo Frame \u{2212}"), String::from("Folders +")]));
 
         // its own entries in its menu, a line between the groups of them
         let menu = app.menu(Some(second));
@@ -2802,6 +3004,106 @@ mod tests {
         app.read_slots();
         assert_eq!(family_titles(&app, PHOTOS), ["Photo Frame", "Photo Frame 3"]);
         assert!(is(app.slots[FIXED.len()].skin, &skin::photo_square::SKIN));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_folders_menu_shows_its_icons_and_another_shape_stands_where_it_was() {
+        let (mut app, dir) = app("folders");
+        let is = |a: &Skin, b: &Skin| core::ptr::eq(a, b);
+        app.settings.set(folders::FIRST, "Path1", &dir.to_string_lossy());
+        app.set_enabled(FOLDERS, true);
+        assert!(is(app.slots[FOLDERS].skin, &skin::folders_4::SKIN));
+        let n = app.slots[FOLDERS].n;
+
+        // the right button on the first folder: the widget's own entries,
+        // its Icon list a submenu of the host's, every icon with its picture
+        let cell = skin::folders_4::SKIN.meter("MeterCell1").unwrap().b;
+        app.context(FOLDERS, (cell[0] + 10) * n, (cell[1] + 10) * n);
+        let menu = app.menu(Some(FOLDERS));
+        let at = |label: &str| menu.iter().position(|m| m.1 == label).unwrap_or_else(|| panic!("no {label}"));
+        assert_eq!(menu[at("Icon")].0, usize::MAX);
+        let icons: Vec<usize> = menu[at("Icon") + 1..].iter().take_while(|m| m.0 != usize::MAX).map(|m| m.0).collect();
+        assert_eq!(icons.len(), skin::FOLDER_ICONS.len());
+        assert!(icons.iter().all(|&id| (CMD_WIDGET..CMD_TINT).contains(&id)));
+        assert_eq!(menu[at("Icon") + icons.len() + 1], (usize::MAX, String::new(), false));
+        assert!(at("Rename") > at("Icon") + icons.len());
+        for px in [16, 32] {
+            let pictures = app.menu_pictures(Some(FOLDERS), px);
+            assert!(icons.iter().all(|id| pictures.iter().any(|p| p.0 == *id && p.1 == px)), "at {px} px");
+        }
+        // an icon picked is kept
+        app.menu_command(Some(FOLDERS), menu[at("Briefcase")].0);
+        assert_eq!(app.settings.get(folders::FIRST, "Icon1"), Some("briefcase"));
+
+        // the folder the right button selected stays so for a press on the
+        // widget, and not for one anywhere else on the screen
+        let watching = |app: &App| app.widgets.get(FOLDERS).is_some_and(|w| w.watches_presses());
+        let f = app.slots[FOLDERS].frame();
+        assert!(watching(&app));
+        app.pressed_at(f.x0 + 5, f.y0 + 5);
+        assert!(watching(&app));
+        app.pressed_at(f.x0 - 40, f.y0 + 5);
+        assert!(!watching(&app));
+        // and no hook was left behind by a test
+        assert_eq!(PRESS_THREAD.load(Relaxed), 0);
+
+        // six: made again where it was put, wider and as tall, its folders
+        // where they were
+        let (put, was) = (app.slots[FOLDERS].put, app.slots[FOLDERS].frame());
+        app.menu_command(Some(FOLDERS), menu[at("6 folders")].0);
+        assert!(is(app.slots[FOLDERS].skin, &skin::folders_6::SKIN));
+        assert!(app.widgets.get(FOLDERS).is_some_and(|w| is(w.skin(), &skin::folders_6::SKIN)));
+        assert_eq!(app.slots[FOLDERS].put, put);
+        let now = app.slots[FOLDERS].frame();
+        assert_eq!((now.x1 - now.x0, now.y1 - now.y0), (262 * n, was.y1 - was.y0));
+        assert_eq!(app.settings.get(folders::FIRST, "Path1"), Some(dir.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folders_come_and_go_as_photo_frames_do_and_go_by_their_titles() {
+        let (mut app, dir) = app("folder-family");
+        let group = &FAMILIES[3];
+        assert!(group.kind == Kind::Folders && group.first == FOLDERS);
+
+        // the first, then another beside it, in a section of its own
+        app.menu_command(None, CMD_MORE_FOLDERS);
+        assert!(app.widgets.get(FOLDERS).is_some());
+        app.menu_command(Some(FOLDERS), CMD_MORE_FOLDERS);
+        let (second, third) = (FIXED.len(), FIXED.len() + 1);
+        app.menu_command(Some(FOLDERS), CMD_MORE_FOLDERS);
+        assert_eq!(family_titles(&app, group), ["Folders", "Folders 2", "Folders 3"]);
+        assert_eq!((app.slots[second].section.as_str(), app.slots[third].section.as_str()), ("Folders2", "Folders3"));
+        assert!(listed(&app).ends_with(&[String::from("Folders +"), String::from("Folders \u{2212}")]));
+
+        // the next run calls each by the title typed for it, and keeps them
+        // in the order of their numbers whatever their titles
+        app.settings.set("Folders2", "Title", "Work");
+        app.settings.set("Folders3", "Title", "A to Z");
+        app.settings.set("Folders2", "Path1", &dir.to_string_lossy());
+        for i in 0..app.slots.len() {
+            app.stop(i);
+        }
+        app.read_slots();
+        for i in [FOLDERS, second, third] {
+            app.start(i);
+        }
+        assert_eq!(family_titles(&app, group), ["Folders", "Work", "A to Z"]);
+        assert!(offers(&app, second, "Close Work"));
+
+        // only one after the first can be deleted; one that holds folders is
+        // asked about first, and its folders are not touched
+        assert!(!offers(&app, FOLDERS, "Delete this Folders widget") && offers(&app, second, "Delete this Folders widget"));
+        let Later::Delete(section, Some((title, text))) = app.menu_command(Some(second), CMD_DELETE_FOLDERS) else {
+            panic!("not asked about a Folders widget holding a folder")
+        };
+        assert_eq!(title, "Delete Work");
+        assert!(text.contains("the folder it shows") && text.contains("stay where they are"), "{text}");
+        assert!(app.delete(&section).is_empty());
+        assert!(app.slots[second].deleted && !app.settings.sections().any(|s| s == "Folders2") && dir.is_dir());
+        // one holding nothing goes without a question
+        assert!(matches!(app.menu_command(Some(third), CMD_DELETE_FOLDERS), Later::Delete(_, None)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2927,7 +3229,7 @@ mod tests {
         assert_eq!((at(1).y0 - at(DATETIME).y1, at(WEATHER).y0 - at(1).y1), (gap, gap));
         assert_eq!((at(1).x1, at(WEATHER).x1), (at(DATETIME).x1, at(DATETIME).x1));
         // along the foot and along the top, a gap apart
-        for (left, right) in [(NOTE, WEATHER), (RAIN, NOTE), (DISK, RAIN), (BATTERY, DISK), (CLAUDE, BATTERY), (WORLD, DATETIME), (PHOTO, WORLD)] {
+        for (left, right) in [(NOTE, WEATHER), (RAIN, NOTE), (DISK, RAIN), (BATTERY, DISK), (CLAUDE, BATTERY), (FOLDERS, CLAUDE), (WORLD, DATETIME), (PHOTO, WORLD)] {
             assert_eq!((at(right).x0 - at(left).x1, at(right).y0), (gap, at(left).y0), "slot {left} to slot {right}");
         }
         // the countdown under the world clock, against the first column, and

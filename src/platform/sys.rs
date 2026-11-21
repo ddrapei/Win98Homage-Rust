@@ -31,6 +31,7 @@ pub type PCWSTR = *const u16;
 
 pub type WNDPROC = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
 pub type WINEVENTPROC = unsafe extern "system" fn(isize, u32, HWND, i32, i32, u32, u32);
+pub type HOOKPROC = unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT;
 pub type MONITORENUMPROC = unsafe extern "system" fn(isize, HDC, *mut RECT, LPARAM) -> BOOL;
 
 #[repr(C)]
@@ -54,6 +55,16 @@ pub struct WNDCLASSEXW {
 pub struct POINT {
     pub x: i32,
     pub y: i32,
+}
+
+/// What a low-level mouse hook is told of each thing the mouse does.
+#[repr(C)]
+pub struct MSLLHOOKSTRUCT {
+    pub pt: POINT,
+    pub mouseData: u32,
+    pub flags: u32,
+    pub time: u32,
+    pub dwExtraInfo: usize,
 }
 
 #[repr(C)]
@@ -392,7 +403,13 @@ pub const WM_MOUSEMOVE: u32 = 0x0200;
 pub const WM_LBUTTONDOWN: u32 = 0x0201;
 pub const WM_LBUTTONUP: u32 = 0x0202;
 pub const WM_LBUTTONDBLCLK: u32 = 0x0203;
+pub const WM_RBUTTONDOWN: u32 = 0x0204;
 pub const WM_RBUTTONUP: u32 = 0x0205;
+pub const WM_MBUTTONDOWN: u32 = 0x0207;
+pub const WM_XBUTTONDOWN: u32 = 0x020B;
+pub const WM_QUIT: u32 = 0x0012;
+pub const PM_NOREMOVE: u32 = 0;
+pub const WH_MOUSE_LL: i32 = 14;
 pub const WM_MOUSEWHEEL: u32 = 0x020A;
 pub const WM_MOUSEHWHEEL: u32 = 0x020E;
 pub const WM_CAPTURECHANGED: u32 = 0x0215;
@@ -484,6 +501,7 @@ pub const SM_CXDRAG: i32 = 68;
 pub const SM_CYDRAG: i32 = 69;
 pub const SM_CXMENUCHECK: i32 = 71;
 pub const SM_CYMENUCHECK: i32 = 72;
+pub const SM_CXSMICON: i32 = 49;
 pub const MONITOR_DEFAULTTONEAREST: u32 = 2;
 
 pub const MF_STRING: u32 = 0x0000;
@@ -613,6 +631,10 @@ unsafe extern "system" {
     pub fn MessageBoxW(wnd: HWND, text: PCWSTR, caption: PCWSTR, kind: u32) -> i32;
     pub fn SetWinEventHook(min: u32, max: u32, module: HINSTANCE, proc_: WINEVENTPROC, pid: u32, tid: u32, flags: u32) -> isize;
     pub fn UnhookWinEvent(hook: isize) -> BOOL;
+    pub fn SetWindowsHookExW(id: i32, proc_: HOOKPROC, module: HINSTANCE, thread: u32) -> isize;
+    pub fn UnhookWindowsHookEx(hook: isize) -> BOOL;
+    pub fn CallNextHookEx(hook: isize, code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT;
+    pub fn PostThreadMessageW(thread: u32, msg: u32, wp: WPARAM, lp: LPARAM) -> BOOL;
     pub fn CreateIconFromResourceEx(bits: *const u8, len: u32, icon: BOOL, version: u32, cx: i32, cy: i32, flags: u32) -> HICON;
     pub fn DestroyIcon(icon: HICON) -> BOOL;
     pub fn GetWindowTextLengthW(wnd: HWND) -> i32;
@@ -651,6 +673,7 @@ unsafe extern "system" {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     pub fn GetModuleHandleW(name: PCWSTR) -> HINSTANCE;
+    pub fn GetCurrentThreadId() -> u32;
     pub fn LoadLibraryW(name: PCWSTR) -> HINSTANCE;
     pub fn FreeLibrary(module: HINSTANCE) -> BOOL;
     pub fn GetProcAddress(module: HINSTANCE, name: *const u8) -> *const c_void;

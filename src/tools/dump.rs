@@ -81,6 +81,18 @@
 //!                                      holds one down: pressed it gives a
 //!                                      pixel, and each frame sinks it one
 //!                                      more, to the bottom.
+//!   set.Folders.Shape=6                the folders' shape (2, 4 or 6), its
+//!   set.Folders.Title=Work             title, and each spot's folder, icon
+//!   set.Folders.Path1=C:\path          and name, as settings.ini has them;
+//!   set.Folders.Icon1=briefcase        drawn to folders.bmp -- and any other
+//!   set.Folders.Name1=Projects         the state sets anything for
+//!                                      (set.Folders2.Path1=...) to
+//!                                      folders2.bmp, and so on.  Nothing is
+//!                                      opened.
+//!   do.folders=Select 2;Rename 1       a folder selected, a name -- or with
+//!   type.folders=type Projects         RenameTitle, the title -- being
+//!                                      typed, and typed on (do.folders2,
+//!                                      ...; nothing is written by these).
 
 use std::path::{Path, PathBuf};
 
@@ -91,6 +103,7 @@ use crate::clock;
 use crate::countdown::{self, Countdown};
 use crate::datetime::DateTime;
 use crate::disk::Disk;
+use crate::folders::{self, Folders};
 use crate::keys::Key;
 use crate::notes::{self, Notes};
 use crate::photo::{self, Photo};
@@ -356,6 +369,17 @@ pub fn run(args: &[String]) -> i32 {
         type_on(&mut w, get(&format!("type.{tag}")).unwrap_or(""));
         render(&w, &mut text, &dir.join(format!("{tag}.bmp")));
     }
+    // the first Folders, then every other the state sets anything for, with
+    // the folders settings.ini has (set.Folders.Shape, set.Folders.Path1,
+    // ...): shown, never opened
+    let sections: Vec<String> = core::iter::once(String::from(folders::FIRST)).chain(folders::others(ctx.settings)).collect();
+    for section in sections {
+        let tag = section.to_ascii_lowercase();
+        let mut w = Folders::new(&ctx, &section);
+        perform(&mut w, get(&format!("do.{tag}")).unwrap_or(""), &mut ctx);
+        type_on(&mut w, get(&format!("type.{tag}")).unwrap_or(""));
+        render(&w, &mut text, &dir.join(format!("{tag}.bmp")));
+    }
     0
 }
 
@@ -402,6 +426,14 @@ mod tests {
         let mut photo = Photo::reading_at_once(ctx, photo::FIRST);
         photo.set_fixed();
         assert_eq!(photo.num("HasPhoto"), 1.0, "the photo frame could not read {folder}\\photo.bmp");
+        // a folder selected, for the selection's colours, one not, and an
+        // empty spot
+        ctx.settings.set(folders::FIRST, "Path1", &folder);
+        ctx.settings.set(folders::FIRST, "Icon1", "briefcase");
+        ctx.settings.set(folders::FIRST, "Path3", &folder);
+        ctx.settings.set(folders::FIRST, "Name3", "Holiday photos");
+        let mut group = Folders::new(ctx, folders::FIRST);
+        perform(&mut group, "Select 1", ctx);
         vec![
             Box::new(datetime),
             Box::new(resources),
@@ -414,6 +446,7 @@ mod tests {
             Box::new(countdown),
             Box::new(claude),
             Box::new(photo),
+            Box::new(group),
         ]
     }
 

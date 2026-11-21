@@ -1,5 +1,6 @@
-//! Compiles the eleven widgets' skins into static Rust tables -- the photo
-//! frame's three times, once for each of its shapes.
+//! Compiles the twelve widgets' skins into static Rust tables -- the photo
+//! frame's three times, once for each of its shapes, and the folders' three
+//! times, once for each of theirs.
 //!
 //! The .ini files in `skins/` are the single source of truth for every
 //! pixel: each meter's position, shapes, colours, text options and mouse
@@ -21,6 +22,8 @@
 //! and left alone.
 //!
 //! The weather icons are decoded here as well, into premultiplied BGRA, so the
+//! program reads no picture file while it runs; and so are the icons a folder
+//! can be given, from the Windows .ico files they are, by a reader of its own.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -575,7 +578,11 @@ fn dyn_photo(n: &str) -> bool {
     n == "HasPhoto"
 }
 
-const SKINS: [SkinDef; 13] = [
+fn dyn_folders(n: &str) -> bool {
+    n == "TitleEdit"
+}
+
+const SKINS: [SkinDef; 16] = [
     SkinDef { module: "datetime", file: "Win98DateTime.ini", dynamic: dyn_datetime, overrides: &[] },
     SkinDef { module: "resources", file: "Win98Resources.ini", dynamic: dyn_resources, overrides: &[] },
     SkinDef { module: "notes", file: "Win98Notes.ini", dynamic: dyn_notes, overrides: &[] },
@@ -593,6 +600,13 @@ const SKINS: [SkinDef; 13] = [
     SkinDef { module: "photo_wide", file: "Win98Photo.ini", dynamic: dyn_photo, overrides: &[("PicW", "202"), ("PicH", "160")] },
     SkinDef { module: "photo_tall", file: "Win98Photo.ini", dynamic: dyn_photo, overrides: &[("PicW", "160"), ("PicH", "202")] },
     SkinDef { module: "photo_square", file: "Win98Photo.ini", dynamic: dyn_photo, overrides: &[("PicW", "160"), ("PicH", "160")] },
+    // The folders' three shapes, from the one file: one column of two
+    // folders, two columns, three.  Of the skin, only whether the title is
+    // being typed changes while it runs: folders.rs draws every cell, and
+    // the title.
+    SkinDef { module: "folders_2", file: "Win98Folders.ini", dynamic: dyn_folders, overrides: &[("Cols", "1"), ("FrameW", "120")] },
+    SkinDef { module: "folders_4", file: "Win98Folders.ini", dynamic: dyn_folders, overrides: &[("Cols", "2"), ("FrameW", "190")] },
+    SkinDef { module: "folders_6", file: "Win98Folders.ini", dynamic: dyn_folders, overrides: &[("Cols", "3"), ("FrameW", "262")] },
 ];
 
 /// Compile one skin into `out`; its `Tint` -- the colour its palette is drawn
@@ -878,6 +892,154 @@ fn compile_icons(root: &Path, out_dir: &Path, out: &mut String) {
     writeln!(out, "];").unwrap();
 }
 
+// ---------------------------------------------------------------------------
+//  The folders' icons
+// ---------------------------------------------------------------------------
+
+/// One image of an .ico, as its directory and its own header have it.
+struct IcoImage<'a> {
+    side: usize,
+    bits: u16,
+    data: &'a [u8],
+}
+
+/// The images in an .ico file.  Only the BMP kind is read: an image stored
+/// as a PNG -- which these icons, from before there were any, never have --
+/// stops the build.
+fn ico_images<'a>(ico: &'a [u8], path: &Path) -> Vec<IcoImage<'a>> {
+    let word = |at: usize| u16::from_le_bytes([ico[at], ico[at + 1]]);
+    let long = |at: usize| u32::from_le_bytes([ico[at], ico[at + 1], ico[at + 2], ico[at + 3]]) as usize;
+    assert!(ico.len() >= 6 && word(0) == 0 && word(2) == 1, "{} is not an .ico", path.display());
+    let count = word(4) as usize;
+    assert!(ico.len() >= 6 + 16 * count, "{}: its directory runs off the end", path.display());
+    (0..count)
+        .map(|i| {
+            let entry = 6 + 16 * i;
+            let (len, at) = (long(entry + 8), long(entry + 12));
+            let data = ico.get(at..at + len).unwrap_or_else(|| panic!("{}: image {i} runs off the end", path.display()));
+            assert!(!data.starts_with(b"\x89PNG"), "{}: image {i} is a PNG; only BMP images are read", path.display());
+            assert!(data.len() >= 40, "{}: image {i} has no header", path.display());
+            let side = if ico[entry] == 0 { 256 } else { ico[entry] as usize };
+            IcoImage { side, bits: u16::from_le_bytes([data[14], data[15]]), data }
+        })
+        .collect()
+}
+
+/// An icon's BMP image -- a BITMAPINFOHEADER, the palette, the colours a row
+/// at a time from the bottom up, then the 1-bit mask the same way -- as
+/// premultiplied BGRA, top row first.  A pixel the mask marks is
+/// transparent; a 32-bit image carries its own alpha.
+fn decode_dib(img: &IcoImage, path: &Path) -> Vec<u8> {
+    let d = img.data;
+    let long = |at: usize| u32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]]) as usize;
+    let header = long(0);
+    let side = img.side;
+    assert!(long(4) == side && long(8) == 2 * side, "{}: a {side} px image that says it is otherwise", path.display());
+    assert!(long(16) == 0, "{}: a compressed image", path.display());
+    let bits = img.bits as usize;
+    let colours = match bits {
+        1 | 4 | 8 => match long(32) {
+            0 => 1 << bits,
+            n => n,
+        },
+        24 | 32 => 0,
+        other => panic!("{}: {other}-bit images are not read", path.display()),
+    };
+    let palette = header;
+    let pixels = palette + 4 * colours;
+    let stride = (side * bits).div_ceil(32) * 4;
+    let mask = pixels + stride * side;
+    let mask_stride = side.div_ceil(32) * 4;
+    assert!(d.len() >= mask + mask_stride * side, "{}: the {side} px image runs short", path.display());
+
+    let mut out = Vec::with_capacity(side * side * 4);
+    for y in 0..side {
+        // the rows are stored from the bottom up
+        let row = pixels + (side - 1 - y) * stride;
+        let mrow = mask + (side - 1 - y) * mask_stride;
+        for x in 0..side {
+            let (b, g, r, a) = match bits {
+                32 => (d[row + 4 * x], d[row + 4 * x + 1], d[row + 4 * x + 2], d[row + 4 * x + 3]),
+                24 => (d[row + 3 * x], d[row + 3 * x + 1], d[row + 3 * x + 2], 255),
+                _ => {
+                    let per = 8 / bits;
+                    let byte = d[row + x / per];
+                    let shift = 8 - bits * (x % per + 1);
+                    let index = (byte >> shift) as usize & ((1 << bits) - 1);
+                    let p = palette + 4 * index;
+                    (d[p], d[p + 1], d[p + 2], 255)
+                }
+            };
+            // a 32-bit image says itself what shows; the others, by the mask
+            let masked = d[mrow + x / 8] & (0x80 >> (x % 8)) != 0;
+            let a = if bits == 32 { a } else if masked { 0 } else { a };
+            let pm = |c: u8| ((c as u32 * a as u32 + 127) / 255) as u8;
+            out.extend_from_slice(&[pm(b), pm(g), pm(r), a]);
+        }
+    }
+    // A 32-bit image whose alpha is all nought is an old one in new clothes:
+    // its mask says what shows.
+    if bits == 32 && out.chunks_exact(4).all(|p| p[3] == 0) {
+        for y in 0..side {
+            let row = pixels + (side - 1 - y) * stride;
+            let mrow = mask + (side - 1 - y) * mask_stride;
+            for x in 0..side {
+                let shown = d[mrow + x / 8] & (0x80 >> (x % 8)) == 0;
+                let o = 4 * (y * side + x);
+                out[o..o + 4].copy_from_slice(&if shown { [d[row + 4 * x], d[row + 4 * x + 1], d[row + 4 * x + 2], 255] } else { [0; 4] });
+            }
+        }
+    }
+    out
+}
+
+/// The icons a folder can be given, in the order and under the names the
+/// skin's `IconChoice1`, `IconChoice2`, ... list them -- "folder, Folder" is
+/// the file `skins/Icons/Folders/folder.ico` and what the menu calls it.
+/// Each is decoded here, its 32 px image and its 16 px one, from the most
+/// colours the file has at that size.  A choice with no file stops the build.
+fn compile_folder_icons(root: &Path, out_dir: &Path, out: &mut String) {
+    let skin = root.join("Win98Folders.ini");
+    let dir = root.join("Icons").join("Folders");
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let sections = parse_ini(&read_text(&skin));
+    let vars = sections.iter().find(|s| s.name.eq_ignore_ascii_case("Variables")).expect("Win98Folders.ini has no [Variables]");
+    let mut choices: Vec<(u32, String, String)> = vars
+        .opts
+        .iter()
+        .filter_map(|(k, v)| {
+            let n = k.strip_prefix("iconchoice")?.parse().ok()?;
+            let (file, label) = v.split_once(',').unwrap_or_else(|| panic!("Win98Folders.ini: IconChoice{n}={v} is not \"file, Name\""));
+            Some((n, file.trim().to_string(), label.trim().to_string()))
+        })
+        .collect();
+    choices.sort_by_key(|c| c.0);
+    assert!(!choices.is_empty(), "Win98Folders.ini lists no IconChoice");
+
+    writeln!(out, "/// (file, what the menu calls it, 32 x 32 and 16 x 16 premultiplied BGRA)").unwrap();
+    writeln!(out, "/// for every icon a folder can be given, as Win98Folders.ini lists them.").unwrap();
+    writeln!(out, "pub static FOLDER_ICONS: &[(&str, &str, &[u8], &[u8])] = &[").unwrap();
+    for (n, file, label) in &choices {
+        let path = dir.join(format!("{file}.ico"));
+        println!("cargo:rerun-if-changed={}", path.display());
+        let ico = fs::read(&path).unwrap_or_else(|e| panic!("Win98Folders.ini: IconChoice{n} is {}, which cannot be read: {e}", path.display()));
+        let images = ico_images(&ico, &path);
+        let mut code = Vec::new();
+        for side in [32, 16] {
+            let best = images
+                .iter()
+                .filter(|i| i.side == side)
+                .max_by_key(|i| i.bits)
+                .unwrap_or_else(|| panic!("{} has no {side} px image", path.display()));
+            let raw = out_dir.join(format!("folder-{file}-{side}.bgra"));
+            fs::write(&raw, decode_dib(best, &path)).unwrap();
+            code.push(format!("include_bytes!({:?})", raw.to_string_lossy()));
+        }
+        writeln!(out, "    ({file:?}, {label:?}, {}, {}),", code[0], code[1]).unwrap();
+    }
+    writeln!(out, "];\n").unwrap();
+}
+
 /// English (US), as rc.exe would say.
 const RES_LANG: u16 = 0x0409;
 
@@ -1095,6 +1257,7 @@ fn main() {
     }
     writeln!(out, "];\n").unwrap();
     compile_icons(&root, &out_dir, &mut out);
+    compile_folder_icons(&root, &out_dir, &mut out);
     compile_exe_icon(&root, &out_dir);
 
     fs::write(out_dir.join("skins.rs"), out).unwrap();

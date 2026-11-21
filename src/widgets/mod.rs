@@ -18,6 +18,7 @@ pub mod claude;
 pub mod countdown;
 pub mod datetime;
 pub mod disk;
+pub mod folders;
 pub mod notes;
 pub mod photo;
 pub mod rain;

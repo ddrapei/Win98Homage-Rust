@@ -1,9 +1,9 @@
 # Win98 Widgets
 
-Eleven Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
-Weather, Rain Window, Disk Space, World Clock, Battery, Countdown, Claude Usage and Photo
-Frame — as one small Rust program. There is one of each, and as many more Sticky Notes,
-Countdowns and Photo Frames as you ask for.
+Twelve Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
+Weather, Rain Window, Disk Space, World Clock, Battery, Countdown, Claude Usage, Photo
+Frame and Folders — as one small Rust program. There is one of each, and as many more
+Sticky Notes, Countdowns, Photo Frames and Folders as you ask for.
 
 ![All seven widgets on a desktop, in the default rust colour](screenshots/rust.png)
 
@@ -12,8 +12,8 @@ memory is), **Date/Time Properties** (a calendar, a clock and a graph of when th
 was in use today) and, along the bottom, **Disk Space** and **Weather**. In the middle the
 **World Clock** keeps the time in three cities, with the **Rain Window** under it; on the
 right, a **Sticky Note**. The same desktop in two of the other colours is further down,
-under *Colour*. The **Battery**, the smallest, the **Countdown**, **Claude Usage** and the
-**Photo Frame** came after these pictures were taken.
+under *Colour*. The **Battery**, the smallest, the **Countdown**, **Claude Usage**, the
+**Photo Frame** and **Folders** came after these pictures were taken.
 
 | | |
 |--------------------------|---------|
@@ -38,15 +38,15 @@ Run the .exe. Nothing is installed: it can live anywhere. Only one copy runs at 
 
 Each widget's layout is an `.ini` file in [`skins/`](skins): a `[Variables]` section for the
 palette and the layout figures, then one section per meter — a shape, a line of text or an
-image — in the order they are painted. `build.rs` compiles the eleven of them into static
+image — in the order they are painted. `build.rs` compiles the twelve of them into static
 tables (the Photo Frame's three times, once for each of its shapes, with its `PicW` and
-`PicH` given in `build.rs`) — every meter's position, shapes, colours, text options and
-mouse actions — so
+`PicH` given in `build.rs`, and the Folders' three times, with its `Cols` and `FrameW`) —
+every meter's position, shapes, colours, text options and mouse actions — so
 **the `.ini` files are the single source of truth for the layout**. Change a colour or move
 a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
 runs: the logic behind each widget is plain Rust in `src/widgets/` (`datetime.rs`,
 `resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`, `world.rs`, `battery.rs`,
-`countdown.rs`, `claude.rs`, `photo.rs`), and a mouse action in a skin, such as
+`countdown.rs`, `claude.rs`, `photo.rs`, `folders.rs`), and a mouse action in a skin, such as
 `LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
 Text is laid out by DirectWrite and rasterised with aliased glyphs, set the way Windows 98's
@@ -72,13 +72,13 @@ widget where it was on its monitor, and then gets `DevicePixels=1` under `[Gener
 ## Using them
 
 They are desktop widgets, not windows: no taskbar button, not in Alt-Tab, and they never
-take the keyboard (except the note, the city fields and a countdown's name, while you
-type in them).
+take the keyboard (except the note, the city fields, a countdown's name and a folder's
+name, while you type in them).
 
 | | |
 |--|--|
 | drag anywhere | move a widget; it snaps onto the grid — the screen margin and the gap between widgets — and into line with the others (hold Ctrl or Shift not to). The note's text is the exception: dragging there selects |
-| right-click | menu: the widget's own options, Position, Snap, Screen margin, Gap between widgets, Colour, Lock, Close, the list of widgets (with *Sticky Note +* and *−* for the notes, *Countdown +* and *−* for the countdowns, and *Photo Frame +* and *−* for the photo frames), Start with Windows, settings, Exit |
+| right-click | menu: the widget's own options, Position, Snap, Screen margin, Gap between widgets, Colour, Lock, Close, the list of widgets (those there is one of, ticked when shown, then together at the foot under a line, *Sticky Note +* and *−* for the notes, *Countdown +* and *−* for the countdowns, *Photo Frame +* and *−* for the photo frames, and *Folders +* and *−* for the Folders), Start with Windows, settings, Exit |
 | tray icon | the same menu — this is how a closed widget is brought back |
 | `X` | closes that widget (it stops costing anything); `?` says what it does |
 
@@ -164,7 +164,8 @@ and round to canary again — and the note remembers which. The colours are the 
 `Paper2`, … variables in `skins/Win98Notes.ini`; another line there is another colour.
 
 **More than one note.** The other widgets are ticked on and off in the Widgets list; the
-notes are counted there instead. *Sticky Note +* puts one more note on the screen and
+notes are counted there instead, at the foot of the list with the other kinds there can be
+more than one of. *Sticky Note +* puts one more note on the screen and
 *Sticky Note −* takes one off — the note the menu was opened on, or else the last one.
 A note taken off, or closed with its `X`, keeps its text, and `+` brings those back first,
 where they were, before it makes a new one; a new one goes beside the note the menu was
@@ -176,7 +177,9 @@ written on it. The first note is the one that is always there: it can be closed 
 deleted. Countdowns are counted the same way, with *Countdown +* and *Countdown −*, and
 one after the first can be deleted with *Delete this countdown* (after a question if it
 counts to a day or has a name). So are photo frames, with *Photo Frame +* and *Photo
-Frame −*; *Delete this photo frame* asks nothing, as its photos stay in their folder.
+Frame −*; *Delete this photo frame* asks nothing, as its photos stay in their folder. And so
+are Folders, with *Folders +* and *Folders −*; *Delete this Folders widget* asks first if
+it holds any folder, and only forgets them — the folders themselves stay where they are.
 
 **The weather's city.** Click the city field and type a place: `Lviv`, or `Paris, US` /
 `Portland, Maine` to say which one. Enter (or a click anywhere else) looks it up and pins
@@ -297,6 +300,42 @@ Microsoft Store that it does not come with. Each frame keeps its folder, shape a
 `Paused=` under its own section, `[Photo]`, `[Photo2]`, … The pane is dark, like the Rain
 Window's, and with no photo to show it says so.
 
+**Folders** keeps folders of your own at hand: each is a Windows icon with its name under
+it, standing on a white pane like the large icons of an Explorer window, and as on a Win98
+desktop a click selects one — its icon dithered half and half with the accent colour, its
+name on a block of it, until a click anywhere else, on the widget or off it — and a
+double-click opens it in Explorer. It comes in three shapes,
+picked from its right-click menu, each as tall as Weather, Disk Space and Battery: *2
+folders*, one above the other, 120 px wide; *4 folders*, two columns, Disk Space's square;
+and *6 folders*, three columns, 262 px wide. The spots are numbered down each column before
+the next, so a larger shape is the smaller one with a column more on the right, and the
+folders of the spots a smaller shape has no room for are kept, coming back with the larger
+one. A spot starts empty, a dotted square saying *Choose folder*; double-click it, or
+right-click → *Choose folder...*, for the Browse for Folder dialog. Right-click a folder for
+*Open*, *Choose folder...*, *Icon*, *Rename* and *Remove*. *Icon* lists the icons a folder
+can be given, each beside its name: the plain and the open folder, the Briefcase, My
+Documents and My Pictures, Favorites, Programs, the Internet, web and FTP folders, Channels,
+Search, History, Scheduled Tasks, Computer, Network, Dial-up, Shared, Fonts, Control Panel,
+Tools, Settings and Printers — Windows 2000's own, 32 × 32 in 256 colours, kept in
+`skins/Icons/Folders` and listed, in that order and under those names, as `IconChoice1`,
+`IconChoice2`, … in `skins/Win98Folders.ini`; another line there and another `.ico` is another
+choice. The icons keep their colours whatever the colour picked, so the folders are yellow in
+every one. *Rename* types over the name where it stands: Enter takes it, Escape does not,
+and nothing at all is the folder's own name again. A name runs to two lines and is cut
+short with "..." after that. A folder that is no longer there — deleted, moved, or on a
+drive that is not plugged in — asks for where it is now when it is double-clicked.
+
+Folders is the one widget whose title is yours to give, so that each can say what the
+folders in it are — *Work*, *Games*, *Photos*. Right-click it anywhere → *Rename title*
+types the title where it stands, in the title bar: Enter takes it, Escape does not, and
+nothing at all is *Folders* again. A title too long for the bar is cut short with "...".
+The menus call it by its title too (*Close Work*). There can be as many as you like, each
+with folders, a shape and a title of its own: *Folders +* in the Widgets list makes
+another, beside the one the menu was opened on (see *More than one note*). Each keeps all of
+it in `settings.ini` under its own section, `[Folders]`, `[Folders2]`, …: `Shape=` (`2`, `4`
+or `6`), `Title=` (empty for *Folders*), and for each spot *n* `Pathn=`, `Iconn=` and
+`Namen=` (empty for the folder's own name).
+
 **Position** (right-click → Position): *On desktop* (default) keeps the widgets behind
 every window; *Normal*; *Always on top*.
 
@@ -304,7 +343,7 @@ every window; *Normal*; *Always on top*.
 
 | | |
 |--|--|
-| `%APPDATA%\Win98Widgets\settings.ini` | positions, which widgets are shown, each widget's knobs, the countdowns' days and names, and the photo frames' folders and shapes |
+| `%APPDATA%\Win98Widgets\settings.ini` | positions, which widgets are shown, each widget's knobs, the countdowns' days and names, the photo frames' folders and shapes, and each Folders' title, folders, icons and names |
 | `%APPDATA%\Win98Widgets\Photos\` | the photos the first photo frame shows, unless it is given another folder |
 | `%APPDATA%\Win98Widgets\Notes.txt` | the note (`NoteFile=` in settings.ini to keep it elsewhere) |
 | `%APPDATA%\Win98Widgets\Notes2.txt`, `Notes3.txt`, … | the notes after the first, each with a `[Notes2]`, `[Notes3]`, … section of its own in settings.ini |
@@ -349,6 +388,13 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
   repaints only when a figure it shows has changed. A network drive, a disc or a card can
   take many seconds to answer, so those are asked every half minute from a thread that
   lasts as long as the one question: no widget waits for a drive.
+- **Folders** runs nothing at all while nobody touches it — no timer, no frames — and
+  repaints only the folder a click or a menu changed. Its icons are decoded when the
+  program is built, not when it runs. The widgets never take the keyboard, so Windows
+  does not tell one when you click somewhere else; while a folder is selected, and only
+  then, a small thread of its own watches the mouse buttons with a low-level hook, so
+  that a click anywhere off the widget ends the selection. The thread does nothing else,
+  so the mouse never waits on the widgets, and it ends with the selection.
 - The note is wrapped by the widths DirectWrite gives for the font it is drawn in, and
   drawn by one piece of code whether or not it is being typed on, so nothing on the sheet
   moves when you click in.
@@ -357,7 +403,8 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 ## Layout of the source
 
 ```text
-skins/       the eleven layouts (.ini), the weather icons and the tray icon
+skins/       the twelve layouts (.ini), the weather icons, the folders' icons and the
+             tray icon
 screenshots/ the pictures in this file
 build.rs     those .ini files compiled into static tables
 src/
@@ -367,7 +414,7 @@ src/
                in between
   tools/       for working on the program
     dump         off-screen rendering, for checking a change
-  widgets/     what a widget is, and the eleven there are
+  widgets/     what a widget is, and the twelve there are
     widget       the Widget trait: all the host knows about a widget
     field        a one-line field, typed on where it stands: the weather's city,
                  the world clock's three, a countdown's name
@@ -384,6 +431,7 @@ src/
     countdown    Countdown (also: which sections of settings.ini are countdowns)
     claude       Claude Usage (and the child that asks for it)
     photo        Photo Frame (also: which sections of settings.ini are photo frames)
+    folders      Folders
   input/       typing
     keys         the window that holds the keyboard for a widget
     editor       a text and what the keys do to it: the note's, the one-line fields'

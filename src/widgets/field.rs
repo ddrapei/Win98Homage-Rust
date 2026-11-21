@@ -88,6 +88,8 @@ pub struct Field {
 
     /// The field has the keyboard.
     pub editing: bool,
+    /// Typed from the left, as a title is set, not centred as a name is.
+    pub flush_left: bool,
     doc: Doc,
     /// What the typing started from.
     before: String,
@@ -129,6 +131,7 @@ impl Field {
             font: skin::FONTS.iter().position(|&(pt, bold)| pt == points && !bold).unwrap_or(0),
             points,
             editing: false,
+            flush_left: false,
             doc: Doc::one_line(),
             before: String::new(),
             entered: false,
@@ -217,7 +220,9 @@ impl Field {
         let inked = chars.len() - chars.iter().rev().take_while(|&&c| editor::blank(c)).count();
         let width = self.stops[inked];
         self.fits = width <= room as f32;
-        if self.fits {
+        if self.fits && self.flush_left {
+            self.left = 0.0;
+        } else if self.fits {
             // where the layout's own centring puts it (see `draw`): the
             // widths are whole px, and the half an odd room leaves is
             // dropped, as GDI drops it
@@ -382,14 +387,14 @@ impl Field {
 
         canvas.clip = clip;
         let string = self.text();
-        self.run(canvas, text, &string, self.fits, self.ink);
+        self.run(canvas, text, &string, self.fits && !self.flush_left, self.ink);
 
         let (a, b) = self.doc.range();
         let band = Rect::new(self.column_of(a), self.rect.y0 + 1, self.column_of(b), self.rect.y1 - 1).intersect(&clip);
         if !band.is_empty() {
             canvas.fill(band.x0, band.y0, band.x1 - band.x0, band.y1 - band.y0, self.select_bg);
             canvas.clip = band;
-            self.run(canvas, text, &string, self.fits, self.select_ink);
+            self.run(canvas, text, &string, self.fits && !self.flush_left, self.select_ink);
             canvas.clip = clip;
         }
         if self.caret_on {

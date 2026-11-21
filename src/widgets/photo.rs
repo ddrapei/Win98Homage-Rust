@@ -127,6 +127,8 @@ const MENU_INTERVAL: u32 = 20;
 const MENU_PAUSE: u32 = 30;
 const MENU_CHOOSE: u32 = 31;
 const MENU_OPEN: u32 = 32;
+/// What the folder dialog asks.
+const CHOOSE_PROMPT: &str = "Choose the folder of photos this frame shows:";
 
 /// The shape of a frame, and with it the skin it is drawn from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1133,7 +1135,7 @@ impl Widget for Photo {
                 Outcome::none()
             }
             MENU_PAUSE => self.set_stopped(!self.paused, ctx),
-            MENU_CHOOSE => Outcome::request(Request::ChooseFolder(self.folder.clone())),
+            MENU_CHOOSE => Outcome::request(Request::ChooseFolder(self.folder.clone(), CHOOSE_PROMPT)),
             MENU_OPEN if self.folder.is_dir() => Outcome::request(Request::Open(self.folder.clone())),
             _ => Outcome::none(),
         }
@@ -1354,7 +1356,7 @@ mod tests {
         assert_eq!(second.menu_command(wide, &mut ctx).request, Request::None);
 
         // the folder is asked for from where it is, and kept when chosen
-        assert_eq!(second.menu_command(MENU_CHOOSE, &mut ctx).request, Request::ChooseFolder(dir.clone()));
+        assert_eq!(second.menu_command(MENU_CHOOSE, &mut ctx).request, Request::ChooseFolder(dir.clone(), CHOOSE_PROMPT));
         let other = folder("own-other");
         put(&other, "x.bmp", 0x00FF00);
         assert_eq!(second.folder_chosen(other.clone(), &mut ctx), Dirty::Part(second.changed()));
