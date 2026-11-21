@@ -1,10 +1,10 @@
-//! Win98 Widgets -- twelve Windows 98 style desktop widgets as one small
+//! Win98 Widgets -- thirteen Windows 98 style desktop widgets as one small
 //! native program.
 //!
 //! Date/Time Properties, Resource Meter, Sticky Note, Weather, Rain Window,
-//! Disk Space, World Clock, Battery, Countdown, Claude Usage, Photo Frame and
-//! Folders, drawn from the .ini files in `skins/` -- with no Direct2D and no script
-//! engine underneath.  One of each, and as many more Sticky Notes, Countdowns,
+//! Disk Space, World Clock, Battery, Countdown, Claude Usage, Photo Frame,
+//! Folders and Flip Clock, drawn from the .ini files in `skins/` -- with no
+//! Direct2D and no script engine underneath.  One of each, and as many more Sticky Notes, Countdowns,
 //! Photo Frames and Folders as are asked for.
 //!
 //! # Where things are
@@ -22,7 +22,7 @@
 //!   tools/         for working on the program
 //!     dump           off-screen rendering, for checking a change
 //!
-//!   widgets/       what a widget is, and the twelve there are
+//!   widgets/       what a widget is, and the thirteen there are
 //!     widget         what the host asks of a widget -- the one thing about
 //!                    them it knows
 //!     field          a one-line field, typed on where it stands: the
@@ -34,7 +34,7 @@
 //!     resources      Resource Meter
 //!     notes          Sticky Note
 //!     weather        Weather          (and the child that fetches it)
-//!     rain           Rain Window      (the one that is animated)
+//!     rain           Rain Window      (animated, while it rains)
 //!     disk           Disk Space
 //!     world          World Clock      (and the child that finds a city's
 //!                    time zone)
@@ -43,6 +43,7 @@
 //!     claude         Claude Usage     (and the child that asks for it)
 //!     photo          Photo Frame
 //!     folders        Folders
+//!     flip           Flip Clock       (animated, as a card falls)
 //!
 //!   input/        typing
 //!     keys           the window that holds the keyboard for a widget
@@ -95,7 +96,7 @@ use net::{geocode, http};
 use platform::{clock, grid, screens, sys};
 use storage::{settings, usage};
 use tools::dump;
-use widgets::{battery, calendar, claude, countdown, datetime, disk, field, folders, notes, photo, rain, resources, weather, widget, world};
+use widgets::{battery, calendar, claude, countdown, datetime, disk, field, flip, folders, notes, photo, rain, resources, weather, widget, world};
 
 fn main() {
     // There is no console to complain to: if something does go wrong, leave

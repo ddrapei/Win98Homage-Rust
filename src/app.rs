@@ -1,13 +1,13 @@
 //! The host: one small process, one thread, a layered window for each widget.
 //!
-//! There is one of each of the twelve, and as many more Sticky Notes,
+//! There is one of each of the thirteen, and as many more Sticky Notes,
 //! Countdowns, Photo Frames and Folders as have been asked for: a note after
 //! the first is a window like any other, made from the same skin, with a
 //! section of settings.ini and a text file of its own (see `notes`), and a
 //! countdown, a photo frame or a Folders after the first is the same with a
 //! section and no file (see `countdown`, `photo`, `folders`).  Those four
 //! kinds are the families
-//! (`FAMILIES`).  The windows are numbered -- the twelve first, then the
+//! (`FAMILIES`).  The windows are numbered -- the thirteen first, then the
 //! others as they were made -- and a number is never handed on: a deleted
 //! one's stays its own, unused, until the program ends.
 //!
@@ -58,6 +58,7 @@ use crate::clock;
 use crate::countdown::{self, Countdown};
 use crate::datetime::DateTime;
 use crate::disk::Disk;
+use crate::flip::Flip;
 use crate::folders::{self, Folders};
 use crate::grid::{self, Spacing};
 use crate::keys::{self, Axis, Input, Key, Keys};
@@ -89,6 +90,7 @@ enum Kind {
     Claude,
     Photo,
     Folders,
+    Flip,
 }
 
 impl Kind {
@@ -108,6 +110,7 @@ impl Kind {
             Kind::Claude => &skin::claude::SKIN,
             Kind::Photo => &skin::photo_wide::SKIN,
             Kind::Folders => &skin::folders_4::SKIN,
+            Kind::Flip => &skin::flip::SKIN,
         }
     }
 
@@ -131,7 +134,7 @@ impl Kind {
 /// numbered: what each is, its section of settings.ini, and what the menus
 /// call it.  The notes, countdowns and photo frames after the first follow
 /// these.
-const FIXED: [(Kind, &str, &str); 12] = [
+const FIXED: [(Kind, &str, &str); 13] = [
     (Kind::DateTime, "DateTime", "Date/Time"),
     (Kind::Resources, "Resources", "Resource Meter"),
     (Kind::Notes, notes::FIRST, "Sticky Note"),
@@ -144,6 +147,7 @@ const FIXED: [(Kind, &str, &str); 12] = [
     (Kind::Claude, "Claude", "Claude Usage"),
     (Kind::Photo, photo::FIRST, "Photo Frame"),
     (Kind::Folders, folders::FIRST, "Folders"),
+    (Kind::Flip, "Flip", "Flip Clock"),
 ];
 const DATETIME: usize = 0;
 const NOTE: usize = 2;
@@ -156,6 +160,10 @@ const COUNTDOWN: usize = 8;
 const CLAUDE: usize = 9;
 const PHOTO: usize = 10;
 const FOLDERS: usize = 11;
+/// The flip clock stands where its slot in `defaults` puts it, so only a test
+/// has cause to name it.
+#[cfg(test)]
+const FLIP: usize = 12;
 
 /// A kind of widget there can be any number of: the first is in FIXED, and
 /// the others are made from the menu, each with a section of settings.ini of
@@ -899,6 +907,7 @@ impl App {
                 Kind::Claude => Box::new(Claude::new(&ctx)),
                 Kind::Photo => Box::new(Photo::new(&ctx, &section)),
                 Kind::Folders => Box::new(Folders::new(&ctx, &section)),
+                Kind::Flip => Box::new(Flip::new(&ctx)),
             };
             widget.tick(&mut ctx);
             widgets.0[i] = Some(widget);
@@ -1994,7 +2003,7 @@ impl App {
         tint::set(self.settings.tint());
     }
 
-    /// Which windows there are -- the twelve, and a note, a countdown or a
+    /// Which windows there are -- the thirteen, and a note, a countdown or a
     /// photo frame for every other section of settings.ini that is one's --
     /// and where each sits: where it was left, or -- the first time -- on the
     /// grid, in a column down the right-hand side of the screen: the date and
@@ -2005,7 +2014,8 @@ impl App {
     /// left of that; the world clock heads
     /// a second column, to the left of the date and time, and the countdown
     /// stands under it, against the first column; the photo frame heads a
-    /// third, to the left of the world clock.
+    /// third, to the left of the world clock, and the flip clock stands
+    /// under it.
     /// Called with every window shut: at the start, and when settings.ini is
     /// read again.
     fn read_slots(&mut self) {
@@ -2040,6 +2050,7 @@ impl App {
         let battery = disk - step - size(BATTERY).0;
         let claude = battery - step - size(CLAUDE).0;
         let world = x0 - step - size(WORLD).0;
+        let photo = world - step - size(PHOTO).0;
         let defaults = [
             (x0, y0),
             (x0, y1),
@@ -2051,8 +2062,9 @@ impl App {
             (battery, y2),
             (x0 - step - size(COUNTDOWN).0, y0 + size(WORLD).1 + step),
             (claude, y2),
-            (world - step - size(PHOTO).0, y0),
+            (photo, y0),
             (claude - step - size(FOLDERS).0, y2),
+            (photo, y0 + size(PHOTO).1 + step),
         ];
         for i in 0..self.slots.len() {
             // A note, a countdown or a photo frame after the first was put
@@ -2845,13 +2857,13 @@ mod tests {
         // one entry for more of them wherever the menu is opened, in the list
         // of widgets, and none that ticks a note on and off
         for at in [None, Some(NOTE), Some(WEATHER)] {
-            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Sticky Note +", "Countdown +", "Photo Frame +", "Folders +"]);
+            assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Flip Clock", "Sticky Note +", "Countdown +", "Photo Frame +", "Folders +"]);
             assert_eq!(app.menu(at).iter().filter(|m| m.0 == CMD_MORE_NOTES).count(), 1);
             assert!(!app.menu(at).iter().any(|m| m.0 == CMD_TOGGLE + NOTE));
             // a line between the ones there is one of and the ones counted
             let menu = app.menu(at);
             let more = menu.iter().position(|m| m.0 == CMD_MORE_NOTES).unwrap();
-            assert_eq!((menu[more - 1].0, menu[more - 2].1.as_str()), (0, "Claude Usage"));
+            assert_eq!((menu[more - 1].0, menu[more - 2].1.as_str()), (0, "Flip Clock"));
         }
         let running = |app: &App| app.members(NOTES).into_iter().filter(|&j| app.widgets.get(j).is_some()).count();
         let minus = "Sticky Note \u{2212}";
@@ -2859,7 +2871,7 @@ mod tests {
         // the first comes out, and with it the way to put one back
         app.menu_command(None, CMD_MORE_NOTES);
         assert_eq!((running(&app), app.slots.len()), (1, FIXED.len()));
-        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Sticky Note +", minus, "Countdown +", "Photo Frame +", "Folders +"]);
+        assert_eq!(listed(&app), ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Flip Clock", "Sticky Note +", minus, "Countdown +", "Photo Frame +", "Folders +"]);
         // with none closed, more is a new one each time
         app.menu_command(None, CMD_MORE_NOTES);
         app.menu_command(Some(WEATHER), CMD_MORE_NOTES);
@@ -2915,7 +2927,7 @@ mod tests {
         let (notes_minus, minus) = ("Sticky Note \u{2212}", "Countdown \u{2212}");
         assert_eq!(
             listed(&app),
-            ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Sticky Note +", notes_minus, "Countdown +", minus, "Photo Frame +", "Folders +"]
+            ["Date/Time", "Resource Meter", "Weather", "Rain Window", "Disk Space", "World Clock", "Battery", "Claude Usage", "Flip Clock", "Sticky Note +", notes_minus, "Countdown +", minus, "Photo Frame +", "Folders +"]
         );
 
         // only one after the first can be deleted, and each by its own entry
@@ -3236,8 +3248,12 @@ mod tests {
         // clear of the foot
         assert_eq!((at(COUNTDOWN).y0 - at(WORLD).y1, at(COUNTDOWN).x1), (gap, at(WORLD).x1));
         assert!(at(WEATHER).y0 - at(COUNTDOWN).y1 >= gap);
-        // the photo frame, heading a third column, on top of none of them
-        assert!((0..FIXED.len()).filter(|&i| i != PHOTO).all(|i| !at(PHOTO).intersects(&at(i))));
+        // the photo frame, heading a third column, and the flip clock under
+        // it, on top of none of them
+        assert_eq!((at(FLIP).y0 - at(PHOTO).y1, at(FLIP).x0), (gap, at(PHOTO).x0));
+        for top in [PHOTO, FLIP] {
+            assert!((0..FIXED.len()).filter(|&i| i != top).all(|i| !at(top).intersects(&at(i))), "slot {top} overlaps");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

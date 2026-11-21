@@ -93,6 +93,10 @@
 //!   type.folders=type Projects         RenameTitle, the title -- being
 //!                                      typed, and typed on (do.folders2,
 //!                                      ...; nothing is written by these).
+//!   flip=120                           the flip clock 120 ms into its flip
+//!                                      from the minute before `now`: the
+//!                                      cards that change on their way down.
+//!                                      Without it, the clock at `now`, still.
 
 use std::path::{Path, PathBuf};
 
@@ -103,6 +107,7 @@ use crate::clock;
 use crate::countdown::{self, Countdown};
 use crate::datetime::DateTime;
 use crate::disk::Disk;
+use crate::flip::Flip;
 use crate::folders::{self, Folders};
 use crate::keys::Key;
 use crate::notes::{self, Notes};
@@ -380,6 +385,19 @@ pub fn run(args: &[String]) -> i32 {
         type_on(&mut w, get(&format!("type.{tag}")).unwrap_or(""));
         render(&w, &mut text, &dir.join(format!("{tag}.bmp")));
     }
+    {
+        let ms = get("flip").and_then(|v| v.parse::<u32>().ok());
+        if ms.is_some() {
+            ctx.now = now - 60;
+        }
+        let mut w = Flip::new(&ctx);
+        ctx.now = now;
+        if let Some(ms) = ms {
+            w.tick(&mut ctx);
+            w.frame(ms);
+        }
+        render(&w, &mut text, &dir.join("flip.bmp"));
+    }
     0
 }
 
@@ -447,6 +465,7 @@ mod tests {
             Box::new(claude),
             Box::new(photo),
             Box::new(group),
+            Box::new(Flip::new(ctx)),
         ]
     }
 

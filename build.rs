@@ -1,4 +1,4 @@
-//! Compiles the twelve widgets' skins into static Rust tables -- the photo
+//! Compiles the thirteen widgets' skins into static Rust tables -- the photo
 //! frame's three times, once for each of its shapes, and the folders' three
 //! times, once for each of theirs.
 //!
@@ -582,7 +582,11 @@ fn dyn_folders(n: &str) -> bool {
     n == "TitleEdit"
 }
 
-const SKINS: [SkinDef; 16] = [
+fn dyn_flip(n: &str) -> bool {
+    matches!(n, "DateText" | "AmPm")
+}
+
+const SKINS: [SkinDef; 17] = [
     SkinDef { module: "datetime", file: "Win98DateTime.ini", dynamic: dyn_datetime, overrides: &[] },
     SkinDef { module: "resources", file: "Win98Resources.ini", dynamic: dyn_resources, overrides: &[] },
     SkinDef { module: "notes", file: "Win98Notes.ini", dynamic: dyn_notes, overrides: &[] },
@@ -607,6 +611,8 @@ const SKINS: [SkinDef; 16] = [
     SkinDef { module: "folders_2", file: "Win98Folders.ini", dynamic: dyn_folders, overrides: &[("Cols", "1"), ("FrameW", "120")] },
     SkinDef { module: "folders_4", file: "Win98Folders.ini", dynamic: dyn_folders, overrides: &[("Cols", "2"), ("FrameW", "190")] },
     SkinDef { module: "folders_6", file: "Win98Folders.ini", dynamic: dyn_folders, overrides: &[("Cols", "3"), ("FrameW", "262")] },
+    // only the day over the cards changes: flip.rs draws every card
+    SkinDef { module: "flip", file: "Win98Flip.ini", dynamic: dyn_flip, overrides: &[] },
 ];
 
 /// Compile one skin into `out`; its `Tint` -- the colour its palette is drawn

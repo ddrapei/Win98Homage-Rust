@@ -1,9 +1,9 @@
 # Win98 Widgets
 
-Twelve Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky Note,
-Weather, Rain Window, Disk Space, World Clock, Battery, Countdown, Claude Usage, Photo
-Frame and Folders — as one small Rust program. There is one of each, and as many more
-Sticky Notes, Countdowns, Photo Frames and Folders as you ask for.
+Thirteen Windows 98 style desktop widgets — Date/Time Properties, Resource Meter, Sticky
+Note, Weather, Rain Window, Disk Space, World Clock, Battery, Countdown, Claude Usage,
+Photo Frame, Folders and Flip Clock — as one small Rust program. There is one of each, and
+as many more Sticky Notes, Countdowns, Photo Frames and Folders as you ask for.
 
 ![All seven widgets on a desktop, in the default rust colour](screenshots/rust.png)
 
@@ -13,7 +13,7 @@ was in use today) and, along the bottom, **Disk Space** and **Weather**. In the 
 **World Clock** keeps the time in three cities, with the **Rain Window** under it; on the
 right, a **Sticky Note**. The same desktop in two of the other colours is further down,
 under *Colour*. The **Battery**, the smallest, the **Countdown**, **Claude Usage**, the
-**Photo Frame** and **Folders** came after these pictures were taken.
+**Photo Frame**, **Folders** and the **Flip Clock** came after these pictures were taken.
 
 | | |
 |--------------------------|---------|
@@ -38,7 +38,7 @@ Run the .exe. Nothing is installed: it can live anywhere. Only one copy runs at 
 
 Each widget's layout is an `.ini` file in [`skins/`](skins): a `[Variables]` section for the
 palette and the layout figures, then one section per meter — a shape, a line of text or an
-image — in the order they are painted. `build.rs` compiles the twelve of them into static
+image — in the order they are painted. `build.rs` compiles the thirteen of them into static
 tables (the Photo Frame's three times, once for each of its shapes, with its `PicW` and
 `PicH` given in `build.rs`, and the Folders' three times, with its `Cols` and `FrameW`) —
 every meter's position, shapes, colours, text options and mouse actions — so
@@ -46,8 +46,8 @@ every meter's position, shapes, colours, text options and mouse actions — so
 a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
 runs: the logic behind each widget is plain Rust in `src/widgets/` (`datetime.rs`,
 `resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`, `world.rs`, `battery.rs`,
-`countdown.rs`, `claude.rs`, `photo.rs`, `folders.rs`), and a mouse action in a skin, such as
-`LeftMouseUpAction=Select(7)`, names the command that logic answers to.
+`countdown.rs`, `claude.rs`, `photo.rs`, `folders.rs`, `flip.rs`), and a mouse action in a
+skin, such as `LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
 Text is laid out by DirectWrite and rasterised with aliased glyphs, set the way Windows 98's
 GDI set it: a whole-pixel font size (8 pt is 11 px), letters a whole number of pixels wide,
@@ -55,8 +55,9 @@ and no kerning, so every glyph starts on a pixel and the gaps between letters ar
 Shapes are filled by a small software canvas.
 
 `--dump <dir> [--state <file>]` draws each widget off-screen, in a state given by the
-file (which can ask for more than one note, countdown or photo frame), and writes it out as a BMP — for comparing
-before and after a change (see `src/tools/dump.rs`).
+file (which can ask for more than one note, countdown or photo frame, or draw the Flip
+Clock part-way through a card), and writes it out as a BMP — for comparing before and
+after a change (see `src/tools/dump.rs`).
 
 **Scaled displays.** The skins are laid out in whole pixels, and stretching them by 225% would
 blur every edge. So the program draws each widget itself at a whole number of times its
@@ -116,7 +117,8 @@ windows themselves — faces, bevels, fields — and the text stay exactly as th
 do the note's papers with the red margin printed on them, the weather's icons, the
 countdown's hourglass and its red pen ring, the battery's sections, red to green, and the
 Claude Usage scales, green to red, which have to mean the same whatever the colour — and
-the photos in a Photo Frame, which are shown in their own colours. An
+the photos in a Photo Frame, which are shown in their own colours, and the Flip Clock's
+cards, which are paper. An
 accent takes the
 colour's hue and how colourful it is, but keeps its own lightness, so the white text on
 a title bar stays as readable as it was; a very pale or very dark colour therefore comes
@@ -336,6 +338,22 @@ it in `settings.ini` under its own section, `[Folders]`, `[Folders2]`, …: `Sha
 or `6`), `Title=` (empty for *Folders*), and for each spot *n* `Pathn=`, `Iconn=` and
 `Namen=` (empty for the folder's own name).
 
+**Flip Clock** keeps the time on cards that turn over, as a bedside clock of the seventies
+kept it: a card for each figure, split across the middle into two leaves on a hinge, and on
+the minute the top leaf of each card that changes falls forwards and down — the next
+figure's top half already on the leaf behind it, its bottom half on the back of the leaf
+that fell — each card a moment after the one to its right, as on the mechanism. The day
+is written over the cards, and AM or PM at their right on the 12-hour clock; the hours are
+on 12 or 24 as the Date/Time widget is. It is 190 px wide and 114 px tall — the Rain
+Window's width and the Resource Meter's height. The figures are a pixel font of its own, and
+the leaves are drawn as the rain is: every pixel one of the skin's card colours, a leaf on
+its way down foreshortened by leaving rows out rather than squeezing them together, and one
+turned from the light drawn a step or two down the ramp of them. The cards are paper, not
+accent, so they stay cream and ink whatever colour is picked, and only the title bar
+follows it. Between the flips it asks for no frames, and costs nothing. The cards are
+restyled from the `Card*` variables in `skins/Win98Flip.ini`, as the rain is from its
+`Rain*`.
+
 **Position** (right-click → Position): *On desktop* (default) keeps the widgets behind
 every window; *Normal*; *Always on top*.
 
@@ -395,6 +413,10 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
   then, a small thread of its own watches the mouse buttons with a low-level hook, so
   that a click anywhere off the widget ends the selection. The thread does nothing else,
   so the mouse never waits on the widgets, and it ends with the selection.
+- **Flip Clock** asks for no frames between the flips: while a card turns over it asks for
+  one every 20 ms, for the third of a second the turn takes and no longer, and only that
+  card is repainted. A tick that finds the minute carried sets every card that changed
+  turning, one a moment after the one to its right.
 - The note is wrapped by the widths DirectWrite gives for the font it is drawn in, and
   drawn by one piece of code whether or not it is being typed on, so nothing on the sheet
   moves when you click in.
@@ -403,7 +425,7 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 ## Layout of the source
 
 ```text
-skins/       the twelve layouts (.ini), the weather icons, the folders' icons and the
+skins/       the thirteen layouts (.ini), the weather icons, the folders' icons and the
              tray icon
 screenshots/ the pictures in this file
 build.rs     those .ini files compiled into static tables
@@ -414,7 +436,7 @@ src/
                in between
   tools/       for working on the program
     dump         off-screen rendering, for checking a change
-  widgets/     what a widget is, and the twelve there are
+  widgets/     what a widget is, and the thirteen there are
     widget       the Widget trait: all the host knows about a widget
     field        a one-line field, typed on where it stands: the weather's city,
                  the world clock's three, a countdown's name
@@ -432,6 +454,7 @@ src/
     claude       Claude Usage (and the child that asks for it)
     photo        Photo Frame (also: which sections of settings.ini are photo frames)
     folders      Folders
+    flip         Flip Clock
   input/       typing
     keys         the window that holds the keyboard for a widget
     editor       a text and what the keys do to it: the note's, the one-line fields'
