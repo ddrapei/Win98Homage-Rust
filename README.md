@@ -213,11 +213,15 @@ people under umbrellas, a traffic light changing, the wet road mirroring the lit
 *Heavy rain*, a coast with a lighthouse whose beam sweeps after dark, a fishing boat, a
 buoy blinking, gulls; *Sleet*, a country road in winter with telegraph poles and a deer
 sign; *Snow*, a log cabin in a pine forest, a snowman in the garden; *Heavy snow*, the
-Alps, a cable car going up and down; *Thunderstorm*, a prairie under a thunderhead with
-its anvil, a windmill turning, cattle, tumbleweed rolling with the wind; *Hail*, a red barn
-and silo, a weathervane, a scarecrow, hens in the yard. The clouds are heaps of puffs, each lit as
-a ball from the side the sun or the moon is on, in five bands: white and blue-grey by
-day, peach and violet at dusk, navy by night, slate in a storm. Every scene has a day, a
+Alps, a cable car going up and down; *Thunderstorm*, a prairie, a windmill turning, cattle,
+tumbleweed rolling with the wind; *Hail*, a red barn and silo, a weathervane, a scarecrow,
+hens in the yard. The clouds are heaps of puffs, each lit as a ball from the side the sun
+or the moon is on, in five bands: white and blue-grey by day, peach and violet at dusk,
+navy by night. A storm — thunder or hail — is a deck of slate cloud low over the whole
+sky, rags of scud racing under it, and past its edge, low down, the paler light beyond the
+storm with rain hanging in it in the distance; its lightning strikes out of the deck and
+lights everything up. Hail and sleet bounce on the ground, a wet road included, and go
+into water with a ring — hail with a spout. Every scene has a day, a
 dusk and a night, worked out from the place's own sunrise and sunset; windows and lamps
 light up after dark; the wind the forecast gives slants the rain and snow and drives the
 clouds and the smoke. The scenes are in nature's colours, which the colour picked does

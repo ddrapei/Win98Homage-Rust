@@ -19,7 +19,8 @@
 //!   clouds       heaps of puffs, each lit as a ball from the side the sun or
 //!                the moon is on (`clouds`): fair-weather cumulus, a grey
 //!                layer in rows that shrink towards the horizon, or a
-//!                thunderhead with its anvil -- drifting with the wind
+//!                storm's dark deck, rain hanging from its edge in the
+//!                distance and scud racing under it -- drifting with the wind
 //!   birds        now and then, across a fine day
 //!   the place    in the light of the moment, the far of it hazed; its
 //!                windows and lamps lit after dark; its water showing what
@@ -244,8 +245,10 @@ enum Cover {
     Scattered,
     /// A grey layer, row on row to the horizon.
     Layer,
-    /// A thunderhead, with a ragged layer over it.
-    Tower,
+    /// Under a storm: a deck of dark cloud low over the whole sky, torn
+    /// along its foot, and under its edge, low down, a paler strip of sky
+    /// with rain hanging in it in the distance; rags of scud racing below.
+    Storm,
 }
 
 /// Rain: how many drops are in the air, how fast and how long they are
@@ -312,11 +315,11 @@ fn mood(scene: Scene) -> Mood {
         Scene::Sleet => Mood { gloom: 0.9, dark: 0.12, rain: rain(45, 1.1, 0.8), ice: 40, ..grey },
         Scene::Snow => Mood { gloom: 0.8, dark: 0.06, snow: 160, ..grey },
         Scene::Blizzard => Mood { gloom: 0.95, dark: 0.18, snow: 300, blizzard: true, ..grey },
-        Scene::Storm => Mood { gloom: 0.7, dark: 0.35, cover: Cover::Tower, rain: rain(140, 1.3, 1.3), lightning: Some((2.5, 7.0)), ..calm },
+        Scene::Storm => Mood { gloom: 0.85, dark: 0.35, cover: Cover::Storm, rain: rain(140, 1.3, 1.3), lightning: Some((2.5, 7.0)), ..calm },
         Scene::Hail => Mood {
-            gloom: 0.7,
+            gloom: 0.85,
             dark: 0.3,
-            cover: Cover::Tower,
+            cover: Cover::Storm,
             rain: rain(55, 1.25, 1.1),
             ice: 54,
             hail: true,
@@ -554,13 +557,14 @@ struct Tones {
     /// shows.
     land: Vec<u32>,
     /// The clouds' five tones, near and far; softer for a layer, lit as it
-    /// is from all over; and a thunderhead's, bright where the sun is on it
-    /// and slate where it is not.
+    /// is from all over; and a storm's, slate, near and far, and its scud's.
     ramp: [u32; 5],
     far_ramp: [u32; 5],
     soft_ramp: [u32; 5],
     far_soft: [u32; 5],
-    tower_ramp: [u32; 5],
+    storm_ramp: [u32; 5],
+    storm_far: [u32; 5],
+    scud_ramp: [u32; 5],
     /// How much the lamps and the windows shine, 0 by day to 1 by night.
     glow: f32,
     rain: u32,
@@ -636,8 +640,19 @@ struct Cloud {
     far: bool,
     /// Lit from above, as under a grey sky, whatever side the sun is on.
     flat: bool,
-    /// A thunderhead, in its own tones.
-    tall: bool,
+    /// The tones it is drawn in.
+    hue: Hue,
+}
+
+/// Which tones a cloud is drawn in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Hue {
+    /// A fair day's or a grey one's, by the light.
+    Own,
+    /// A storm's deck: slate.
+    Storm,
+    /// Scud under a storm: darker again.
+    Scud,
 }
 
 /// A streak of high cloud: a line or two of light across the sky.
@@ -1050,6 +1065,12 @@ impl Sky {
         self.render();
     }
 
+    /// For the test harness: the storm between strikes, as it mostly is.
+    pub fn unstrike(&mut self) {
+        self.strike = None;
+        self.render();
+    }
+
     /// For the test harness: the same weather every time, `seconds` in --
     /// and, for a storm, a bolt just struck.
     pub fn set_fixed(&mut self, seconds: f32) {
@@ -1122,7 +1143,15 @@ impl Sky {
             let grey = by_day(p.grey_night[i], p.grey_dusk[i], p.grey_day[i]);
             mix(mix(clear, grey, m.gloom), p.storm, m.dark)
         };
-        let (top, low) = (sky(0), sky(1));
+        let (top, mut low) = (sky(0), sky(1));
+        // Under a storm the sky is its deck, dark, down to its edge; past
+        // that, low down, the light beyond the storm: pale and cold by
+        // day, warm at dusk, a little less dark by night.
+        let storm = m.cover == Cover::Storm;
+        if storm {
+            let beyond = by_day(mix(p.grey_night[1], p.grey_dusk[1], 0.25), mix(p.grey_dusk[1], p.sky_dusk[1], 0.45), mix(p.grey_day[1], p.sky_day[1], 0.2));
+            low = mix(low, beyond, 0.75);
+        }
         // How much of the day's light there is, for what has only a day and
         // a night colour; and how near the sun is to the horizon.
         let lit = smooth(-0.35, 0.2, d);
@@ -1133,7 +1162,8 @@ impl Sky {
         let t = &mut self.tones;
         // the sky, in bands down to the horizon, dithered where they meet
         const BANDS: f32 = 11.0;
-        let band = |i: f32| mix(top, low, (i / BANDS).powf(0.9));
+        let curve = if storm { 3.0 } else { 0.9 };
+        let band = |i: f32| mix(top, low, (i / BANDS).powf(curve));
         t.backdrop.resize((w * h) as usize, 0);
         for y in 0..h {
             let f = (y as f32 / horizon.max(1) as f32).min(1.0) * BANDS;
@@ -1221,11 +1251,15 @@ impl Sky {
         let ramp = t.ramp;
         t.soft_ramp = ramp.map(|c| mix(c, ramp[2], 0.32));
         t.far_soft = t.soft_ramp.map(|c| mix(c, low, 0.38));
+        // a storm's: slate, lighter by day, bruised at dusk, all but black
+        // by night; the far of it fading into the light beyond; its scud
+        // darker than the deck it races under
         let s = p.cloud_storm;
-        let tower_day = [s[0], s[2], mix(p.cloud_grey[2], p.cloud_day[2], 0.5), p.cloud_day[3], p.cloud_day[4]];
-        let tower_dusk = [s[0], p.cloud_dusk[0], p.cloud_dusk[2], p.cloud_dusk[3], p.cloud_dusk[4]];
-        let tower_night = mix5(p.cloud_night, s, 0.3);
-        t.tower_ramp = core::array::from_fn(|i| by_day(tower_night[i], tower_dusk[i], tower_day[i]));
+        let (storm_day, storm_dusk, storm_night) = (mix5(s, p.cloud_grey, 0.4), mix5(s, p.cloud_dusk, 0.3), mix5(p.cloud_night, s, 0.45));
+        t.storm_ramp = core::array::from_fn(|i| by_day(storm_night[i], storm_dusk[i], storm_day[i]));
+        t.storm_far = t.storm_ramp.map(|c| mix(c, low, 0.3));
+        let deck = t.storm_ramp;
+        t.scud_ramp = deck.map(|c| mix(c, deck[0], 0.5));
 
         let dim_night = 0.4 * (1.0 - lit);
         t.rain = mix(p.rain, top, dim_night);
@@ -1254,7 +1288,12 @@ impl Sky {
         for y in (2..70.min(h)).step_by(3) {
             for x in (6..96.min(w)).step_by(3) {
                 let i = (y * w + x) as usize;
-                let c = if t.land[i] >> 24 != 0 { t.land[i] } else if m.cover == Cover::Layer { t.soft_ramp[3] } else { t.backdrop[i] };
+                let c = match m.cover {
+                    _ if t.land[i] >> 24 != 0 => t.land[i],
+                    Cover::Layer => t.soft_ramp[3],
+                    Cover::Storm => t.storm_ramp[3],
+                    _ => t.backdrop[i],
+                };
                 sum += luma(if m.fog { mix(c, t.fog, 0.35) } else { c });
                 n += 1;
             }
@@ -1477,53 +1516,59 @@ impl Sky {
                             rows: (cy as f32, cy as f32 + 1.0),
                             far: k >= 3,
                             flat: true,
-                            tall: false,
+                            hue: Hue::Own,
                         });
                     }
                 }
             }
-            Cover::Tower => {
-                // the thunderhead, standing on the horizon on the right, its
-                // anvil spread against the sky
-                let (cw, ch) = (150, (horizon - 2.0) as i32);
-                let form = Form::tower(&mut self.rng, cw, ch);
-                self.clouds.push(Cloud {
-                    x: w - cw as f32 + 6.0,
-                    y: horizon as i32 + 4 - ch,
-                    form,
-                    px: Vec::new(),
-                    pace: 0.0,
-                    period: None,
-                    rows: (0.0, 1.0),
-                    far: false,
-                    flat: false,
-                    tall: true,
-                });
-                // a towering cumulus far off to the left, building, and rags
-                // of dark scud going by in front of them both
-                let form = Form::cumulus(&mut self.rng, 84, (horizon * 0.36) as i32);
-                self.clouds.push(Cloud {
-                    x: 4.0,
-                    y: (horizon * 0.66) as i32,
-                    form,
-                    px: Vec::new(),
-                    pace: 0.0,
-                    period: None,
-                    rows: (0.0, 1.0),
-                    far: true,
-                    flat: false,
-                    tall: false,
-                });
-                for i in 0..4 {
-                    let (cw, ch) = (self.rng.range(22.0, 40.0) as i32, self.rng.range(8.0, 13.0) as i32);
-                    let x = (i as f32 + self.rng.range(0.0, 0.7)) * w / 4.0;
-                    self.cumulus(x, (horizon * 0.2, horizon * 0.72), cw, ch, 1.6, false);
+            Cover::Storm => {
+                // the deck: rows of heavy cloud from overhead to its edge,
+                // closer packed than a grey day's and lower, so no sky shows
+                // through overhead, driven faster
+                let rows = [(-0.16, 0.36), (0.06, 0.3), (0.25, 0.23), (0.41, 0.17), (0.53, 0.12)];
+                for (k, &(at, tall)) in rows.iter().enumerate() {
+                    let ch = (horizon * tall).max(4.0) as i32;
+                    self.row_of_cloud((horizon * at) as i32, ch, 4.6, 0.55, 1.5 - k as f32 * 0.18, k >= 3, Hue::Storm);
+                }
+                // its foot torn into rags, hanging under the edge
+                let ch = (horizon * 0.06).max(3.0) as i32;
+                self.row_of_cloud((horizon * 0.62) as i32, ch, 5.0, 1.5, 1.0, true, Hue::Storm);
+                // and scud racing under it all, dark, low
+                for i in 0..5 {
+                    let (cw, ch) = (self.rng.range(26.0, 52.0) as i32, self.rng.range(5.0, 9.0) as i32);
+                    let x = (i as f32 + self.rng.range(0.0, 0.7)) * w / 5.0;
+                    let rows = (horizon * 0.3, horizon * 0.66);
+                    let y = self.rng.range(rows.0, rows.1) as i32;
+                    let form = Form::layer(&mut self.rng, cw, ch);
+                    let pace = self.rng.range(2.2, 3.0);
+                    self.clouds.push(Cloud { x, y, form, px: Vec::new(), pace, period: None, rows, far: false, flat: true, hue: Hue::Scud });
                 }
             }
         }
-        // far ones drawn first, and the thunderhead behind what goes by
-        self.clouds.sort_by_key(|c| (!c.far, c.pace != 0.0));
+        // the far drawn first, then the rows from overhead down, so each
+        // lower one stands in front of the foot of the one above it; then
+        // whatever goes by on its own
+        self.clouds.sort_by_key(|c| (!c.far, c.period.is_none()));
         self.shade_clouds();
+    }
+
+    /// A row of cloud along `y`, closed from one side of the sky to the
+    /// other and going round as one: clouds `ch` tall and `wide` times as
+    /// wide, `gap` of a cloud's width apart, at `pace` of the wind.
+    #[allow(clippy::too_many_arguments)]
+    fn row_of_cloud(&mut self, y: i32, ch: i32, wide: f32, gap: f32, pace: f32, far: bool, hue: Hue) {
+        let w = self.w as f32;
+        let spacing = ch as f32 * wide * gap;
+        let n = ((w + ch as f32 * wide * 1.3 + 10.0) / spacing).ceil() as usize;
+        let period = n as f32 * spacing;
+        for i in 0..n {
+            let cw = (ch as f32 * wide * self.rng.range(0.8, 1.3)) as i32;
+            let ch = (ch as f32 * self.rng.range(0.8, 1.2)) as i32;
+            let x = -(ch as f32 * wide) + i as f32 * spacing + self.rng.range(-6.0, 6.0);
+            let form = Form::layer(&mut self.rng, cw, ch);
+            let cy = y + self.rng.range(-4.0, 4.0) as i32;
+            self.clouds.push(Cloud { x, y: cy, form, px: Vec::new(), pace, period: Some(period), rows: (cy as f32, cy as f32 + 1.0), far, flat: true, hue });
+        }
     }
 
     /// A cumulus on its own, somewhere between the `rows` given, that goes
@@ -1531,7 +1576,7 @@ impl Sky {
     fn cumulus(&mut self, x: f32, rows: (f32, f32), w: i32, h: i32, pace: f32, far: bool) {
         let form = Form::cumulus(&mut self.rng, w, h);
         let y = self.rng.range(rows.0, rows.1.max(rows.0 + 1.0)) as i32;
-        self.clouds.push(Cloud { x, y, form, px: Vec::new(), pace, period: None, rows, far, flat: false, tall: false });
+        self.clouds.push(Cloud { x, y, form, px: Vec::new(), pace, period: None, rows, far, flat: false, hue: Hue::Own });
     }
 
     fn add_streaks(&mut self, n: usize, rows: (f32, f32)) {
@@ -1609,7 +1654,8 @@ impl Sky {
         let mut path = Vec::new();
         if !sheet {
             let horizon = self.horizon();
-            let top = horizon / 4;
+            // out of the foot of a storm's deck
+            let top = if self.mood.cover == Cover::Storm { horizon * 9 / 20 } else { horizon / 4 };
             let bottom = horizon + self.rng.range(1.0, 5.0) as i32;
             let x = self.rng.range(self.w as f32 * 0.45, self.w as f32 * 0.9) as i32;
             // the channel: two pixels wide for its first half, one after
@@ -1971,13 +2017,12 @@ impl Sky {
             }
         }
 
-        // the sun by day, the moon by night -- and behind a thunderhead, a
-        // sun going down
-        if m.open || m.cover == Cover::Tower {
+        // the sun by day, the moon by night
+        if m.open {
             if l.day > -0.05 {
                 let (x, y) = arc(w, horizon, l.sun);
-                draw_sun(pic, t, x, y, time, l.day > 0.12 && m.open);
-            } else if m.open {
+                draw_sun(pic, t, x, y, time, l.day > 0.12);
+            } else {
                 let (x, y) = arc(w, horizon, l.night);
                 draw_moon(pic, t, x, y + MOON_DROP, l.moon);
             }
@@ -1995,12 +2040,20 @@ impl Sky {
                 }
             }
         }
+        // under a storm, first the rain hanging from its edge in the
+        // distance: curtains of it, slanting with the wind, drifting
+        if m.cover == Cover::Storm && m.rain.is_some() {
+            let slant = (self.wind / 45.0).clamp(-0.6, 0.6);
+            draw_curtains(pic, t.storm_ramp[1], horizon, time, slant, self.wind);
+        }
         for c in &self.clouds {
-            let ramp = match (c.tall, c.flat, c.far) {
-                (true, _, _) => &t.tower_ramp,
-                (_, true, false) => &t.soft_ramp,
-                (_, true, true) => &t.far_soft,
-                (_, false, true) => &t.far_ramp,
+            let ramp = match (c.hue, c.flat, c.far) {
+                (Hue::Scud, _, _) => &t.scud_ramp,
+                (Hue::Storm, _, false) => &t.storm_ramp,
+                (Hue::Storm, _, true) => &t.storm_far,
+                (Hue::Own, true, false) => &t.soft_ramp,
+                (Hue::Own, true, true) => &t.far_soft,
+                (Hue::Own, false, true) => &t.far_ramp,
                 _ => &t.ramp,
             };
             draw_cloud(pic, c, ramp);
@@ -2380,6 +2433,34 @@ fn lift(px: &mut [u32], c: u32, a: f32) {
     for p in px {
         let ch = |s: u32, i: usize| ((((*p >> s) & 255) * (256 - k) + lit[i] + 128) >> 8).min(255);
         *p = 0xFF00_0000 | ch(16, 0) << 16 | ch(8, 1) << 8 | ch(0, 2);
+    }
+}
+
+/// Rain hanging from a storm in the distance: curtains of it from the
+/// deck's edge down to the horizon, each densest in its middle, streaked,
+/// slanting with the rain and drifting with the wind.
+fn draw_curtains(pic: &mut Pic, c: u32, horizon: i32, time: f32, slant: f32, wind: f32) {
+    let top = (horizon as f32 * 0.55) as i32;
+    let rows = (horizon - top).max(1) as f32;
+    let span = pic.w as f32 + 90.0;
+    let drift = if wind.abs() < 1.0 { -6.0 } else { wind } * 0.15;
+    for (k, &(at, half, dense)) in [(0.1f32, 15.0f32, 0.42f32), (0.46, 24.0, 0.55), (0.8, 11.0, 0.36)].iter().enumerate() {
+        let cx = (at * span + time * drift).rem_euclid(span) - 45.0;
+        for y in top..horizon {
+            let down = (y - top) as f32 / rows;
+            // out of the cloud, thinning a little as it nears the ground
+            let a = dense * (down * 6.0).min(1.0) * (1.0 - 0.4 * down);
+            let lean = slant * (y - top) as f32;
+            let (x0, x1) = ((cx + lean - half).floor() as i32, (cx + lean + half).ceil() as i32);
+            for x in x0.max(0)..x1.min(pic.w) {
+                let dx = (x as f32 - cx - lean) / half;
+                let body = (1.0 - dx * dx).max(0.0);
+                // streaks along the way it falls
+                let u = (x as f32 - lean).round() as i32 + k as i32 * 97;
+                let streak = 0.55 + 0.15 * ((u as u32).wrapping_mul(0x9E37_79B1) >> 30) as f32;
+                pic.blend(x, y, c, a * body * streak);
+            }
+        }
     }
 }
 
@@ -2879,6 +2960,27 @@ mod tests {
         }
         assert!(lit > 20, "no glitter at all");
         assert!(by_ship > 5, "the ship hides the high moon from all the water in front of it");
+    }
+
+    #[test]
+    fn under_a_storm_its_deck_covers_the_sky_and_the_light_beyond_is_low_down() {
+        for scene in [Scene::Storm, Scene::Hail] {
+            for (when, light) in [("day", Light::NOON), ("dusk", Light { day: 0.06, sun: 0.97, night: 0.0, moon: 0.5 }), ("night", Light::MIDNIGHT)] {
+                let mut s = sky(scene, light);
+                s.unstrike();
+                let (w, horizon) = (s.w, s.horizon());
+                // overhead, the deck from side to side: next to none of the
+                // sky behind it shows
+                let (px, back) = (s.pixels(), &s.tones.backdrop);
+                let overhead = (0..horizon / 3).flat_map(|y| (0..w).map(move |x| (y * w + x) as usize));
+                let (all, open) = overhead.fold((0, 0), |(a, o), i| (a + 1, o + (px[i] == back[i]) as usize));
+                assert!(open * 50 < all, "{scene:?} {when}: {open} of {all} pixels overhead are open sky");
+                // and low down, past its edge, the paler light beyond it
+                let row = |y: i32| (0..w).map(|x| luma(back[(y * w + x) as usize])).sum::<f32>() / w as f32;
+                assert!(row(horizon - 2) > row(2) + 0.04, "{scene:?} {when}: no lighter sky beyond the storm");
+                assert!(s.glitter().is_none(), "{scene:?} {when}: the sun or moon under a storm");
+            }
+        }
     }
 
     #[test]

@@ -31,8 +31,7 @@ pub struct Form {
     pub h: i32,
     pub puffs: Vec<Puff>,
     pub base: f32,
-    /// How much lighter its crown is than its foot: a thunderhead's is
-    /// white on top and slate below.
+    /// How much lighter its crown is than its foot.
     pub rise: f32,
 }
 
@@ -54,55 +53,6 @@ impl Form {
         heap(rng, &mut puffs, wf, hf, 3, |fx| hf * 0.92 * (1.0 - (1.0 - (2.0 * fx - 1.0).powi(2)).max(0.0).sqrt()));
         settle(&mut puffs, wf, hf);
         Form { w, h, puffs, base, rise: 0.24 }
-    }
-
-    /// A thunderhead: a broad dark foot, a column of cloud boiling up from
-    /// it, and at the top the anvil, spread flat and wide where the cloud
-    /// can rise no further.
-    pub fn tower(rng: &mut Rng, w: i32, h: i32) -> Form {
-        let (wf, hf) = (w as f32, h as f32);
-        let base = hf - 0.5;
-        let mut puffs = Vec::new();
-        let middle = wf * 0.5;
-        let anvil = hf * 0.26;
-        // the body, level on level from the broad foot up to the anvil,
-        // narrowing as it climbs and leaning a little downwind
-        let mut y = base;
-        while y > anvil {
-            let f = (base - y) / (base - anvil);
-            let span = wf * (0.86 - 0.34 * f);
-            let r = (wf * (0.12 - 0.035 * f)).max(3.0);
-            let n = ((span / (r * 1.25)).ceil() as usize).max(1);
-            for i in 0..n {
-                let fx = (i as f32 + 0.5) / n as f32 - 0.5;
-                let x = middle + fx * span + f * wf * 0.06 + rng.range(-2.0, 2.0);
-                puffs.push(Puff { x, y: y - r * 0.4 + rng.range(-2.0, 2.0), rx: r * rng.range(1.0, 1.2), ry: r * rng.range(0.9, 1.1) });
-            }
-            y -= r * 0.85;
-        }
-        // towers boiling out of its sides and its top, cauliflower on
-        // cauliflower
-        let body = puffs.clone();
-        for p in &body {
-            let edge = (p.x - middle).abs() / (wf * 0.45);
-            if rng.unit() < 0.3 + 0.5 * edge {
-                let side = if p.x < middle { -1.0 } else { 1.0 };
-                let r = p.ry * rng.range(0.5, 0.75);
-                puffs.push(Puff { x: p.x + side * p.rx * rng.range(0.4, 0.8), y: p.y - p.ry * rng.range(0.3, 0.7), rx: r * 1.1, ry: r });
-            }
-        }
-        // the anvil: spread wide and flat on top, ragged underneath
-        for (row, span, n) in [(0.0f32, 0.96f32, 9), (1.0, 0.74, 7)] {
-            for i in 0..n {
-                let fx = (i as f32 + 0.5) / n as f32 - 0.5;
-                let ry = hf * rng.range(0.055, 0.08);
-                let rx = (ry * rng.range(2.4, 3.2)).min(wf * 0.2);
-                let x = (middle + fx * wf * span + wf * 0.05).clamp(rx * 0.6, wf - rx * 0.6);
-                puffs.push(Puff { x, y: 1.5 + ry + row * ry * 1.4 + rng.range(0.0, 1.5), rx, ry });
-            }
-        }
-        settle(&mut puffs, wf, hf);
-        Form { w, h, puffs, base, rise: 0.8 }
     }
 
     /// A layer of cloud -- stratocumulus, the stuff of a grey day: broad
@@ -279,7 +229,6 @@ mod tests {
         let mut rng = Rng(9);
         for (form, name) in [
             (Form::cumulus(&mut rng, 70, 34), "cumulus"),
-            (Form::tower(&mut rng, 120, 110), "tower"),
             (Form::layer(&mut rng, 90, 18), "layer"),
             (Form::crown(&mut rng, 40, 32), "crown"),
         ] {

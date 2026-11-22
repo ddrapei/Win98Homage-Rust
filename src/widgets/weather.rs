@@ -584,6 +584,13 @@ impl Weather {
         }
     }
 
+    /// For the test harness: a storm between its strikes.
+    pub fn unstrike(&mut self) {
+        if let Some(sky) = &mut self.sky {
+            sky.unstrike();
+        }
+    }
+
     /// For the test harness: keep to `scene`, or follow the weather.
     pub fn pin(&mut self, scene: Option<Scene>) {
         self.pinned = scene;

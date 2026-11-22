@@ -32,6 +32,8 @@
 //!                                      machine's clock (any may be empty)
 //!   sky=2.5                            seconds into the window's scene
 //!                                      (always the same weather)
+//!   flash=0                            a storm between strikes, not lit by
+//!                                      one just struck
 //!   set.Weather.Scene=snow             the scene the window keeps to
 //!   scenes=1                           and every one of the twelve, by day,
 //!                                      at dusk and by night, each to
@@ -346,7 +348,13 @@ pub fn run(args: &[String]) -> i32 {
     {
         let mut w = in_look(weather::Look::Window, &ctx);
         let seconds = get("sky").and_then(|v| v.parse().ok()).unwrap_or(2.5);
+        let unstrike = |w: &mut Weather| {
+            if get("flash") == Some("0") {
+                w.unstrike();
+            }
+        };
         w.set_sky(seconds, None);
+        unstrike(&mut w);
         if let Some(typing) = get("type.weather_window") {
             w.menu_command(weather::MENU_CITY, &mut ctx);
             type_on(&mut w, typing);
@@ -359,6 +367,7 @@ pub fn run(args: &[String]) -> i32 {
                 for (when, light) in times {
                     w.pin(Some(scene));
                     w.set_sky(seconds, Some(light));
+                    unstrike(&mut w);
                     render(&w, &mut text, &dir.join(format!("sky_{}_{when}.bmp", scene.key())));
                 }
             }
