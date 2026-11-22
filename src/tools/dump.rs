@@ -21,7 +21,23 @@
 //!                                      be (and .3, .4, ...): drawn to
 //!                                      notes2.bmp, with set.Notes2.*,
 //!                                      do.notes2 and type.notes2 for it
-//!   weather=9.3,3,0,10.1,4.9,Place     temp, code, is_day, max, min, city
+//!   weather=9.3,3,0,10.1,4.9,Place     temp, code, is_day, max, min, city;
+//!                                      drawn in both looks, to weather.bmp
+//!                                      and weather_window.bmp
+//!   weather.more=5,28,225,4,80,07:30,16:02
+//!                                      and for the window, what it feels
+//!                                      like, the wind and where it is from,
+//!                                      the UV, the chance of rain, and
+//!                                      today's sunrise and sunset by this
+//!                                      machine's clock (any may be empty)
+//!   sky=2.5                            seconds into the window's scene
+//!                                      (always the same weather)
+//!   set.Weather.Scene=snow             the scene the window keeps to
+//!   scenes=1                           and every one of the twelve, by day,
+//!                                      at dusk and by night, each to
+//!                                      sky_<scene>_<day|dusk|night>.bmp
+//!   type.weather_window=type Kyiv      the window's title typed on, as Set
+//!                                      city... starts it
 //!   rain=2.5                           seconds into the shower (always the same one)
 //!   disk=C,3,Windows,511000000000,118000000000
 //!                                      letter, kind (2 removable, 3 fixed,
@@ -128,7 +144,8 @@ use crate::settings::Settings;
 use crate::skin::{self, Hooks};
 use crate::text::Text;
 use crate::tint;
-use crate::weather::Weather;
+use crate::sky::{Light, Scene};
+use crate::weather::{self, Weather};
 use crate::widget::{Ctx, Widget};
 use crate::world::World;
 
@@ -304,15 +321,48 @@ pub fn run(args: &[String]) -> i32 {
         type_on(&mut w, get(&format!("type.{tag}")).unwrap_or(""));
         render(&w, &mut text, &dir.join(format!("{tag}.bmp")));
     }
-    {
-        let mut w = Weather::new(&ctx);
+    // the weather in each of its looks, whatever settings.ini would pick
+    let in_look = |look: weather::Look, ctx: &Ctx| {
+        let mut w = Weather::new_in(ctx, look);
         if let Some(v) = get("weather") {
-            let p: Vec<&str> = v.split(',').collect();
+            // the place is the rest of the line, commas and all
+            let p: Vec<&str> = v.splitn(6, ',').collect();
             let num = |i: usize| p.get(i).and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0);
-            w.set_fixed(num(0), num(1) as i32, num(2) != 0.0, num(3), num(4), p.get(5).copied().unwrap_or(""));
+            w.set_fixed(num(0), num(1) as i32, num(2) != 0.0, num(3), num(4), p.get(5).map_or("", |s| s.trim()));
         }
+        if let Some(v) = get("weather.more") {
+            let p: Vec<&str> = v.split(',').map(str::trim).collect();
+            let maybe = |i: usize| p.get(i).and_then(|s| s.parse::<f64>().ok());
+            let time = |i: usize| p.get(i).copied().unwrap_or("");
+            w.set_more(maybe(0), maybe(1), maybe(2), maybe(3), maybe(4), time(5), time(6));
+        }
+        w
+    };
+    {
+        let mut w = in_look(weather::Look::Panel, &ctx);
         type_on(&mut w, get("type.weather").unwrap_or(""));
         render(&w, &mut text, &dir.join("weather.bmp"));
+    }
+    {
+        let mut w = in_look(weather::Look::Window, &ctx);
+        let seconds = get("sky").and_then(|v| v.parse().ok()).unwrap_or(2.5);
+        w.set_sky(seconds, None);
+        if let Some(typing) = get("type.weather_window") {
+            w.menu_command(weather::MENU_CITY, &mut ctx);
+            type_on(&mut w, typing);
+        }
+        render(&w, &mut text, &dir.join("weather_window.bmp"));
+        // and every scene, by day, at dusk and by night
+        if get("scenes") == Some("1") {
+            let times = [("day", Light::NOON), ("dusk", Light { day: 0.06, sun: 0.97, night: 0.0, moon: 0.3 }), ("night", Light::MIDNIGHT)];
+            for scene in Scene::ALL {
+                for (when, light) in times {
+                    w.pin(Some(scene));
+                    w.set_sky(seconds, Some(light));
+                    render(&w, &mut text, &dir.join(format!("sky_{}_{when}.bmp", scene.key())));
+                }
+            }
+        }
     }
     {
         let mut w = Rain::new(&ctx);
@@ -441,6 +491,10 @@ mod tests {
         weather.set_fixed(9.3, 3, false, 10.1, 4.9, "Lviv");
         // something selected in the city field, for its colours too
         type_on(&mut weather, "double 87 167");
+        // and as a window: a wet night, the readings light on it
+        let mut window = Weather::new_in(ctx, weather::Look::Window);
+        window.set_fixed(9.3, 61, false, 10.1, 4.9, "Lviv");
+        window.set_sky(2.5, None);
         let mut rain = Rain::new(ctx);
         rain.set_fixed(2.5);
         let mut disk = Disk::new(ctx);
@@ -484,6 +538,7 @@ mod tests {
             Box::new(resources),
             Box::new(notes),
             Box::new(weather),
+            Box::new(window),
             Box::new(rain),
             Box::new(disk),
             Box::new(world),

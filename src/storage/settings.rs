@@ -291,6 +291,18 @@ TempUnit={unit}
 ManualLat={lat}
 ManualLon={lon}
 ManualLocation={place}
+; how it looks (right-click): panel, the property-sheet panel, or window, the
+; weather itself, animated, with the readings over it
+Look={look}
+; the window's scene: empty to follow the weather, or one kept to whatever
+; it is -- clear, partly, overcast, fog, drizzle, rain, heavy-rain, sleet,
+; snow, heavy-snow, storm or hail.  Scenery: what it is seen over -- empty
+; for the city the forecast is for when it has a place of its own (london,
+; aberdeen) and the weather's own place otherwise; weather for the
+; weather's own always; or a city, to keep to it.  Paused=1 keeps it still
+Scene={scene}
+Scenery={scenery}
+Paused={wx_paused}
 
 [Disk]
 Enabled=1
@@ -355,6 +367,10 @@ Paused={paused}
         lat = wx.var("ManualLat"),
         lon = wx.var("ManualLon"),
         place = wx.var("ManualLocation"),
+        look = wx.var("Look"),
+        scene = wx.var("Scene"),
+        scenery = wx.var("Scenery"),
+        wx_paused = wx.var("Paused"),
         drive = skin::disk::SKIN.var("Drive"),
         city1 = world.var("City1"),
         zone1 = world.var("Zone1"),

@@ -7,6 +7,8 @@
 //!
 //! `field` and `calendar` are what some of them share: a city -- or any one
 //! line -- typed into a field, and a month calendar with its month list.
+//! `sky` is the weather's animated look, the picture alone, as `dither` is
+//! the Dither Frame's.
 
 pub mod widget;
 
@@ -25,5 +27,6 @@ pub mod notes;
 pub mod photo;
 pub mod rain;
 pub mod resources;
+pub mod sky;
 pub mod weather;
 pub mod world;

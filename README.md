@@ -40,8 +40,8 @@ Run the .exe. Nothing is installed: it can live anywhere. Only one copy runs at 
 
 Each widget's layout is an `.ini` file in [`skins/`](skins): a `[Variables]` section for the
 palette and the layout figures, then one section per meter — a shape, a line of text or an
-image — in the order they are painted. `build.rs` compiles the thirteen of them into static
-tables (the Photo Frame's three times, once for each of its shapes, with its `PicW` and
+image — in the order they are painted. `build.rs` compiles the fourteen of them into static
+tables (two for the Weather, one for each of its looks; the Photo Frame's three times, once for each of its shapes, with its `PicW` and
 `PicH` given in `build.rs`, and three times more as the Dither Frame's, with its `Block`,
 `Look`, `Title` and `Folder` given there too; and the Folders' three times, with its `Cols`
 and `FrameW`) —
@@ -49,7 +49,7 @@ every meter's position, shapes, colours, text options and mouse actions — so
 **the `.ini` files are the single source of truth for the layout**. Change a colour or move
 a meter there, rebuild, and the widget follows. Nothing parses an `.ini` while the program
 runs: the logic behind each widget is plain Rust in `src/widgets/` (`datetime.rs`,
-`resources.rs`, `notes.rs`, `weather.rs`, `rain.rs`, `disk.rs`, `world.rs`, `battery.rs`,
+`resources.rs`, `notes.rs`, `weather.rs` and its animated window's `sky.rs`, `rain.rs`, `disk.rs`, `world.rs`, `battery.rs`,
 `countdown.rs`, `claude.rs`, `photo.rs`, `folders.rs`, `flip.rs`), and a mouse action in a
 skin, such as `LeftMouseUpAction=Select(7)`, names the command that logic answers to.
 
@@ -116,7 +116,7 @@ choice is kept in `settings.ini` as `Tint=` under
 `[General]` — `R,G,B` or `#RRGGBB`, written there by hand if you like and picked up with
 *Reload settings*; empty is the rust. The colour is the accents': the title bars, the
 calendar's heading and the selected day, the clocks' hands and dots, the usage bars, the
-used part of the disk pie, the rain, the Claude Usage needles. The greys and whites of the
+used part of the disk pie, the rain, the weather's animated scenes, the Claude Usage needles. The greys and whites of the
 windows themselves — faces, bevels, fields — and the text stay exactly as they are, and so
 do the note's papers with the red margin printed on them, the weather's icons, the
 countdown's hourglass and its red pen ring, the battery's sections, red to green, and the
@@ -142,7 +142,7 @@ fields, the text and the note's paper do not.
 In the widgets themselves: tabs, month list, calendar selection, scroll to browse months,
 the 12/24-hour field, scroll along the usage graph's hours, checkboxes, the scrollbar,
 the paper swatch and the ruled-paper button, typing on the note with save-as-you-type and
-a `.bak`, the weather's city field, and a countdown's calendar and name field.
+a `.bak`, the weather's city field (or, in its animated window, its title), and a countdown's calendar and name field.
 
 **The usage graph.** The Date/Time graph shows part of the day, 07:00 to 21:00 unless
 `GraphFrom=` and `GraphTo=` under `[DateTime]` in `settings.ini` say otherwise. The wheel
@@ -193,7 +193,74 @@ it holds any folder, and only forgets them — the folders themselves stay where
 `Portland, Maine` to say which one. Enter (or a click anywhere else) looks it up and pins
 the forecast to it; Escape leaves things as they were; an empty field goes back to the
 place your public IP address gives. The pin is kept in `settings.ini` as `ManualLat`,
-`ManualLon` and `ManualLocation`, which can also be written by hand.
+`ManualLon` and `ManualLocation`, which can also be written by hand. In the animated
+window (below) there is no field: right-click → *Set city...* types the place in the
+title bar, where its name stands, as Folders' *Rename title* does, with the same keys.
+
+**The weather as a window.** Right-click the Weather → *Animated window* turns it into a
+window onto a place with the weather itself over it, 262 × 220, as tall as the Rain Window
+and wider, as a landscape is: the same forecast, place and units, and *Panel* turns it back.
+The window is made again at the other look's size where it stood, as a Photo Frame's is
+when it changes shape. It shows one of twelve scenes, picked from the forecast's weather
+code, each over a place of its own: *Clear*, a lake among snowy mountains, a meadow of
+flowers and pines on its shore, a cabin and its jetty across the water, ducks paddling, a
+glitter path under the sun or the moon, fireflies at night; *Partly cloudy*, farmland,
+fields and hedgerows, an oak, sheep, a tractor working a far field; *Overcast*, a town's
+roofs and smoking chimneys under a grey layer, a cat on a roof; *Fog*, ridge behind ridge
+in a valley, an old pine on a crag and a waterfall down it; *Drizzle*, an autumn avenue
+with falling leaves, lamps and benches; *Rain*, a street of house fronts, a shop, a car,
+people under umbrellas, a traffic light changing, the wet road mirroring the lit windows;
+*Heavy rain*, a coast with a lighthouse whose beam sweeps after dark, a fishing boat, a
+buoy blinking, gulls; *Sleet*, a country road in winter with telegraph poles and a deer
+sign; *Snow*, a log cabin in a pine forest, a snowman in the garden; *Heavy snow*, the
+Alps, a cable car going up and down; *Thunderstorm*, a prairie under a thunderhead with
+its anvil, a windmill turning, cattle, tumbleweed rolling with the wind; *Hail*, a red barn
+and silo, a weathervane, a scarecrow, hens in the yard. The clouds are heaps of puffs, each lit as
+a ball from the side the sun or the moon is on, in five bands: white and blue-grey by
+day, peach and violet at dusk, navy by night, slate in a storm. Every scene has a day, a
+dusk and a night, worked out from the place's own sunrise and sunset; windows and lamps
+light up after dark; the wind the forecast gives slants the rain and snow and drives the
+clouds and the smoke. The scenes are in nature's colours, which the colour picked does
+not touch (it turns the window round them, as it does every window).
+
+Two cities have a place of their own, and when the forecast is for one of them — within
+25 km of its centre, by the forecast's coordinates — the weather is seen over the city
+instead. *London* from across the Thames: the Palace of Westminster and Big Ben, its clock
+telling the time there and its belfry lit green after dark, the Union flag over the
+Victoria Tower, Westminster Bridge with red buses and black cabs crossing, a river boat,
+County Hall and the London Eye turning, the Shard and the towers behind; the Palace is
+floodlit gold at night. *Aberdeen* has two views: by day, Marischal College along Broad
+Street, its granite glinting in the sun, the Mitchell Tower flying the Saltire, Robert the
+Bruce on his horse, purple buses and people going by; after dark, the harbour, with the
+college floodlit on its hill, the Town House and St Nicholas spires, supply ships lit at
+their berths, the cranes' and buoys' lights blinking and a tug crossing. Every weather
+shows over them: rain sets the roads shining, snow lies on the roofs and the streets, fog
+hides the far towers.
+
+Over the scene, top left, are the readings: the temperature, big; the condition; the
+high and low; and then whichever of these matter today, each only when it does — the
+chance of rain or snow (one in five or more), what it feels like (3° or more off the
+temperature, or 5 °F), the wind and the way it blows from (20 km/h or more, 12 mph), the
+UV by day (3 or more, with what that means: moderate, high, very high, extreme) — and last
+the next sunrise or sunset, at the place's own clock, on the Date/Time widget's 12- or
+24-hour clock. They are dark on a light sky and light on a dark one, each with a pixel of
+shadow, as Win98 wrote under a desktop icon. The place is in the title bar.
+
+Right-click → *Animation* has *Follow the weather* (the scene the forecast says) and the
+twelve scenes, to keep to one whatever the weather; *Scenery* has *Follow the place* (the
+city when the forecast is for one, the weather's own place otherwise), *The weather's
+own* (never a city) and the cities, to keep to one wherever the forecast is for; *Pause
+animation* holds the picture still. All four are kept in `settings.ini` under
+`[Weather]`: `Look=` (`panel` or `window`), `Scene=` (empty to follow the weather, or
+`clear`, `partly`, `overcast`, `fog`, `drizzle`, `rain`, `heavy-rain`, `sleet`, `snow`,
+`heavy-snow`, `storm` or `hail`), `Scenery=` (empty to follow the place, `weather`,
+`london` or `aberdeen`) and `Paused=`. The scene is redrawn 25 times a second while
+something falls, 12 while only the clouds and stars move, and 6 in fog; only the pane is
+repainted and the readings are laid out once each time one changes. Drawing it takes
+under 1% of one processor core in calm weather and up to about 3% in a downpour. Paused, closed,
+in the panel look, or with the workstation locked, it costs nothing. Its colours and the
+readings' places are the variables and the `MeterRead…` meters in
+`skins/Win98WeatherWindow.ini`.
 
 **Rain Window** does nothing: it is rain the colour of rust (or of the colour picked)
 falling past a small dark window, the size of the Sticky Note, to be looked at. Right-click it for how hard it

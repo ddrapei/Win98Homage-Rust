@@ -13,10 +13,10 @@
 //! others as they were made -- and a number is never handed on: a deleted
 //! one's stays its own, unused, until the program ends.
 //!
-//! A window's skin is its slot's: for every kind but two that is the kind's,
-//! and a photo frame's, or the folders', is the one for the shape its section
-//! asks for.  Turned to another shape, its window is made again at the new
-//! size.
+//! A window's skin is its slot's: for most kinds that is the kind's, and a
+//! photo frame's, or the folders', is the one for the shape its section asks
+//! for -- the weather's, the one for its look.  Turned to another shape, its
+//! window is made again at the new size.
 //!
 //! Each widget is a borderless layered window that never takes the keyboard
 //! and never shows in the taskbar or Alt-Tab -- a desktop widget, not an
@@ -75,7 +75,7 @@ use crate::skin::{self, Act, Ev, Hooks, Skin};
 use crate::sys::*;
 use crate::text::Text;
 use crate::tint;
-use crate::weather::Weather;
+use crate::weather::{self, Weather};
 use crate::widget::{Ctx, Dirty, MenuItem, Outcome, Pressed, Request, Widget};
 use crate::world::World;
 
@@ -120,10 +120,11 @@ impl Kind {
     }
 
     /// The skin of the one of this kind with `section`: for a photo frame or
-    /// the folders, the one its shape asks for, and for the flip clock the one
-    /// its seconds do.
+    /// the folders, the one its shape asks for, for the flip clock the one
+    /// its seconds do, and for the weather the one its look does.
     fn skin_in(self, settings: &Settings, section: &str) -> &'static Skin {
         match self {
+            Kind::Weather => weather::skin_of(settings, section),
             Kind::Photo => photo::skin_of(settings, section),
             Kind::Folders => folders::skin_of(settings, section),
             Kind::Flip => flip::skin_of(settings, section),
@@ -439,10 +440,11 @@ fn settled_scale(skin: &Skin, x: i32, y: i32, n: i32) -> i32 {
 }
 
 /// One copy of every skin fits in this many pixels across and down: each
-/// kind's, and each shape of photo frame, of the folders, and of the flip
-/// clock.
+/// kind's, the weather's animated window, and each shape of photo frame, of
+/// the folders, and of the flip clock.
 fn largest_skin() -> (i32, i32) {
     let shapes = [
+        &skin::weather_window::SKIN,
         &skin::photo_wide::SKIN,
         &skin::photo_tall::SKIN,
         &skin::photo_square::SKIN,

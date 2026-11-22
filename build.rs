@@ -1,5 +1,6 @@
-//! Compiles the fourteen widgets' skins into static Rust tables -- the photo
-//! frame's six times, once for each of its shapes and the same three again
+//! Compiles the fourteen widgets' skins into static Rust tables -- the
+//! weather's two, one for each of its looks, the photo frame's six times,
+//! once for each of its shapes and the same three again
 //! as the dither frame, the folders' three times, once for each of theirs,
 //! and the flip clock's twice, with and without the seconds.
 //!
@@ -552,6 +553,13 @@ fn dyn_weather(n: &str) -> bool {
     matches!(n, "TempNow" | "Condition" | "HighLowText" | "Lat" | "Lon")
 }
 
+/// The weather's second look: the place in the title bar and whether it is
+/// being typed, the readings written over the scene, and the two colours they
+/// are written in, which turn as the sky behind them is light or dark.
+fn dyn_weather_window(n: &str) -> bool {
+    matches!(n, "Place" | "TitleEdit" | "TempNow" | "Condition" | "ReadInk" | "ReadShadow") || numbered(n, "Line")
+}
+
 fn dyn_disk(n: &str) -> bool {
     matches!(n, "DriveKind" | "DriveName" | "UsedSize" | "UsedPct" | "FreeSize" | "FreePct" | "Capacity")
 }
@@ -593,11 +601,14 @@ const DITHER_LOOK: (&str, &str) = ("Look", "1");
 const DITHER_TITLE: (&str, &str) = ("Title", "Dither Frame");
 const DITHER_FOLDER: (&str, &str) = ("Folder", "Dither");
 
-const SKINS: [SkinDef; 21] = [
+const SKINS: [SkinDef; 22] = [
     SkinDef { module: "datetime", file: "Win98DateTime.ini", dynamic: dyn_datetime, overrides: &[] },
     SkinDef { module: "resources", file: "Win98Resources.ini", dynamic: dyn_resources, overrides: &[] },
     SkinDef { module: "notes", file: "Win98Notes.ini", dynamic: dyn_notes, overrides: &[] },
     SkinDef { module: "weather", file: "Win98Weather.ini", dynamic: dyn_weather, overrides: &[] },
+    // the weather's second look, picked from its menu: sky.rs draws the
+    // scene, and weather.rs the readings over it
+    SkinDef { module: "weather_window", file: "Win98WeatherWindow.ini", dynamic: dyn_weather_window, overrides: &[] },
     // nothing in the rain's skin changes while it runs: rain.rs draws the one meter that moves
     SkinDef { module: "rain", file: "Win98Rain.ini", dynamic: |_| false, overrides: &[] },
     SkinDef { module: "disk", file: "Win98Disk.ini", dynamic: dyn_disk, overrides: &[] },

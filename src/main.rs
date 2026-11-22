@@ -34,7 +34,10 @@
 //!     datetime       Date/Time Properties
 //!     resources      Resource Meter
 //!     notes          Sticky Note
-//!     weather        Weather          (and the child that fetches it)
+//!     weather        Weather          (its two looks, and the child that
+//!                    fetches it)
+//!     sky            the Weather's animated window: twelve scenes, by
+//!                    day, at dusk and by night
 //!     rain           Rain Window      (animated, while it rains)
 //!     disk           Disk Space
 //!     world          World Clock      (and the child that finds a city's
@@ -100,7 +103,7 @@ use net::{geocode, http};
 use platform::{clock, grid, screens, sys};
 use storage::{settings, usage};
 use tools::dump;
-use widgets::{battery, calendar, claude, countdown, datetime, disk, dither, field, flip, folders, notes, photo, rain, resources, weather, widget, world};
+use widgets::{battery, calendar, claude, countdown, datetime, disk, dither, field, flip, folders, notes, photo, rain, resources, sky, weather, widget, world};
 
 fn main() {
     // There is no console to complain to: if something does go wrong, leave
