@@ -95,6 +95,9 @@ pub struct Land {
     pub kind: Vec<u8>,
     /// For water, how many rows below its surface each row is.
     pub depth: Vec<u8>,
+    /// Water only a film deep, on something solid -- a wet road: it shines
+    /// as water does, but hail bounces off it.
+    pub film: Vec<bool>,
     /// The rows what falls lands on: the far edge and the near.
     pub ground: (i32, i32),
     /// Where smoke rises from.
@@ -145,6 +148,7 @@ impl Land {
             haze: vec![0; n],
             kind: vec![SOLID; n],
             depth: vec![0; n],
+            film: vec![false; n],
             ground: (h * 2 / 3, h - 1),
             chimneys: Vec::new(),
             lamps: Vec::new(),
@@ -179,6 +183,27 @@ impl Land {
 
     pub fn kind_at(&self, x: i32, y: i32) -> u8 {
         if (0..self.w).contains(&x) && (0..self.h).contains(&y) { self.kind[(y * self.w + x) as usize] } else { SOLID }
+    }
+
+    /// Whether here is water deep enough to fall into -- a river, the sea,
+    /// a puddle -- not a wet road.
+    pub fn deep_at(&self, x: i32, y: i32) -> bool {
+        self.kind_at(x, y) == WATER && !self.film[(y * self.w + x) as usize]
+    }
+
+    /// When here is the face of something standing in deep water -- a
+    /// ship's hull, a bridge's arches -- the row its foot meets the water.
+    /// What comes down here comes down in the water behind it.
+    pub fn standing_in_water(&self, x: i32, y: i32) -> Option<i32> {
+        let solid = |y: i32| (0..self.h).contains(&y) && self.kind_at(x, y) != WATER && self.base[(y * self.w + x) as usize] != 0;
+        if !solid(y) {
+            return None;
+        }
+        let mut foot = y;
+        while foot < self.ground.1 && solid(foot) {
+            foot += 1;
+        }
+        self.deep_at(x, foot).then_some(foot)
     }
 
     /// The highest row any of the place reaches, column by column.
@@ -290,6 +315,16 @@ impl Brush<'_> {
         if let Some(i) = self.at(x, y) {
             self.l.kind[i] = WATER;
             self.l.depth[i] = depth.clamp(0, 255) as u8;
+            self.l.film[i] = false;
+        }
+    }
+
+    /// A pixel of something solid under a film of water -- a wet road --
+    /// shining as water does, `depth` rows below where it mirrors from.
+    fn slick(&mut self, x: i32, y: i32, c: u32, depth: i32) {
+        self.wet(x, y, c, depth);
+        if let Some(i) = self.at(x, y) {
+            self.l.film[i] = true;
         }
     }
 
@@ -1422,7 +1457,7 @@ fn street(b: &mut Brush) {
     let asphalt = b.c("Asphalt");
     for y in road..h {
         for x in 0..w {
-            b.wet(x, y, asphalt, y - road);
+            b.slick(x, y, asphalt, y - road);
         }
     }
     let line = b.c("RoadLine");
@@ -1648,7 +1683,7 @@ fn winter_road(b: &mut Brush) {
                 let s = slush[b.int(0, 2) as usize];
                 b.set(x, y, s);
             } else {
-                b.wet(x, y, asphalt, y - vy as i32);
+                b.slick(x, y, asphalt, y - vy as i32);
             }
         }
         let z = 60.0 / (y as f32 - vy).max(1.0);

@@ -599,7 +599,7 @@ pub(super) fn aberdeen(b: &mut Brush, wx: Wx) {
                 let lies = if wx.snow { b.c("SnowShade") } else { b.c("EarthLight") };
                 b.set(x, y, if track { b.c("AsphaltLight") } else { lies });
             } else if wx.wet {
-                b.wet(x, y, asphalt, y - road);
+                b.slick(x, y, asphalt, y - road);
             } else {
                 // grit in the asphalt
                 let speckle = ((x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77)) >> 27 == 0;

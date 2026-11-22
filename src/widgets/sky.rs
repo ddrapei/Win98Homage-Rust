@@ -694,6 +694,9 @@ struct Splash {
     age: f32,
     /// It fell in water: a ring, not a splash.
     ring: bool,
+    /// A hailstone fell in the water here: how big, for the spout it
+    /// throws up; 0 for a drop or a pellet of sleet.
+    spout: u8,
 }
 
 struct Flake {
@@ -707,6 +710,8 @@ struct Flake {
 
 /// A pellet of sleet or a hailstone.
 struct Stone {
+    /// How near it falls: MID or NEAR.
+    layer: usize,
     x: f32,
     y: f32,
     /// Pixels a second, down; up after a bounce.
@@ -836,7 +841,7 @@ pub struct Sky {
     tones: Tones,
     /// The place, and its water: each pixel of it, and the row it mirrors.
     land: Land,
-    water: Vec<(u32, u16)>,
+    water: Vec<(u32, u16, u8)>,
     rng: Rng,
     /// Seconds since the scene began.
     time: f32,
@@ -1065,15 +1070,25 @@ impl Sky {
     }
 
     /// Every pixel of the place's water, and the row above its surface it
-    /// shows -- as far above as it is below.
+    /// shows -- as far above as it is below -- and, when what it shows
+    /// there is something near standing in the water, a ship or a jetty,
+    /// how tall that stands over the water: it can hide the sun or the
+    /// moon from the water in front of it.
     fn find_water(&mut self) {
-        let w = self.w;
-        self.water = (0..self.land.kind.len())
-            .filter(|&i| self.land.kind[i] == WATER)
+        let (w, land) = (self.w, &self.land);
+        let near = |j: usize| land.base[j] != 0 && land.kind[j] != WATER && land.haze[j] < NEAR_HAZE;
+        self.water = (0..land.kind.len())
+            .filter(|&i| land.kind[i] == WATER)
             .map(|i| {
-                let y = i as i32 / w;
-                let up = (y - 2 * self.land.depth[i] as i32 - 1).max(0);
-                (i as u32, up as u16)
+                let (x, y) = (i as i32 % w, i as i32 / w);
+                let depth = land.depth[i] as i32;
+                let up = (y - 2 * depth - 1).max(0);
+                let mut top = up;
+                while top > 0 && near(((top - 1) * w + x) as usize) {
+                    top -= 1;
+                }
+                let tall = if near((up * w + x) as usize) { (y - depth - top).clamp(1, 255) } else { 0 };
+                (i as u32, up as u16, tall as u8)
             })
             .collect();
     }
@@ -1561,11 +1576,25 @@ impl Sky {
     fn stone(&mut self, falling: bool) -> Stone {
         let hail = self.mood.hail;
         let depth = if self.rng.unit() < 0.5 { MID } else { NEAR };
-        let land = self.landing(depth);
+        let mut land = self.landing(depth);
         let reach = -self.slant() * land;
+        let x = self.rng.range(reach.min(0.0), self.w as f32 + reach.max(0.0));
+        let y = if falling { self.rng.range(0.0, land) } else { -self.rng.range(0.0, 40.0) };
+        // Where it comes down is the face of something standing in the
+        // water -- a ship's hull, a bridge -- it comes down in the water
+        // behind it, out of sight: let it come down in front instead, in
+        // the water at the thing's foot.
+        let mut x = x;
+        let lx = (x + self.slant() * (land - y)).round() as i32;
+        if let Some(foot) = self.land.standing_in_water(lx, land as i32) {
+            land = (foot + self.rng.range(0.0, 3.0) as i32).min(self.land.ground.1) as f32;
+            // still coming down there, the wind's drift and all
+            x = lx as f32 - self.slant() * (land - y);
+        }
         Stone {
-            x: self.rng.range(reach.min(0.0), self.w as f32 + reach.max(0.0)),
-            y: if falling { self.rng.range(0.0, land) } else { -self.rng.range(0.0, 40.0) },
+            layer: depth,
+            x,
+            y: y.min(land),
             vy: if hail { self.rng.range(230.0, 290.0) } else { self.rng.range(160.0, 200.0) },
             land,
             size: if !hail { 1 } else if self.rng.unit() < 0.65 { 2 } else { 3 },
@@ -1697,7 +1726,7 @@ impl Sky {
                 let (layer, x, y) = (d.layer, (d.x + slant * d.land).floor() as i32, d.land as i32);
                 if (0..self.w).contains(&x) {
                     let ring = self.land.kind_at(x, y) == WATER;
-                    self.splashes.push(Splash { layer, x, y, age: 0.0, ring });
+                    self.splashes.push(Splash { layer, x, y, age: 0.0, ring, spout: 0 });
                 }
                 let again = self.drop(layer, false);
                 self.drops[i] = again;
@@ -1724,7 +1753,9 @@ impl Sky {
         }
 
         // ice: down, a bounce or two where it lands, and -- hail -- a moment
-        // lying there before it comes round again
+        // lying there before it comes round again; or, where it comes down
+        // in water, gone into it, leaving a ring -- and from a hailstone, a
+        // spout thrown up
         let gravity = 900.0;
         for i in 0..self.stones.len() {
             let hail = self.mood.hail;
@@ -1746,6 +1777,21 @@ impl Sky {
                 continue;
             }
             s.y = s.land;
+            let (x, y) = (s.x.round() as i32, s.land as i32);
+            if self.land.deep_at(x, y) {
+                let spout = if hail { s.size } else { 0 };
+                self.splashes.push(Splash { layer: s.layer, x, y, age: 0.0, ring: true, spout });
+                let again = self.stone(false);
+                self.stones[i] = again;
+                continue;
+            }
+            // bounced aside onto the face of a ship or a bridge: down into
+            // the water behind it, out of sight
+            if self.land.standing_in_water(x, y).is_some() {
+                let again = self.stone(false);
+                self.stones[i] = again;
+                continue;
+            }
             let most = if hail { 2 } else { 1 };
             if s.bounces < most {
                 s.bounces += 1;
@@ -1863,6 +1909,33 @@ impl Sky {
 
     // ---- the picture ---------------------------------------------------------
 
+    /// The path of glitter on the water under a clear sky, towards the sun
+    /// or the moon: the column it runs down, its light, how bright it is
+    /// -- as bright as what of the sun or moon is in sight over the place,
+    /// and for the moon as full as it is -- and how high the light stands
+    /// over the horizon, in rows.  None when there is nothing to glitter:
+    /// cloud, dusk, a new moon, or the sun or the moon down behind the
+    /// place.
+    fn glitter(&self) -> Option<(f32, u32, f32, f32)> {
+        let (m, l, t) = (self.mood, self.light, &self.tones);
+        let (w, horizon) = (self.w, self.horizon());
+        match (m.open, l.day > 0.05, l.day < -0.15) {
+            (true, true, _) => {
+                let (x, y) = arc(w, horizon, l.sun);
+                Some((x, t.sun[0], in_view(&self.land, x, y, SUN_R), horizon as f32 - y))
+            }
+            (true, _, true) => {
+                let (x, y) = arc(w, horizon, l.night);
+                let full = (1.0 - (TAU * l.moon).cos()) / 2.0;
+                let bright = if full < 0.06 { 0.0 } else { 0.3 + 0.7 * full };
+                let y = y + MOON_DROP;
+                Some((x, t.moon[0], in_view(&self.land, x, y, MOON_R) * bright, horizon as f32 - y))
+            }
+            _ => None,
+        }
+        .filter(|g| g.2 > 0.05)
+    }
+
     /// Draw the scene as it stands, back to front.
     pub fn render(&mut self) {
         let (w, time) = (self.w, self.time);
@@ -1870,6 +1943,7 @@ impl Sky {
         let m = self.mood;
         let l = self.light;
         let gust = self.gust();
+        let glitter = self.glitter();
         let t = &self.tones;
         let pic = &mut self.pic;
         if t.backdrop.len() == pic.px.len() {
@@ -1905,7 +1979,7 @@ impl Sky {
                 draw_sun(pic, t, x, y, time, l.day > 0.12 && m.open);
             } else if m.open {
                 let (x, y) = arc(w, horizon, l.night);
-                draw_moon(pic, t, x, y + 6.0, l.moon);
+                draw_moon(pic, t, x, y + MOON_DROP, l.moon);
             }
         }
 
@@ -1954,13 +2028,8 @@ impl Sky {
             }
         }
         // its water, showing what stands over it, rippling -- more in rain --
-        // and under a clear sky a path of glitter towards the sun, or the moon
+        // and under a clear sky the glitter of the sun or the moon on it
         let ripple = if m.rain.is_some() || m.blizzard { 1.6 } else { 0.7 };
-        let glitter = match (m.open, l.day > 0.05, l.day < -0.15) {
-            (true, true, _) => Some((arc(w, horizon, l.sun).0, t.sun[0])),
-            (true, _, true) => Some((arc(w, horizon, l.night).0, t.moon[0])),
-            _ => None,
-        };
         let tick = (time * 4.0) as i32;
         // how far each row of what is mirrored sways, and each row of water
         let (drift, sway) = self.ripples.split_at_mut(self.h as usize);
@@ -1968,7 +2037,7 @@ impl Sky {
             *d = (row as f32 * 0.9 + time * 2.4).sin() * ripple;
             *s = (row as f32 * 0.7 + time * 1.3).sin() * 0.4;
         }
-        for &(i, up) in &self.water {
+        for &(i, up, tall) in &self.water {
             let i = i as usize;
             let (x, y) = (i as i32 % w, i as i32 / w);
             let wob = (drift[up as usize] + sway[y as usize]).round() as i32;
@@ -1976,7 +2045,15 @@ impl Sky {
             let seen = if land.kind[src] == WATER { t.land[i] } else { pic.px[src] };
             let below = (y - up as i32) as f32 / 2.0;
             let mut c = blend256(seen, t.land[i], (77.0 + 102.0 * below / (below + 18.0)) as u32);
-            if let Some((gx, light)) = glitter {
+            // a ship or a jetty standing in the water hides the light from
+            // the water just in front of it -- the nearer, and the lower the
+            // light, the more: hidden where it stands taller, seen from
+            // here, than the light is high
+            let shaded = |rise: f32| {
+                let depth = (y - up as i32 - 1) / 2;
+                tall > 0 && ((y - horizon).max(0) * tall as i32) as f32 > rise * depth as f32
+            };
+            if let Some((gx, light, strength, _)) = glitter.filter(|g| !shaded(g.3)) {
                 let reach = 1.0 + below * 0.3;
                 let off = (x as f32 - gx).abs();
                 if off < reach {
@@ -1985,7 +2062,7 @@ impl Sky {
                     let hash = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77) ^ (tick as u32).wrapping_mul(0xC2B2_AE3D);
                     let odds = if off < reach * 0.4 { 4 } else { 9 };
                     if (hash >> 16) % odds == 0 {
-                        c = blend256(c, light, 200);
+                        c = blend256(c, light, (200.0 * strength.min(1.0)) as u32);
                     }
                 }
             }
@@ -2205,12 +2282,14 @@ impl Sky {
             draw_fog(pic, &self.banks, &mut self.roll, t.fog, horizon, time);
         }
 
-        // what falls, back to front: the splashes under the drops
+        // what falls, back to front: the splashes -- the rain's, and the
+        // rings and spouts of ice falling in water -- under the drops
+        let ripple = m.rain.is_none_or(|r| r.splash);
+        for s in &self.splashes {
+            draw_splash(pic, t, s, ripple);
+        }
         if let Some(rain) = m.rain {
             let slant = (self.wind / 45.0).clamp(-0.6, 0.6);
-            for s in &self.splashes {
-                draw_splash(pic, t, s, rain.splash);
-            }
             for d in &self.drops {
                 draw_streak(pic, t, d, slant, rain.len);
             }
@@ -2334,8 +2413,37 @@ fn draw_cloud(pic: &mut Pic, c: &Cloud, ramp: &[u32; 5]) {
 /// The sun: a disc with a rim, rings of glow, and -- high in a clear sky --
 /// eight short rays, the long and the short taking turns to reach out.  Low
 /// down it is the colour of a sunset.
+/// The sun's radius, and the moon's, in pixels; the moon rides this much
+/// lower on its arc than the sun does on its own.
+const SUN_R: f32 = 7.5;
+/// What of the place stands nearer than this much haze stands near enough
+/// to the water to hide the sun or the moon from it.
+const NEAR_HAZE: u8 = 20;
+const MOON_R: f32 = 6.5;
+const MOON_DROP: f32 = 6.0;
+
+/// How much of a disc of radius `r` about `cx`, `cy` -- the sun, the moon
+/// -- is in sight: in the pane, and not behind the place.
+fn in_view(land: &Land, cx: f32, cy: f32, r: f32) -> f32 {
+    let (icx, icy, ir) = (cx.round() as i32, cy.round() as i32, r.ceil() as i32);
+    let (mut all, mut seen) = (0, 0);
+    for dy in -ir..=ir {
+        for dx in -ir..=ir {
+            if ((dx * dx + dy * dy) as f32).sqrt() > r {
+                continue;
+            }
+            all += 1;
+            let (x, y) = (icx + dx, icy + dy);
+            if (0..land.w).contains(&x) && (0..land.h).contains(&y) && land.base[(y * land.w + x) as usize] == 0 {
+                seen += 1;
+            }
+        }
+    }
+    seen as f32 / all.max(1) as f32
+}
+
 fn draw_sun(pic: &mut Pic, t: &Tones, cx: f32, cy: f32, time: f32, rays: bool) {
-    let r = 7.5;
+    let r = SUN_R;
     let (icx, icy) = (cx.round() as i32, cy.round() as i32);
     for dy in -18..=18 {
         for dx in -18..=18 {
@@ -2372,7 +2480,7 @@ fn draw_sun(pic: &mut Pic, t: &Tones, cx: f32, cy: f32, time: f32, rays: bool) {
 /// the left as it wanes, the rest of it faint, its seas a little darker,
 /// and a faint ring of light round it.
 fn draw_moon(pic: &mut Pic, t: &Tones, cx: f32, cy: f32, age: f32) {
-    let r = 6.5f32;
+    let r = MOON_R;
     let (icx, icy) = (cx.round() as i32, cy.round() as i32);
     let waxing = age < 0.5;
     let k = (TAU * age).cos();
@@ -2475,6 +2583,23 @@ fn draw_streak(pic: &mut Pic, t: &Tones, d: &Drop, slant: f32, len_k: f32) {
 fn draw_splash(pic: &mut Pic, t: &Tones, s: &Splash, ripple: bool) {
     let (sx, sy) = (s.x, s.y);
     let age = s.age / SPLASH_LIFE;
+    // a hailstone into water throws up a spout, the bigger the stone the
+    // taller, and a drop either side, falling back as the ring widens
+    if s.spout > 0 && age < 0.45 {
+        let k = age / 0.45;
+        let tall = ((s.spout as f32 * 2.0 + 1.0) * (PI * k).sin()).round() as i32;
+        for dy in 1..=tall {
+            let a = 0.85 - 0.45 * dy as f32 / tall as f32;
+            pic.blend(sx, sy - dy, t.foam, a);
+            if s.spout > 2 && dy < tall {
+                pic.blend(sx + 1, sy - dy, t.foam, a * 0.6);
+            }
+        }
+        let out = (1.0 + k * 4.0).round() as i32;
+        let up = (4.0 * k * (1.0 - k) * s.spout as f32 * 1.5).round() as i32;
+        pic.blend(sx - out, sy - up, t.foam, 0.7 * (1.0 - k));
+        pic.blend(sx + out, sy - up, t.foam, 0.7 * (1.0 - k));
+    }
     if s.ring {
         // a ring seen from the side: an ellipse's outline, row by row, its
         // top and bottom rows drawn across
@@ -2650,7 +2775,7 @@ mod tests {
         // what is highest
         let s = sky(Scene::Clear, Light::NOON);
         assert!(!s.water.is_empty());
-        let near: Vec<u32> = s.water.iter().filter(|&&(i, up)| i as i32 / s.w - up as i32 > 40).map(|&(i, _)| i).collect();
+        let near: Vec<u32> = s.water.iter().filter(|&&(i, up, _)| i as i32 / s.w - up as i32 > 40).map(|&(i, _, _)| i).collect();
         assert!(!near.is_empty());
         let own = near.iter().map(|&i| luma(s.tones.land[i as usize])).sum::<f32>();
         let seen = near.iter().map(|&i| luma(s.pixels()[i as usize])).sum::<f32>();
@@ -2695,6 +2820,108 @@ mod tests {
         assert!(s.set_clock(15, 40));
         assert!(!s.set_clock(15, 40));
         s.render();
+    }
+
+    #[test]
+    fn the_water_glitters_only_under_a_sun_or_moon_in_sight() {
+        let at = |scene: Scene, city: Option<City>, light: Light| {
+            let mut s = sky(scene, light);
+            s.set_city(city);
+            s.glitter().map(|g| g.2)
+        };
+        let night = |night: f32, moon: f32| Light { day: -1.0, sun: 1.0, night, moon };
+        let aberdeen = Some(City::Aberdeen);
+        // the harbour just after dark, the moon still down behind the city;
+        // and before dawn, behind the spires
+        assert_eq!(at(Scene::Clear, aberdeen, night(0.03, 0.5)), None, "a moon behind the city");
+        assert_eq!(at(Scene::Clear, aberdeen, night(0.94, 0.5)), None, "a moon behind the spires");
+        // high over it at midnight: the full moon's glitter, a half moon's
+        // fainter, a new moon's none
+        let full = at(Scene::Clear, aberdeen, night(0.5, 0.5)).expect("no glitter under the full moon");
+        let half = at(Scene::Clear, aberdeen, night(0.5, 0.25)).expect("no glitter under a half moon");
+        assert!(full > 0.95 && half < full * 0.8);
+        assert_eq!(at(Scene::Clear, aberdeen, night(0.5, 0.0)), None, "glitter under a new moon");
+        // the lake at noon, the sun high; at dusk, gone behind the mountains
+        assert!(at(Scene::Clear, None, Light::NOON).is_some());
+        assert_eq!(at(Scene::Clear, None, Light { day: 0.06, sun: 0.97, night: 0.0, moon: 0.5 }), None);
+        // and none under cloud
+        assert_eq!(at(Scene::Overcast, None, Light::NOON), None);
+    }
+
+    #[test]
+    fn a_ship_shades_the_glitter_just_in_front_of_it() {
+        // the full moon high over the harbour, straight over a ship: its
+        // glitter comes down the water to the ship's reflection, but not to
+        // the water right under its hull
+        let mut s = sky(Scene::Clear, Light { day: -1.0, sun: 1.0, night: 0.5, moon: 0.5 });
+        s.set_city(Some(City::Aberdeen));
+        let mut without = sky(Scene::Clear, Light { day: -1.0, sun: 1.0, night: 0.5, moon: 0.0 });
+        without.set_city(Some(City::Aberdeen));
+        let (mut lit, mut by_ship) = (0, 0);
+        // a moment's sparkles are few: count them over a few moments
+        for _ in 0..12 {
+            s.step(0.3);
+            without.step(0.3);
+            s.render();
+            without.render();
+            for &(i, up, tall) in &s.water {
+                let i = i as usize;
+                if s.pixels()[i] == without.pixels()[i] {
+                    continue;
+                }
+                lit += 1;
+                if tall > 0 {
+                    by_ship += 1;
+                    let depth = (i as i32 / s.w - up as i32 - 1) / 2;
+                    assert!(depth > 2, "glitter right under the hull, {} down", depth);
+                }
+            }
+        }
+        assert!(lit > 20, "no glitter at all");
+        assert!(by_ship > 5, "the ship hides the high moon from all the water in front of it");
+    }
+
+    #[test]
+    fn hail_falls_into_water_but_bounces_off_a_wet_road() {
+        // London: hail lying on the bridge and the embankment, none on the
+        // Thames, where it goes in with a spout
+        let mut s = sky(Scene::Hail, Light::NOON);
+        s.set_city(Some(City::London));
+        let (mut lying, mut spouts) = (0, 0);
+        // what stands in the water: what is solid all the way down to it
+        let in_water = |land: &Land, x: i32, mut y: i32| {
+            while y < land.h - 1 && land.kind_at(x, y) != WATER && land.base[(y * land.w + x.clamp(0, land.w - 1)) as usize] != 0 {
+                y += 1;
+            }
+            land.deep_at(x, y)
+        };
+        for _ in 0..250 {
+            s.step(0.04);
+            for st in s.stones.iter().filter(|st| st.rest > 0.0) {
+                let (x, y) = (st.x.round() as i32, st.land as i32);
+                assert!(!s.land.deep_at(x, y), "a hailstone lying on the Thames");
+                assert!(!in_water(&s.land, x, y), "a hailstone stuck to the bridge's face at {x}, {y}");
+                lying += 1;
+            }
+            for sp in s.splashes.iter().filter(|sp| sp.spout > 0) {
+                assert!(sp.ring && s.land.deep_at(sp.x, sp.y), "a spout out of the dry");
+                spouts += 1;
+            }
+        }
+        assert!(lying > 0 && spouts > 0, "lying {lying}, spouts {spouts}");
+        s.render();
+
+        // Broad Street in the wet: the road shines as water does, but the
+        // hail still lies on it
+        let mut s = sky(Scene::Hail, Light::NOON);
+        s.set_city(Some(City::Aberdeen));
+        let mut on_road = 0;
+        for _ in 0..250 {
+            s.step(0.04);
+            on_road += s.stones.iter().filter(|st| st.rest > 0.0 && s.land.kind_at(st.x.round() as i32, st.land as i32) == WATER).count();
+        }
+        assert!(on_road > 0, "no hail lying on the wet road");
+        assert!(s.splashes.iter().all(|sp| sp.spout == 0), "hail plunging into a road");
     }
 
     #[test]
