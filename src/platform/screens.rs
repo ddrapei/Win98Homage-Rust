@@ -210,6 +210,13 @@ pub fn keep_on(wanted: &RECT, screens: &[RECT]) -> (i32, i32) {
     settle(core::slice::from_ref(wanted), screens, 0)[0]
 }
 
+/// Is every part of `r` under one or another of `over` -- windows in front
+/// of it, which then hide all of it?  The same question as `seen_whole`, of
+/// other rectangles.
+pub fn covered(r: &RECT, over: &[RECT]) -> bool {
+    seen_whole(r, over)
+}
+
 /// Is every part of `r` on one screen or another?
 fn seen_whole(r: &RECT, screens: &[RECT]) -> bool {
     let mut unseen = vec![*r];
@@ -291,6 +298,23 @@ mod tests {
 
     const fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
         RECT { left, top, right, bottom }
+    }
+
+    #[test]
+    fn a_frame_is_covered_only_when_windows_hide_every_part_of_it() {
+        let widget = rect(100, 100, 300, 250);
+        // under a maximised window, or one larger than it
+        assert!(covered(&widget, &[rect(0, 0, 2160, 1504)]));
+        assert!(covered(&widget, &[rect(100, 100, 300, 250)]));
+        // under two side by side that meet over it, or overlap there
+        assert!(covered(&widget, &[rect(0, 0, 200, 1000), rect(200, 0, 900, 1000)]));
+        assert!(covered(&widget, &[rect(0, 0, 220, 1000), rect(180, 0, 900, 1000)]));
+        // but not with a strip of it showing between them, beside one, or
+        // under nothing at all
+        assert!(!covered(&widget, &[rect(0, 0, 199, 1000), rect(200, 0, 900, 1000)]));
+        assert!(!covered(&widget, &[rect(0, 0, 299, 1000)]));
+        assert!(!covered(&widget, &[rect(0, 0, 900, 249)]));
+        assert!(!covered(&widget, &[]));
     }
 
     /// A laptop with two monitors above it, the left one reaching out past

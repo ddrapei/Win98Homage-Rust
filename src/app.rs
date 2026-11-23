@@ -28,7 +28,9 @@
 //!
 //! Everything runs off one tick a second.  A widget that moves more often
 //! than that -- the rain -- asks for frames, and a second timer runs for as
-//! long as one does and there is a screen to show them on.
+//! long as one does and there is a screen to show them on.  A widget other
+//! windows hide all of is given none (`check_covered`): a desktop widget is
+//! under a maximised window much of the day.
 //!
 //! The process is per-monitor DPI aware, and every place and size here is
 //! in the monitors' own pixels.  The skins are laid out in whole pixels, and
@@ -485,6 +487,9 @@ struct Slot {
     hover: Option<usize>,
     tracking: bool,
     seen: skin::Seen,
+    /// Other windows hide every part of its frame: it is given no frames,
+    /// which nobody would see (`check_covered`).
+    covered: bool,
 }
 
 impl Slot {
@@ -505,6 +510,7 @@ impl Slot {
             hover: None,
             tracking: false,
             seen: Vec::new(),
+            covered: false,
         }
     }
 
@@ -752,6 +758,73 @@ fn desktop_is_shown() -> bool {
     }
 }
 
+/// DwmGetWindowAttribute
+type DwmAttribute = unsafe extern "system" fn(HWND, u32, *mut c_void, u32) -> HRESULT;
+/// What a window draws on the screen, without the invisible borders it is
+/// resized by; and whether Windows has cloaked it.
+const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+const DWMWA_CLOAKED: u32 = 14;
+
+/// Which of `ours` -- windows of this program's, each with the frame it
+/// shows on the screen -- other windows hide every part of.  A window hides
+/// what is behind it if it is in front, shown, not minimised, not cloaked
+/// (on another virtual desktop, or an app Windows has put away), and draws
+/// the whole of its rectangle.  A layered or click-through window may let
+/// what is behind it show, so it hides nothing; nor does the desktop, which
+/// is behind everything even when it is listed in front.  One walk down the
+/// windows, front to back, for all of `ours` at once.
+fn covered(ours: &[(HWND, RECT)]) -> Vec<bool> {
+    let mut hidden = vec![false; ours.len()];
+    unsafe {
+        let attribute: Option<DwmAttribute> =
+            proc_address("dwmapi.dll", b"DwmGetWindowAttribute\0").map(|p| core::mem::transmute(p));
+        let me = GetCurrentProcessId();
+        let (mut over, mut left) = (Vec::new(), ours.len());
+        let mut wnd = GetTopWindow(0);
+        while wnd != 0 && left > 0 {
+            if let Some(k) = ours.iter().position(|o| o.0 == wnd) {
+                hidden[k] = screens::covered(&ours[k].1, &over);
+                left -= 1;
+            } else if let Some(r) = hides(wnd, me, attribute) {
+                over.push(r);
+            }
+            wnd = GetWindow(wnd, GW_HWNDNEXT);
+        }
+    }
+    hidden
+}
+
+/// The rectangle of the screen a window hides, if it hides one (see
+/// `covered`).  None for this program's own windows.
+unsafe fn hides(wnd: HWND, me: u32, attribute: Option<DwmAttribute>) -> Option<RECT> {
+    unsafe {
+        if IsWindowVisible(wnd) == 0 || IsIconic(wnd) != 0 {
+            return None;
+        }
+        if GetWindowLongPtrW(wnd, GWL_EXSTYLE) as u32 & (WS_EX_LAYERED | WS_EX_TRANSPARENT) != 0 {
+            return None;
+        }
+        let mut pid = 0;
+        GetWindowThreadProcessId(wnd, &mut pid);
+        if pid == me || class_is(wnd, "Progman") || class_is(wnd, "WorkerW") {
+            return None;
+        }
+        let mut r = RECT::default();
+        let Some(get) = attribute else {
+            GetWindowRect(wnd, &mut r);
+            return (r.right > r.left && r.bottom > r.top).then_some(r);
+        };
+        let mut cloaked = 0u32;
+        if get(wnd, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut c_void, 4) >= 0 && cloaked != 0 {
+            return None;
+        }
+        if get(wnd, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut RECT as *mut c_void, size_of::<RECT>() as u32) < 0 {
+            GetWindowRect(wnd, &mut r);
+        }
+        (r.right > r.left && r.bottom > r.top).then_some(r)
+    }
+}
+
 /// Put a widget where its position says it goes.
 fn place_in_z_order(wnd: HWND, position: Position, show_desktop: bool) {
     unsafe {
@@ -779,7 +852,13 @@ fn place_in_z_order(wnd: HWND, position: Position, show_desktop: bool) {
 }
 
 unsafe extern "system" fn foreground_changed(_hook: isize, _event: u32, _wnd: HWND, _object: i32, _child: i32, _thread: u32, _time: u32) {
-    with_app(|app| app.check_desktop());
+    with_app(|app| {
+        app.check_desktop();
+        // the window come forward may be over a widget that moves, or the
+        // one that was over it may have gone back
+        app.check_covered();
+        app.pace();
+    });
 }
 
 /// Every press of a mouse button anywhere on the screen, while a widget
@@ -1520,10 +1599,12 @@ impl App {
             self.paint(i, dirty);
         }
         // a widget may have begun something that wants frames -- a photo
-        // frame waiting for a photo being read -- or ended it
+        // frame waiting for a photo being read -- or ended it; and other
+        // windows may have come over one that moves, or gone from it
+        self.check_desktop();
+        self.check_covered();
         self.pace();
         self.settings.save();
-        self.check_desktop();
         // Starting up, a menu, typing: each touches a good deal that is
         // not needed again.  Hand those pages back once things have settled.
         if self.ticks == self.trim_at {
@@ -1538,14 +1619,38 @@ impl App {
         seconds * 1000 + ms as i64
     }
 
+    /// Which of the widgets asking for frames other windows hide all of
+    /// (`covered`): those are given none until they can be seen again -- a
+    /// desktop widget is under a maximised window much of the day, and its
+    /// moving there costs as much as on show.  Looked at once a second and
+    /// whenever another window comes forward, so a widget uncovered moves
+    /// again within the second; and only while some widget asks for frames.
+    fn check_covered(&mut self) {
+        let moving: Vec<usize> = (0..self.slots.len())
+            .filter(|&i| self.slots[i].hwnd != 0 && self.widgets.get(i).is_some_and(|w| w.frame_ms() > 0))
+            .collect();
+        for slot in &mut self.slots {
+            slot.covered = false;
+        }
+        if moving.is_empty() || self.locked {
+            return;
+        }
+        let ours: Vec<(HWND, RECT)> = moving.iter().map(|&i| (self.slots[i].hwnd, on_screens(self.slots[i].frame()))).collect();
+        for (&i, hidden) in moving.iter().zip(covered(&ours)) {
+            self.slots[i].covered = hidden;
+        }
+    }
+
     /// Set the frame timer to the pace the widgets ask for: the quickest of
-    /// them, or no timer at all when none is moving, or the workstation is
-    /// locked and nothing would be drawn anyway.  Called whenever either may
-    /// have changed -- a widget started or stopped, a command, the lock.
+    /// them -- of those that can be seen (`check_covered`) -- or no timer at
+    /// all when none is moving, or the workstation is locked and nothing
+    /// would be drawn anyway.  Called whenever either may have changed -- a
+    /// widget started or stopped, a command, the lock, other windows.
     fn pace(&mut self) {
         // and whether a widget has something a press elsewhere would end
         self.watch_presses();
-        let asked = self.widgets.0.iter().flatten().map(|w| w.frame_ms()).filter(|&ms| ms > 0).min();
+        let seen = self.widgets.0.iter().zip(&self.slots).filter(|(_, slot)| !slot.covered);
+        let asked = seen.filter_map(|(w, _)| w.as_ref()).map(|w| w.frame_ms()).filter(|&ms| ms > 0).min();
         let want = if self.locked { 0 } else { asked.unwrap_or(0) };
         if want == self.frame_ms {
             return;
@@ -1602,6 +1707,10 @@ impl App {
         let elapsed = (now - self.frame_at).clamp(0, 1000) as u32;
         self.frame_at = now;
         for i in 0..self.slots.len() {
+            // one nobody can see stands still, and goes on from there
+            if self.slots[i].covered {
+                continue;
+            }
             let dirty = match self.widgets.get_mut(i) {
                 Some(w) if w.frame_ms() > 0 => w.frame(elapsed),
                 _ => continue,
@@ -1661,6 +1770,9 @@ impl App {
     }
 
     fn mouse_down(&mut self, i: usize, wnd: HWND, x: i32, y: i32, double: bool) -> Later {
+        // A press on it is a press where it can be seen, whatever was over
+        // it a moment ago: what the press sets moving moves at once.
+        self.slots[i].covered = false;
         let (x, y) = self.widget_point(i, x, y);
         // Clicking anywhere but on what is being typed on -- the note's sheet,
         // the weather's city field -- finishes the typing.
@@ -3427,6 +3539,28 @@ mod tests {
         assert!(!app.over_another(second, edge + 3, y));
         assert!(!app.over_another(NOTE, edge - 3, y));
         assert!(!app.over_another(NOTE, 102, y));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_widget_nobody_can_see_is_given_no_frames() {
+        let (mut app, dir) = app("covered");
+        app.settings.set("Rain", "Paused", "0");
+        app.start(RAIN);
+        assert!(app.widgets.get(RAIN).is_some_and(|w| w.frame_ms() > 0));
+        app.pace();
+        let pace = app.frame_ms;
+        assert!(pace > 0);
+        // hidden by other windows, the rain asks for no timer
+        app.slots[RAIN].covered = true;
+        app.pace();
+        assert_eq!(app.frame_ms, 0);
+        // and a press on it says it can be seen after all
+        app.mouse_down(RAIN, app.slots[RAIN].hwnd, 0, 0, false);
+        app.pace();
+        assert!(!app.slots[RAIN].covered);
+        assert_eq!(app.frame_ms, pace);
+        app.stop(RAIN);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -4,11 +4,11 @@
 //!
 //! Only user32, gdi32, kernel32, comdlg32, shell32 and advapi32 are imported
 //! outright.
-//! DirectWrite, the session API and the DPI functions (which older Windows
-//! does not have) are found with GetProcAddress, and so is COM (ole32), which
-//! is loaded only once a photo frame decodes a photo (with WIC) or asks for a
-//! folder.  WinHTTP is only ever loaded by the short-lived child that fetches
-//! the weather.
+//! DirectWrite, the session API, the DPI functions (which older Windows
+//! does not have) and DWM's window attributes are found with GetProcAddress,
+//! and so is COM (ole32), which the program loads only once a widget asks for
+//! a folder.  WinHTTP is only ever loaded by the short-lived child that
+//! fetches the weather, and WIC only by the one that reads a photo.
 
 #![allow(non_snake_case, non_camel_case_types, clippy::upper_case_acronyms, dead_code)]
 
@@ -369,6 +369,7 @@ pub const WS_DISABLED: u32 = 0x0800_0000;
 pub const WS_CLIPCHILDREN: u32 = 0x0200_0000;
 pub const WS_EX_TOPMOST: u32 = 0x0000_0008;
 pub const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+pub const WS_EX_TRANSPARENT: u32 = 0x0000_0020;
 pub const WS_EX_LAYERED: u32 = 0x0008_0000;
 pub const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
 pub const CS_DBLCLKS: u32 = 0x0008;
@@ -488,6 +489,7 @@ pub const HWND_NOTOPMOST: HWND = -2;
 pub const GWLP_WNDPROC: i32 = -4;
 pub const GWLP_USERDATA: i32 = -21;
 pub const GWL_EXSTYLE: i32 = -20;
+pub const GW_HWNDNEXT: u32 = 2;
 pub const GW_HWNDPREV: u32 = 3;
 pub const IDC_ARROW: usize = 32512;
 pub const IDC_IBEAM: usize = 32513;
@@ -602,6 +604,8 @@ unsafe extern "system" {
     pub fn GetWindowRect(wnd: HWND, rect: *mut RECT) -> BOOL;
     pub fn GetClientRect(wnd: HWND, rect: *mut RECT) -> BOOL;
     pub fn GetWindow(wnd: HWND, cmd: u32) -> HWND;
+    pub fn GetTopWindow(wnd: HWND) -> HWND;
+    pub fn IsIconic(wnd: HWND) -> BOOL;
     pub fn GetShellWindow() -> HWND;
     pub fn FindWindowExW(parent: HWND, after: HWND, class: PCWSTR, title: PCWSTR) -> HWND;
     pub fn GetClassNameW(wnd: HWND, buf: *mut u16, len: i32) -> i32;
@@ -674,6 +678,7 @@ unsafe extern "system" {
 unsafe extern "system" {
     pub fn GetModuleHandleW(name: PCWSTR) -> HINSTANCE;
     pub fn GetCurrentThreadId() -> u32;
+    pub fn GetCurrentProcessId() -> u32;
     pub fn LoadLibraryW(name: PCWSTR) -> HINSTANCE;
     pub fn FreeLibrary(module: HINSTANCE) -> BOOL;
     pub fn GetProcAddress(module: HINSTANCE, name: *const u8) -> *const c_void;

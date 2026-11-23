@@ -128,7 +128,9 @@ pub trait Widget: Hooks {
     fn tick(&mut self, ctx: &mut Ctx) -> Dirty;
     /// Milliseconds between frames, for a widget that moves more often than
     /// the tick; 0 for one that does not, or is not moving now.  The host
-    /// runs a timer only while some widget asks for one.
+    /// runs a timer only while some widget asks for one, and gives a widget
+    /// none while other windows hide all of it: it then stands still, and
+    /// goes on from there once it can be seen.
     fn frame_ms(&self) -> u32 {
         0
     }
