@@ -439,26 +439,6 @@ fn settled_scale(skin: &Skin, x: i32, y: i32, n: i32) -> i32 {
     if here == n || screens::scale_of(&on_screens(frame(skin, x, y, here))) != here { n } else { here }
 }
 
-/// One copy of every skin fits in this many pixels across and down: each
-/// kind's, the weather's animated window, and each shape of photo frame, of
-/// the folders, and of the flip clock.
-fn largest_skin() -> (i32, i32) {
-    let shapes = [
-        &skin::weather_window::SKIN,
-        &skin::photo_wide::SKIN,
-        &skin::photo_tall::SKIN,
-        &skin::photo_square::SKIN,
-        &skin::folders_2::SKIN,
-        &skin::folders_4::SKIN,
-        &skin::folders_6::SKIN,
-        &skin::flip_secs::SKIN,
-        &skin::dither_wide::SKIN,
-        &skin::dither_tall::SKIN,
-        &skin::dither_square::SKIN,
-    ];
-    FIXED.iter().map(|f| f.0.skin()).chain(shapes).fold((0, 0), |(w, h), s| (w.max(s.w), h.max(s.h)))
-}
-
 /// A wheel turned `delta` on top of the part of a notch it had turned
 /// already, `rest`: the skin's event for that way, and how many whole notches
 /// to fire it for.  What is short of a notch stays in `rest` -- a touchpad
@@ -548,7 +528,8 @@ struct Press {
 }
 
 /// What a window is handed to the window manager from: in the screen's
-/// pixels, as large as the largest skin at the largest scale yet drawn.
+/// pixels, as wide as the widest running window and as tall as the tallest,
+/// each at its scale.
 struct Buffer {
     dc: HDC,
     bitmap: HGDIOBJ,
@@ -577,10 +558,12 @@ impl Widgets {
 struct App {
     settings: Settings,
     text: Text,
-    /// Where every widget is drawn, at its own size: as large as the largest
-    /// skin, rows `largest_skin().0` apart.  Put up in `buffer` from there.
+    /// Where every widget is drawn, at its own size, rows its skin's width
+    /// apart: as many pixels as the largest running widget's skin has.  Put
+    /// up in `buffer` from there.  Both are only as large as the widgets
+    /// running need (`fit`), and there is no buffer while none is.
     picture: Vec<u32>,
-    buffer: Buffer,
+    buffer: Option<Buffer>,
     widgets: Widgets,
     slots: Vec<Slot>,
     /// The window that holds the keyboard while a widget is typed on, and
@@ -875,15 +858,12 @@ impl Buffer {
 impl App {
     /// The App as settings.ini describes it, with no widget started yet.
     fn new(settings: Settings, text: Text, locked: bool, signed_in: Option<i64>) -> App {
-        // One picture, as large as the largest skin: every window is drawn in
-        // it, and put up from it in the buffer, which is made larger when a
-        // window is first drawn at a larger scale.
-        let (w, h) = largest_skin();
         let mut app = App {
             settings,
             text,
-            picture: vec![0; (w * h) as usize],
-            buffer: Buffer::new(w, h),
+            // made as the first window is drawn, as large as it needs
+            picture: Vec::new(),
+            buffer: None,
             // both filled in by read_slots, from settings.ini
             widgets: Widgets(Vec::new()),
             slots: Vec::new(),
@@ -991,6 +971,8 @@ impl App {
         if self.press.as_ref().is_some_and(|p| p.idx == i) {
             self.press = None;
         }
+        // what was kept large enough to draw it in, no larger than the rest need
+        self.fit();
         self.pace();
     }
 
@@ -1302,14 +1284,49 @@ impl App {
         Later::Delete(slot.section.clone(), ask)
     }
 
+    /// What the running windows need to be drawn in: the pixels of the
+    /// largest of their skins, at its own size, for the picture; and the
+    /// widest and the tallest of the windows, each at its scale, for the
+    /// buffer.  Nothing, with none running.
+    fn room(&self) -> (usize, i32, i32) {
+        let mut room = (0, 0, 0);
+        for (widget, slot) in self.widgets.0.iter().zip(&self.slots) {
+            if let Some(widget) = widget {
+                let (skin, n) = (widget.skin(), slot.n);
+                room = (room.0.max((skin.w * skin.h) as usize), room.1.max(skin.w * n), room.2.max(skin.h * n));
+            }
+        }
+        room
+    }
+
+    /// The picture and the buffer made the size the running windows need,
+    /// if they are not that already: larger once a window that needs more
+    /// has started, or gone to a monitor of a larger scale; smaller once the
+    /// one that needed the most has closed, or gone to a smaller scale.  So
+    /// a widget that is not running -- the Date/Time's, the largest skin --
+    /// costs nothing here.  Each is made for all the windows at once, never
+    /// for one and then again for the next, and the old one is let go of
+    /// before the new one is made.
+    fn fit(&mut self) {
+        let (pixels, w, h) = self.room();
+        if self.picture.len() != pixels {
+            self.picture = Vec::new();
+            self.picture = vec![0; pixels];
+        }
+        let size = (w > 0 && h > 0).then_some((w, h));
+        if self.buffer.as_ref().map(|b| (b.w, b.h)) != size {
+            self.buffer = None;
+            self.buffer = size.map(|(w, h)| Buffer::new(w, h));
+        }
+    }
+
     /// Redraw what changed and hand it to the window manager.
     fn paint(&mut self, i: usize, dirty: Dirty) {
         let wnd = self.slots[i].hwnd;
-        let Some(widget) = self.widgets.get(i) else { return };
+        let Some(skin) = self.widgets.get(i).map(|w| w.skin()) else { return };
         if wnd == 0 || self.locked {
             return;
         }
-        let skin = widget.skin();
         let whole = Rect::new(0, 0, skin.w, skin.h);
         let rect = match dirty {
             Dirty::None => return,
@@ -1319,10 +1336,16 @@ impl App {
         if rect.is_empty() {
             return;
         }
-        // Drawn at its own size...
-        let (stride, rows) = largest_skin();
-        // SAFETY: the picture is `stride` x `rows`, at least as large as the largest skin.
-        let mut canvas = unsafe { Canvas::new(self.picture.as_mut_ptr(), stride, skin.w, skin.h) };
+        // the picture and the buffer as large as the running windows need,
+        // this one among them
+        self.fit();
+        let Some(widget) = self.widgets.get(i) else { return };
+
+        // Drawn at its own size, rows `skin.w` apart...
+        debug_assert!(self.picture.len() >= (skin.w * skin.h) as usize);
+        // SAFETY: the picture holds as many pixels as the largest running
+        // window's skin, and this window is running.
+        let mut canvas = unsafe { Canvas::new(self.picture.as_mut_ptr(), skin.w, skin.w, skin.h) };
         canvas.set_clip(rect);
         canvas.clear(rect);
         skin::draw(skin, widget as &dyn Hooks, &mut canvas, &mut self.text, &mut self.slots[i].seen);
@@ -1330,15 +1353,14 @@ impl App {
 
         // ...and put up n times that, in the buffer.
         let n = self.slots[i].n;
-        if self.buffer.w < stride * n || self.buffer.h < rows * n {
-            self.buffer = Buffer::new(stride * n, rows * n);
-        }
-        let wide = self.buffer.w as usize;
-        let pixels = self.buffer.pixels();
+        let Some(buffer) = self.buffer.as_mut() else { return };
+        debug_assert!(buffer.w >= skin.w * n && buffer.h >= skin.h * n);
+        let (wide, dc) = (buffer.w as usize, buffer.dc);
+        let pixels = buffer.pixels();
         if pixels.is_empty() {
             return; // no bitmap to be had: nothing can be shown
         }
-        canvas::scale_into(&self.picture, stride as usize, rect, pixels, wide, n);
+        canvas::scale_into(&self.picture, skin.w as usize, rect, pixels, wide, n);
 
         let size = SIZE { cx: skin.w * n, cy: skin.h * n };
         let origin = POINT { x: 0, y: 0 };
@@ -1349,7 +1371,7 @@ impl App {
             hdcDst: 0,
             pptDst: null(),
             psize: &size,
-            hdcSrc: self.buffer.dc,
+            hdcSrc: dc,
             pptSrc: &origin,
             crKey: 0,
             pblend: &blend,
@@ -3405,6 +3427,37 @@ mod tests {
         assert!(!app.over_another(second, edge + 3, y));
         assert!(!app.over_another(NOTE, edge - 3, y));
         assert!(!app.over_another(NOTE, 102, y));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_the_widgets_are_drawn_in_is_only_as_large_as_those_running_need() {
+        let (mut app, dir) = app("buffers");
+        let size = |app: &App| (app.picture.len(), app.buffer.as_ref().map(|b| (b.w, b.h)));
+        let area = |skin: &Skin| (skin.w * skin.h) as usize;
+        // nothing running: nothing kept to draw in
+        app.fit();
+        assert_eq!(size(&app), (0, None));
+
+        // the note alone: its skin, and its window at its scale
+        let (note, n) = (Kind::Notes.skin(), app.slots[NOTE].n);
+        app.start(NOTE);
+        app.fit();
+        assert_eq!(size(&app), (area(note), Some((note.w * n, note.h * n))));
+
+        // the Date/Time, the largest skin, makes both larger, as wide and as
+        // tall as the larger of the two each way
+        let (datetime, m) = (Kind::DateTime.skin(), app.slots[DATETIME].n);
+        app.start(DATETIME);
+        app.fit();
+        let both = ((note.w * n).max(datetime.w * m), (note.h * n).max(datetime.h * m));
+        assert_eq!(size(&app), (area(datetime).max(area(note)), Some(both)));
+
+        // and once it has closed they are the note's size again, then nothing
+        app.stop(DATETIME);
+        assert_eq!(size(&app), (area(note), Some((note.w * n, note.h * n))));
+        app.stop(NOTE);
+        assert_eq!(size(&app), (0, None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

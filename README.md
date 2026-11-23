@@ -19,8 +19,8 @@ pictures were taken.
 
 | | |
 |--------------------------|---------|
-| private memory           | ~7 MB, ~4.5 MB of it in RAM |
-| working set              | ~12 MB |
+| private memory           | ~6.5 MB, ~4 MB of it in RAM |
+| working set              | ~10.5 MB |
 | run-time dependencies    | none |
 | program                  | one 1.6 MB .exe |
 
