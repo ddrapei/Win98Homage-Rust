@@ -29,8 +29,9 @@
 //! Everything runs off one tick a second.  A widget that moves more often
 //! than that -- the rain -- asks for frames, and a second timer runs for as
 //! long as one does and there is a screen to show them on.  A widget other
-//! windows hide all of is given none (`check_covered`): a desktop widget is
-//! under a maximised window much of the day.
+//! windows hide all of is given none, and a photo frame there changes no
+//! photos (`check_covered`): a desktop widget is under a maximised window
+//! much of the day.
 //!
 //! The process is per-monitor DPI aware, and every place and size here is
 //! in the monitors' own pixels.  The skins are laid out in whole pixels, and
@@ -1050,6 +1051,8 @@ impl App {
         if self.press.as_ref().is_some_and(|p| p.idx == i) {
             self.press = None;
         }
+        // started again, it starts where it can be seen, as its widget does
+        self.slots[i].covered = false;
         // what was kept large enough to draw it in, no larger than the rest need
         self.fit();
         self.pace();
@@ -1619,25 +1622,34 @@ impl App {
         seconds * 1000 + ms as i64
     }
 
-    /// Which of the widgets asking for frames other windows hide all of
-    /// (`covered`): those are given none until they can be seen again -- a
-    /// desktop widget is under a maximised window much of the day, and its
-    /// moving there costs as much as on show.  Looked at once a second and
-    /// whenever another window comes forward, so a widget uncovered moves
-    /// again within the second; and only while some widget asks for frames.
+    /// Which of the widgets other windows hide all of (`covered`): those
+    /// are given no frames until they can be seen again, and are told, so
+    /// that a photo frame changes no photos meanwhile -- a desktop widget is
+    /// under a maximised window much of the day, and what it does there
+    /// costs as much as on show.  Looked at once a second and whenever
+    /// another window comes forward, so a widget uncovered moves again
+    /// within the second.  The look is one walk down the windows, a small
+    /// fraction of a millisecond.
     fn check_covered(&mut self) {
-        let moving: Vec<usize> = (0..self.slots.len())
-            .filter(|&i| self.slots[i].hwnd != 0 && self.widgets.get(i).is_some_and(|w| w.frame_ms() > 0))
-            .collect();
-        for slot in &mut self.slots {
-            slot.covered = false;
+        let running: Vec<usize> = (0..self.slots.len()).filter(|&i| self.slots[i].hwnd != 0 && self.widgets.get(i).is_some()).collect();
+        let hidden = if self.locked || running.is_empty() {
+            vec![false; running.len()]
+        } else {
+            let ours: Vec<(HWND, RECT)> = running.iter().map(|&i| (self.slots[i].hwnd, on_screens(self.slots[i].frame()))).collect();
+            covered(&ours)
+        };
+        for (&i, hidden) in running.iter().zip(hidden) {
+            self.set_covered(i, hidden);
         }
-        if moving.is_empty() || self.locked {
-            return;
-        }
-        let ours: Vec<(HWND, RECT)> = moving.iter().map(|&i| (self.slots[i].hwnd, on_screens(self.slots[i].frame()))).collect();
-        for (&i, hidden) in moving.iter().zip(covered(&ours)) {
-            self.slots[i].covered = hidden;
+    }
+
+    /// Window `i` is hidden by other windows, or can be seen: its frames go
+    /// by that, and its widget is told when it changes.
+    fn set_covered(&mut self, i: usize, covered: bool) {
+        if core::mem::replace(&mut self.slots[i].covered, covered) != covered {
+            if let Some(w) = self.widgets.get_mut(i) {
+                w.covered(covered);
+            }
         }
     }
 
@@ -1772,7 +1784,7 @@ impl App {
     fn mouse_down(&mut self, i: usize, wnd: HWND, x: i32, y: i32, double: bool) -> Later {
         // A press on it is a press where it can be seen, whatever was over
         // it a moment ago: what the press sets moving moves at once.
-        self.slots[i].covered = false;
+        self.set_covered(i, false);
         let (x, y) = self.widget_point(i, x, y);
         // Clicking anywhere but on what is being typed on -- the note's sheet,
         // the weather's city field -- finishes the typing.

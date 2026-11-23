@@ -138,6 +138,11 @@ pub trait Widget: Hooks {
     fn frame(&mut self, _ms: u32) -> Dirty {
         Dirty::None
     }
+    /// Other windows have come to hide all of it, or it can be seen again.
+    /// It is given no frames meanwhile (see `frame_ms`); one whose tick does
+    /// work only worth doing where it can be seen -- a photo frame reading
+    /// its next photo -- leaves that until it is seen.
+    fn covered(&mut self, _covered: bool) {}
     /// A mouse action from the skin.  `x`, `y` are relative to the meter that
     /// carried it.
     fn command(&mut self, cmd: &str, arg: i32, x: i32, y: i32, ctx: &mut Ctx) -> Outcome;

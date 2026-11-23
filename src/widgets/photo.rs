@@ -524,6 +524,11 @@ pub struct Photo {
     interval: u32,
     left: u32,
     paused: bool,
+    /// Other windows hide all of it: the clock stands still, and no photo is
+    /// read, until it can be seen again.  Each photo costs a child its
+    /// decoding, a tenth of a second of the processor or more for a large
+    /// one, and nobody would see it.
+    covered: bool,
     /// xorshift32, never zero.
     rng: u32,
     /// For the test harness: the photos in the order of their names, not
@@ -609,6 +614,7 @@ impl Photo {
             interval,
             left: interval,
             paused: ctx.settings.flag(section, "Paused", skin.int("Paused", 0) != 0),
+            covered: false,
             rng: seed | 1,
             in_order: false,
             kept: Vec::new(),
@@ -1231,7 +1237,7 @@ impl Widget for Photo {
 
     fn tick(&mut self, ctx: &mut Ctx) -> Dirty {
         let collected = self.collect();
-        if self.paused || ctx.locked {
+        if self.paused || ctx.locked || self.covered {
             return collected;
         }
         self.left = self.left.saturating_sub(1);
@@ -1280,6 +1286,13 @@ impl Widget for Photo {
         let mut outcome = if fire { self.activate(k, ctx) } else { Outcome::none() };
         outcome.dirty = outcome.dirty.and(Dirty::Part(self.buttons()));
         outcome
+    }
+
+    /// Hidden, the photo up stays up and its clock stands still; seen again,
+    /// the clock goes on from where it stood.  A photo already being read is
+    /// still put up when it is ready (`tick` looks for it).
+    fn covered(&mut self, covered: bool) {
+        self.covered = covered;
     }
 
     /// Frames only while a button is moving, or a photo is being read: each
@@ -1715,6 +1728,35 @@ mod tests {
         let before = photo.shown.clone();
         assert_eq!(photo.command("Next", 0, 0, 0, &mut ctx).dirty, Dirty::Part(photo.changed()));
         assert_ne!(photo.shown, before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_frame_nobody_can_see_keeps_its_photo_and_its_clock_stands_still() {
+        let dir = folder("covered");
+        put(&dir, "a.bmp", 0xFF0000);
+        put(&dir, "b.bmp", 0x0000FF);
+        let mut settings = Settings::in_memory();
+        let mut photo = frame(&mut settings, FIRST, &dir);
+        let mut ctx = ctx(&mut settings);
+        photo.menu_command(MENU_INTERVAL, &mut ctx);
+        assert_eq!(photo.interval, 5);
+        let first = photo.shown.clone();
+        // two seconds of the five go by where it can be seen
+        for _ in 0..2 {
+            assert_eq!(photo.tick(&mut ctx), Dirty::None);
+        }
+        // then a window comes over it: however long it stays, nothing changes
+        photo.covered(true);
+        assert!((0..60).all(|_| photo.tick(&mut ctx) == Dirty::None));
+        assert_eq!(photo.shown, first);
+        // seen again, the photo has the three seconds left that it had
+        photo.covered(false);
+        for _ in 0..2 {
+            assert_eq!(photo.tick(&mut ctx), Dirty::None);
+        }
+        assert_eq!(photo.tick(&mut ctx), Dirty::Part(photo.changed()));
+        assert_ne!(photo.shown, first);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

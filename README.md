@@ -509,14 +509,15 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
   of a millisecond to draw.
 - **Nothing moves where nobody can see it.** A widget that other windows hide completely
   is given no frames: the Weather window's scene, the rain, a card of the Flip Clock
-  turning. Windows that let what is behind them show — translucent or click-through
+  turning. A hidden Photo or Dither Frame keeps the photo it has up, and its clock
+  stands still, so no photo is decoded for nobody (each costs from a twentieth to a third
+  of a second of the processor, in its child). Windows that let what is behind them show — translucent or click-through
   ones, and the desktop itself — don't count, and nor do minimised windows or those on
   another virtual desktop. Behind a maximised window, as a desktop widget mostly is,
   the moving widgets stand still and take almost nothing. What is covered is looked
   at once a second and whenever another window comes forward, so a widget uncovered
   moves again within the second, from where it stopped; a click on one moves it at once.
-  What happens once a second — the clock, the readings, the next photo — goes on as
-  before.
+  The rest of what happens once a second — the clock, the readings — goes on as before.
 - **Battery** asks Windows how the power stands once a second, which is one call, and
   repaints only when something it shows has changed: a tenth of the charge, a percent, the
   power source, or a minute of the time left.
