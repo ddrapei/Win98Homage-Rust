@@ -2,7 +2,7 @@
 //! seventies kept it -- and the one widget with no window round it.  It is an
 //! object on the desktop: a plastic case with a rounded rim, in the warm grey
 //! of the Claude gauges' bezels, the cards set into a dark recess in its
-//! front, the day printed over them, and a shadow under it on the wallpaper.
+//! front, and the day printed over them.
 //! There is a card for each figure, split across the middle into two leaves
 //! on a hinge: on the minute the top leaf of each card that changes falls
 //! over, forwards and down, and the next figure is there -- its top half on
@@ -36,7 +36,7 @@
 //!   landing pushes the bottom leaf and those hanging behind it back at their
 //!   foot, and they swing forward and back again before they are still.
 //!
-//! The case, its shadow, the pins and the colons never change, and are worked
+//! The case, the pins and the colons never change, and are worked
 //! out once (`backdrop`); the cards are drawn over them.
 //!
 //! The fall is a handful of poses, each held as long as it would be seen
@@ -733,9 +733,6 @@ pub struct Flip {
     recess_r: i32,
     wall: i32,
     cast: i32,
-    /// The shadow on the desktop: across, down, how far it fades out, and
-    /// how dark it is, out of 255.
-    drop: (i32, i32, i32, i32),
     /// The first card's top left in [MeterClock].
     cards_at: (i32, i32),
     /// The cards' size, the figure cards' and the colons', the room between
@@ -755,7 +752,7 @@ pub struct Flip {
     floor_cast: u32,
     seam: u32,
     ink: u32,
-    /// The case, its shadow, the pins and the stacks under the cards, as
+    /// The case, the pins and the stacks under the cards, as
     /// they are whatever the time: premultiplied BGRA, [MeterClock]'s size.
     backdrop: Vec<u8>,
 }
@@ -797,7 +794,6 @@ impl Flip {
             recess_r: int("RecessR", 4),
             wall,
             cast: int("Cast", 4),
-            drop: (int("DropX", 3), int("DropY", 4), int("DropSoft", 3), int("Drop", 90).min(255)),
             cards_at: (floor.x0 + inset, floor.y0 + inset),
             card_w,
             card_h,
@@ -857,20 +853,15 @@ impl Flip {
 
     // ---- what never changes ------------------------------------------------
 
-    /// The case, its shadow on the desktop and the recess, at (x, y) of
+    /// The case and the recess, at (x, y) of
     /// [MeterClock]: a premultiplied colour, 0 where there is nothing.
     fn case_px(&self, x: i32, y: i32) -> u32 {
         let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
         let case = Shape::of(self.case, self.case_r);
         let (out, way) = case.outside(px, py);
         if out > 0.0 {
-            // The desktop, and the case's shadow on it: as dark as it gets
-            // under the case moved down and across, and a step lighter for
-            // each px of the fade beyond that.
-            let (dx, dy, soft, dark) = self.drop;
-            let (from, _) = case.outside(px - dx as f32, py - dy as f32);
-            let steps = if from <= 0.0 { soft + 1 } else { soft + 1 - from.ceil() as i32 };
-            return if steps <= 0 { 0 } else { ((dark * steps / (soft + 1)) as u32) << 24 };
+            // the desktop, left as it is
+            return 0;
         }
         if let Some((n, across)) = rounded_over(-out, way, self.rim as f32) {
             return self.case_shades.lit(n, across, 0);
@@ -889,8 +880,8 @@ impl Flip {
         if x - self.floor.x0 < self.cast || y - self.floor.y0 < self.cast { self.floor_cast } else { self.floor_lit }
     }
 
-    /// Everything that is the same whatever the time: the case and its
-    /// shadow, and in the recess the pins the leaves turn on -- at either
+    /// Everything that is the same whatever the time: the case, and in the
+    /// recess the pins the leaves turn on -- at either
     /// side of every card, across its seam -- and the colons' dots.
     fn make_backdrop(&self) -> Vec<u8> {
         let (w, h) = self.size;
@@ -1320,12 +1311,10 @@ mod tests {
             let mut settings = Settings::in_memory();
             settings.set(FIRST, "Seconds", if seconds { "1" } else { "0" });
             let flip = clock_at(&mut settings, 9, 41);
-            // the window is the case and the Pad round it, the case's shadow
-            // falling in the Pad
+            // the window is the case and the Pad round it
             let pad = flip.skin.int("Pad", 12);
             assert_eq!(flip.size, (flip.skin.w, flip.skin.h));
             assert_eq!((flip.case.x0, flip.case.y0, flip.case.x1 + pad, flip.case.y1 + pad), (pad, pad, flip.size.0, flip.size.1));
-            assert!(pad >= flip.drop.0.max(flip.drop.1) + flip.drop.2);
             // the cards fill the floor of the recess but for its inset, and
             // their stacks fit under them
             let inset = flip.skin.int("Inset", 4);
@@ -1586,7 +1575,7 @@ mod tests {
     }
 
     #[test]
-    fn the_case_is_lit_from_the_upper_left_and_casts_a_shadow() {
+    fn the_case_is_lit_from_the_upper_left_and_casts_no_shadow() {
         let mut settings = Settings::in_memory();
         let flip = clock_at(&mut settings, 9, 41);
         let px = drawn(&flip);
@@ -1602,13 +1591,11 @@ mod tests {
         // its floor is dark, and darker still in the walls' shadow
         assert_eq!((at(flip.floor.x0, flip.floor.y0 + 20), at(flip.floor.x1 - 1, flip.floor.y0 + 20)), (flip.floor_cast, flip.floor_lit));
         assert!(light(flip.floor_lit) < light(at(mid_x, c.y0 + 1)) / 2);
-        // The case is solid; its shadow falls down and to the right of it
-        // on the desktop, fading, and none above it or to its left.
+        // The case is solid, and the desktop round it is left clear on
+        // every side.
         assert_eq!(at(mid_x, mid_y) >> 24, 255);
-        let (near, far) = (at(mid_x, c.y1) >> 24, at(mid_x, c.y1 + flip.drop.1 + 1) >> 24);
-        assert!(near > far && far > 0 && near < 255, "near {near} far {far}");
-        assert_eq!(at(mid_x, c.y1 + flip.drop.1 + flip.drop.2 + 1), 0);
         assert_eq!((at(mid_x, c.y0 - 1), at(c.x0 - 1, mid_y)), (0, 0));
+        assert_eq!((at(mid_x, c.y1), at(c.x1, mid_y), at(c.x1 + 2, c.y1 + 2)), (0, 0, 0));
     }
 
     #[test]
