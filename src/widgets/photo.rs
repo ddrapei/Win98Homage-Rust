@@ -44,6 +44,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
+use crate::cache;
 use crate::canvas::{Canvas, Rect};
 use crate::decode;
 use crate::dither::{self, Method};
@@ -411,6 +412,25 @@ pub fn read_main(args: &[String]) -> i32 {
     }
 }
 
+/// A photo for a frame, read without decoding it in the program: from what
+/// was kept of it the last time it was read down (`cache`), if the file has
+/// not changed since -- every round after the first, a small file read back
+/// in a moment -- or else by a child (`read_by_child`), and kept for the
+/// next time.  Only a photo that could be read is kept: one that could not
+/// is tried again the next round.  The tests keep nothing.
+fn read_photo_apart(look: Look, path: &Path, w: usize, h: usize, bg: u32) -> Option<Vec<u16>> {
+    let kept = if cfg!(test) { None } else { cache::Key::of(path, look.arg(), w, h, bg).map(|key| (cache::dir(), key)) };
+    let again = kept.as_ref().and_then(|(dir, key)| cache::load(dir, key, w * h * 2));
+    if let Some(px) = again.and_then(|bytes| from_bytes(&bytes, w * h)) {
+        return Some(px);
+    }
+    let px = read_by_child(look, path, w, h, bg);
+    if let (Some(px), Some((dir, key))) = (&px, &kept) {
+        cache::store(dir, key, &to_bytes(px));
+    }
+    px
+}
+
 /// `read_photo`, done by a child (`read_main`): this program again, asked for
 /// the one photo, its answer read off its stdout.  The answer is taken only
 /// from a child that ended well and said exactly as much as was asked for.
@@ -418,7 +438,7 @@ pub fn read_main(args: &[String]) -> i32 {
 /// which a child's arguments must be -- the photo is read here, as it was
 /// before there were children; and so it is in the tests, whose program is
 /// the test harness.
-fn read_photo_apart(look: Look, path: &Path, w: usize, h: usize, bg: u32) -> Option<Vec<u16>> {
+fn read_by_child(look: Look, path: &Path, w: usize, h: usize, bg: u32) -> Option<Vec<u16>> {
     use std::io::Read;
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -444,8 +464,8 @@ fn read_photo_apart(look: Look, path: &Path, w: usize, h: usize, bg: u32) -> Opt
     if heard && ended_well { from_bytes(&bytes, w * h) } else { None }
 }
 
-/// A photo read down, as a child hands it over: each pixel's 16 bits, low
-/// byte first.
+/// A photo read down, as a child hands it over and as it is kept on disk:
+/// each pixel's 16 bits, low byte first.
 fn to_bytes(px: &[u16]) -> Vec<u8> {
     px.iter().flat_map(|p| p.to_le_bytes()).collect()
 }

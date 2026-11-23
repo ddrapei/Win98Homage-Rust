@@ -487,6 +487,7 @@ every window; *Normal*; *Always on top*.
 | `%LOCALAPPDATA%\Win98DateTime\Usage.log`, or `%LOCALAPPDATA%\Win98DateTime.log` | the usage log |
 | `%LOCALAPPDATA%\Win98Widgets\weather.txt` | the last forecast |
 | `%LOCALAPPDATA%\Win98Widgets\claude.txt` | the last Claude usage figures (never the sign-in) |
+| `%LOCALAPPDATA%\Win98Widgets\Photo cache\` | the photos the frames have read down already, at most 32 MB; can be deleted at any time |
 
 A `settings.ini` beside the .exe is used instead, if there is one (a portable copy).
 
@@ -537,7 +538,11 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
   once. The last few shown are kept too (five at most, 16 KB each in a Photo Frame and
   64 KB in a Dither Frame), so going back is instant. A photo of many megapixels is
   decoded at a fraction of its size where the format allows (a JPEG does) and brought
-  down from there; only the pane is repainted. With no photo to show it looks in its folder every five seconds. A button moving asks
+  down from there; only the pane is repainted. What a photo was brought down to is kept
+  on disk (`Photo cache`, 32 MB at most, the longest unused going first), so each
+  photo is decoded once, not every time the round comes back to it: after the first
+  round, a frame starts no children at all. A photo changed on disk, or a new build of
+  the program, is read afresh. With no photo to show it looks in its folder every five seconds. A button moving asks
   for frames, about thirty a second, for the tenth of a second it moves and no longer;
   only its tray is repainted.
 - **Disk Space** asks a drive on this machine for its figures every five seconds, and
@@ -606,6 +611,7 @@ src/
   storage/     what is kept on disk
     settings     settings.ini
     usage        the on/unlocked journal the Date/Time graph is drawn from
+    cache        the photos the frames have read down already, so each is decoded once
   graphics/    drawing
     skin         the compiled tables, and drawing and hit-testing them
     canvas       the software canvas they are drawn on

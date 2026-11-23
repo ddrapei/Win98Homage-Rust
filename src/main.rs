@@ -65,6 +65,8 @@
 //!   storage/       what is kept on disk
 //!     settings       settings.ini
 //!     usage          the on/unlocked journal the Date/Time graph is drawn from
+//!     cache          the photos the frames have read down already, kept so
+//!                    that each is decoded once, not every round
 //!
 //!   graphics/      drawing
 //!     skin           the compiled tables, and drawing and hit-testing them
@@ -102,7 +104,7 @@ use graphics::{canvas, decode, figures, skin, text, tint};
 use input::{editor, keys};
 use net::{geocode, http};
 use platform::{clock, grid, screens, sys};
-use storage::{settings, usage};
+use storage::{cache, settings, usage};
 use tools::dump;
 use widgets::{battery, calendar, claude, countdown, datetime, disk, dither, field, flip, folders, notes, photo, rain, resources, sky, weather, widget, world};
 
