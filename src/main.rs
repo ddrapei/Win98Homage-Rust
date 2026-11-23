@@ -45,7 +45,8 @@
 //!     battery        Battery
 //!     countdown      Countdown
 //!     claude         Claude Usage     (and the child that asks for it)
-//!     photo          Photo Frame      (and the Dither Frame's frame)
+//!     photo          Photo Frame      (and the Dither Frame's frame, and
+//!                    the child that reads a photo for either)
 //!     folders        Folders
 //!     flip           Flip Clock       (animated, as a card falls; the one
 //!                    widget with no window)
@@ -120,6 +121,9 @@ fn main() {
         Some("--find-city") => weather::find_main(&args[2..]),
         Some("--find-zone") => world::find_main(&args[2..]),
         Some("--fetch-claude") => claude::fetch_main(&args[2..]),
+        // and the one that reads a photo for a frame, so that WIC and the
+        // photo at its full size are never in the program that stays running
+        Some("--read-photo") => photo::read_main(&args[2..]),
         Some("--dump") => dump::run(&args[2..]),
         _ => app::run(),
     };

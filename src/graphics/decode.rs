@@ -14,6 +14,11 @@
 //! scaled the rest of the way, which is what makes a photo of many megapixels
 //! quick to bring down.  WIC is COM; the methods needed are called through
 //! their vtable slots, which wincodec.h fixes.
+//!
+//! A PNG or a WebP is decoded at its full size all the same, tens of
+//! megabytes for a large one, so the running program never calls this
+//! itself: a short-lived child does, for each photo (`photo::read_main`).
+//! Only --dump and the tests read photos here, in the one process.
 
 use core::ffi::c_void;
 use core::ptr::{null, null_mut};

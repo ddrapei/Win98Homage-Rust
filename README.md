@@ -19,12 +19,15 @@ pictures were taken.
 
 | | |
 |--------------------------|---------|
-| private memory           | ~2.5 MB |
-| working set              | 2–3 MB idle |
+| private memory           | ~7 MB, ~4.5 MB of it in RAM |
+| working set              | ~12 MB |
 | run-time dependencies    | none |
-| program                  | one 700 KB .exe |
+| program                  | one 1.6 MB .exe |
 
-Measured with the first four widgets showing, before Rain Window and Disk Space were added.
+Measured on Windows 11 with ten widgets showing for three minutes: the Resource Meter, a
+Sticky Note, the Weather as its animated window, Disk Space, the Battery, a Countdown,
+Folders, the Flip Clock, and a Photo Frame and a Dither Frame each changing photo every
+five seconds. The figures stay level as the photos go round.
 
 ## Build and run
 
@@ -497,6 +500,9 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
 - **Weather** shows the last forecast immediately after a restart, and each fetch runs in
   a short-lived child process, so the networking libraries are never resident.
 - **Nothing is drawn while the workstation is locked**; the usage log keeps running.
+- **The heap** is Windows' segment heap, which the program's manifest asks for (Windows 10
+  2004 and later). It hands freed memory back to Windows sooner than the older heap, and
+  it is used for every allocation in the process, DirectWrite's included.
 - **Rain Window is the one widget drawn more than once a second**: 25 frames a second, of
   its pane only, from a timer that runs only while there is rain to show — not while it
   is paused or closed, nor while the workstation is locked. A frame takes about a fifth
@@ -509,15 +515,18 @@ A `settings.ini` beside the .exe is used instead, if there is one (a portable co
   minute. While Claude Code's sign-in has run out it asks nothing, and only looks every
   15 seconds at when the sign-in file was last changed — never at what is in it.
 - **Photo Frame**, and the **Dither Frame** with it, never reads a photo or its folder on
-  the thread that draws the widgets (the Dither Frame measures a photo's light there too,
-  and only the dithering, a few milliseconds, is left for the drawing thread):
-  a big photo can take a few hundred milliseconds to decode, which would stall the Rain
-  Window. Each is read on a short-lived thread of its own, as Disk Space asks a slow drive,
-  and the next photo is read while the current one is up, so that when its time comes it
-  is swapped in at once; the last few shown are kept too (32 KB each, five at most), so
-  going back is instant. A photo of many megapixels is decoded at a fraction of its size
-  where the format allows (a JPEG does) and brought down from there; only the pane is
-  repainted. With no photo to show it looks in its folder every five seconds. A button moving asks
+  the thread that draws the widgets: a big photo can take a few hundred milliseconds to
+  decode, which would stall the Rain Window. Nor is a photo decoded in the program at all.
+  Each is read by a short-lived child process, like the weather (the Dither Frame
+  measures a photo's light there too, and only the dithering, a few milliseconds, is left
+  for the drawing thread). So WIC, its codecs and the photo at its full size are never
+  resident; a large PNG or WebP is tens of megabytes at its full size. A short-lived
+  thread of its own waits for the child, as Disk Space asks a slow drive. The next photo
+  is read while the current one is up, so that when its time comes it is swapped in at
+  once. The last few shown are kept too (five at most, 16 KB each in a Photo Frame and
+  64 KB in a Dither Frame), so going back is instant. A photo of many megapixels is
+  decoded at a fraction of its size where the format allows (a JPEG does) and brought
+  down from there; only the pane is repainted. With no photo to show it looks in its folder every five seconds. A button moving asks
   for frames, about thirty a second, for the tenth of a second it moves and no longer;
   only its tray is repainted.
 - **Disk Space** asks a drive on this machine for its figures every five seconds, and
@@ -571,7 +580,8 @@ src/
     countdown    Countdown (also: which sections of settings.ini are countdowns)
     claude       Claude Usage (and the child that asks for it)
     photo        Photo Frame (also: which sections of settings.ini are photo frames),
-                 and the Dither Frame's frame, which is the same
+                 and the Dither Frame's frame, which is the same (and the child
+                 that reads a photo for either)
     folders      Folders
     flip         Flip Clock
     dither       Dither Frame: its 1-bit picture (and which sections of
@@ -590,6 +600,7 @@ src/
     canvas       the software canvas they are drawn on
     text         DirectWrite text, rasterised into the canvas
     decode       a photo read by WIC, brought down small and stood the right way up
+                 (in the photo child)
     tint         the colour picked, and every accent turned to it
   platform/    Windows
     sys          the Win32 declarations all of it uses

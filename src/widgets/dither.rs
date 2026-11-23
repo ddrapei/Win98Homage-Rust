@@ -14,7 +14,8 @@
 //!   blue; then the range is stretched, so that the darkest hundredth of the
 //!   picture is ink and the lightest hundredth paper.  Dithering in linear
 //!   light keeps a patch of dots as bright, from a little way off, as the
-//!   photo was there.  This is done on the thread that reads the photo.
+//!   photo was there.  This is done where the photo is read, in the child
+//!   that reads it, and the frame keeps the tones, 16 bits a pixel.
 //! - `render`: the tones brought down to one bit, in the method chosen in the
 //!   menu, and painted in the ink and the paper.  Kept apart from the tones,
 //!   so a change of method or of tint redraws the photo up without reading
@@ -43,7 +44,7 @@ use crate::skin::Skin;
 pub const FIRST: &str = "Dither";
 
 /// The brightest tone: paper, all the way.
-pub const TONE_MAX: u32 = 65_535;
+pub const TONE_MAX: u16 = u16::MAX;
 /// What share of the picture is stretched past each end of the range: its
 /// darkest hundredth is ink, and its lightest paper.
 const CLIP: f32 = 0.01;
@@ -108,7 +109,7 @@ fn linear(c: u32) -> f32 {
 /// `TONE_MAX` for paper: in linear light, weighed as the eye weighs the three
 /// colours, with the range stretched so that the darkest and the lightest
 /// hundredth of the picture are ink and paper.
-pub fn tones(px: &[u32]) -> Vec<u32> {
+pub fn tones(px: &[u32]) -> Vec<u16> {
     let table: Vec<f32> = (0..256).map(linear).collect();
     let light: Vec<f32> = px
         .iter()
@@ -123,17 +124,17 @@ pub fn tones(px: &[u32]) -> Vec<u32> {
     let (lo, hi) = (at(CLIP), at(1.0 - CLIP));
     // a picture of one tone is left as it is, not stretched to nothing
     let (lo, span) = if hi - lo > 1e-4 { (lo, hi - lo) } else { (0.0, 1.0) };
-    light.iter().map(|&l| (((l - lo) / span).clamp(0.0, 1.0) * TONE_MAX as f32).round() as u32).collect()
+    light.iter().map(|&l| (((l - lo) / span).clamp(0.0, 1.0) * TONE_MAX as f32).round() as u16).collect()
 }
 
 /// The tones of a picture `w` wide brought down to one bit, by `method`:
 /// true for paper, false for ink.
-pub fn bits(tones: &[u32], w: usize, method: Method) -> Vec<bool> {
+pub fn bits(tones: &[u16], w: usize, method: Method) -> Vec<bool> {
     if w == 0 {
         return Vec::new();
     }
     let h = tones.len() / w;
-    let level = |t: u32| t as f32 / TONE_MAX as f32;
+    let level = |t: u16| t as f32 / TONE_MAX as f32;
     let out = match method {
         Method::Bayer => tones
             .iter()
@@ -161,7 +162,7 @@ pub fn bits(tones: &[u32], w: usize, method: Method) -> Vec<bool> {
 /// share).  With `back_and_forth`, every other row is taken right to left,
 /// and the spread turned round with it, so that the error does not drift one
 /// way across the picture.
-fn diffuse(tones: &[u32], w: usize, h: usize, spread: &[(isize, usize, f32)], back_and_forth: bool) -> Vec<bool> {
+fn diffuse(tones: &[u16], w: usize, h: usize, spread: &[(isize, usize, f32)], back_and_forth: bool) -> Vec<bool> {
     let mut light: Vec<f32> = tones.iter().map(|&t| t as f32 / TONE_MAX as f32).collect();
     let mut out = vec![false; w * h];
     for y in 0..h {
@@ -186,7 +187,7 @@ fn diffuse(tones: &[u32], w: usize, h: usize, spread: &[(isize, usize, f32)], ba
 
 /// The tones of a picture `w` wide brought down to one bit by `method` and
 /// painted: `ink` for ink, `paper` for paper, both 0xFFRRGGBB.
-pub fn render(tones: &[u32], w: usize, method: Method, ink: u32, paper: u32) -> Vec<u32> {
+pub fn render(tones: &[u16], w: usize, method: Method, ink: u32, paper: u32) -> Vec<u32> {
     bits(tones, w, method).into_iter().map(|p| if p { paper } else { ink }).collect()
 }
 
@@ -223,8 +224,8 @@ mod tests {
     use super::*;
 
     /// A flat grey of `tone` across a picture `w` x `h`.
-    fn flat(tone: f32, w: usize, h: usize) -> Vec<u32> {
-        vec![(tone * TONE_MAX as f32) as u32; w * h]
+    fn flat(tone: f32, w: usize, h: usize) -> Vec<u16> {
+        vec![(tone * TONE_MAX as f32) as u16; w * h]
     }
 
     fn paper_share(bits: &[bool]) -> f32 {
@@ -310,7 +311,7 @@ mod tests {
     #[test]
     fn a_picture_is_painted_in_the_ink_and_the_paper_and_nothing_else() {
         let (ink, paper) = (0xFF4A_1A08, 0xFFF7_F3E9);
-        let tones: Vec<u32> = (0..40 * 30).map(|i| (i % 40) as u32 * TONE_MAX / 39).collect();
+        let tones: Vec<u16> = (0..40 * 30).map(|i| ((i % 40) * TONE_MAX as u32 / 39) as u16).collect();
         for method in Method::ALL {
             let px = render(&tones, 40, method, ink, paper);
             assert_eq!(px.len(), tones.len());

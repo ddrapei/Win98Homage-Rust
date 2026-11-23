@@ -65,6 +65,14 @@ pub enum Look {
 }
 
 impl Look {
+    /// What the child that reads a photo is told the look is (`read_main`).
+    fn arg(self) -> &'static str {
+        match self {
+            Look::Photo => "photo",
+            Look::Dither => "dither",
+        }
+    }
+
     /// The first frame's section; the others are numbered after it.
     pub fn first(self) -> &'static str {
         match self {
@@ -96,11 +104,13 @@ const INTERVALS: [(u32, &str); 5] =
 const EMPTY_RETRY: u32 = 5;
 /// How many photos back the back button can go.
 const HISTORY: usize = 100;
-/// How many photos read and brought down are kept in memory, 32 KB each: the
-/// one read ahead and the last few shown, so that going on or back to one
-/// of them is a swap and no more.
+/// How many photos read and brought down are kept in memory, 16 KB each in a
+/// Photo Frame and 64 KB in a Dither Frame: the one read ahead and the last
+/// few shown, so that going on or back to one of them is a swap and no more.
 const KEPT: usize = 5;
-/// The stack a thread reading a photo is given: WIC takes more than a little.
+/// The stack a thread reading a photo is given.  It only waits for a child
+/// to read it, but without a child it reads the photo itself, and WIC takes
+/// more than a little; only what is used of it is ever more than an address.
 const READER_STACK: usize = 1 << 20;
 /// Milliseconds a button takes to move a pixel, down or up.
 const PUSH_MS: u32 = 35;
@@ -248,6 +258,19 @@ pub fn dither12(px: &mut [u32], w: usize) {
     }
 }
 
+/// A pixel `dither12` has brought down, kept in the 12 bits its three levels
+/// take: 0xRGB, each level 0 to 15.
+fn pack12(p: u32) -> u16 {
+    let level = |shift: u32| (p >> shift & 0xFF) / 17;
+    (level(16) << 8 | level(8) << 4 | level(0)) as u16
+}
+
+/// And back, as it is drawn: 0xFFRRGGBB.
+fn unpack12(v: u16) -> u32 {
+    let v = v as u32;
+    0xFF00_0000 | (v >> 8 & 15) * 17 << 16 | (v >> 4 & 15) * 17 << 8 | (v & 15) * 17
+}
+
 /// Which frame of a look a section is: 1 for `[Photo]`, n for `[Photo<n>]`,
 /// and None for a section that is not a frame's.
 fn number(look: Look, section: &str) -> Option<u32> {
@@ -340,17 +363,96 @@ fn photos_in(folder: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// A photo read and brought down, `w` x `h`; None if it cannot be read.  For
-/// the Photo Frame, to the C60's pixels and colours; for the Dither Frame, to
-/// the light of each pixel, which is brought down to one bit when it is put
-/// up (`Photo::develop`).
-fn read_photo(look: Look, path: &Path, w: usize, h: usize, bg: u32) -> Option<Vec<u32>> {
+/// A photo read and brought down, `w` x `h`, 16 bits a pixel; None if it
+/// cannot be read.  For the Photo Frame, to the C60's pixels and colours,
+/// each pixel's three levels (`pack12`); for the Dither Frame, to the light of
+/// each pixel (`dither::tones`), which is brought down to one bit when it is
+/// put up (`Photo::develop`).
+fn read_photo(look: Look, path: &Path, w: usize, h: usize, bg: u32) -> Option<Vec<u16>> {
     let mut px = decode::load(path, w as u32, h as u32, bg)?;
-    match look {
-        Look::Photo => dither12(&mut px, w),
-        Look::Dither => px = dither::tones(&px),
+    Some(match look {
+        Look::Photo => {
+            dither12(&mut px, w);
+            px.into_iter().map(pack12).collect()
+        }
+        Look::Dither => dither::tones(&px),
+    })
+}
+
+/// The most pixels a child is asked to read a photo down to: far more than
+/// any frame's, and a bound on what a wrong argument could make it allocate.
+const MOST_PIXELS: usize = 1 << 20;
+
+/// `--read-photo <photo|dither> <w> <h> <bg> <path>`: the short-lived child
+/// that reads one photo for a frame (`read_photo_apart`).  The decoding --
+/// WIC and its codecs, a COM apartment, and the photo at its full size, tens
+/// of megabytes for a large PNG or WebP -- happens in it, and is gone with
+/// it, never in the program that stays running.  What the photo is brought
+/// down to goes out on stdout, two bytes a pixel (`to_bytes`).  It ends 1 if
+/// the photo would not read, 2 if it was asked wrongly.
+pub fn read_main(args: &[String]) -> i32 {
+    use std::io::Write;
+    let look = match args.first().map(String::as_str) {
+        Some(arg) if arg == Look::Photo.arg() => Look::Photo,
+        Some(arg) if arg == Look::Dither.arg() => Look::Dither,
+        _ => return 2,
+    };
+    let size = |i: usize| args.get(i).and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0);
+    let bg = args.get(3).and_then(|v| u32::from_str_radix(v, 16).ok());
+    let (Some(w), Some(h), Some(bg), Some(path)) = (size(1), size(2), bg, args.get(4)) else { return 2 };
+    if w.saturating_mul(h) > MOST_PIXELS {
+        return 2;
     }
-    Some(px)
+    let Some(px) = read_photo(look, Path::new(path), w, h, bg) else { return 1 };
+    let mut out = std::io::stdout().lock();
+    match out.write_all(&to_bytes(&px)).and_then(|()| out.flush()) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+/// `read_photo`, done by a child (`read_main`): this program again, asked for
+/// the one photo, its answer read off its stdout.  The answer is taken only
+/// from a child that ended well and said exactly as much as was asked for.
+/// Without a child to be had -- or with a path that is not valid Unicode,
+/// which a child's arguments must be -- the photo is read here, as it was
+/// before there were children; and so it is in the tests, whose program is
+/// the test harness.
+fn read_photo_apart(look: Look, path: &Path, w: usize, h: usize, bg: u32) -> Option<Vec<u16>> {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let here = || read_photo(look, path, w, h, bg);
+    let (false, Ok(exe), Some(_)) = (cfg!(test), std::env::current_exe(), path.to_str()) else { return here() };
+    let spawned = Command::new(exe)
+        .arg("--read-photo")
+        .arg(look.arg())
+        .arg(w.to_string())
+        .arg(h.to_string())
+        .arg(format!("{bg:08X}"))
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
+    let Ok(mut child) = spawned else { return here() };
+    let mut bytes = Vec::with_capacity(w * h * 2);
+    let heard = child.stdout.take().is_some_and(|mut out| out.read_to_end(&mut bytes).is_ok());
+    let ended_well = child.wait().is_ok_and(|status| status.success());
+    if heard && ended_well { from_bytes(&bytes, w * h) } else { None }
+}
+
+/// A photo read down, as a child hands it over: each pixel's 16 bits, low
+/// byte first.
+fn to_bytes(px: &[u16]) -> Vec<u8> {
+    px.iter().flat_map(|p| p.to_le_bytes()).collect()
+}
+
+/// And as the frame takes it back: None unless it is exactly `pixels` long.
+fn from_bytes(bytes: &[u8], pixels: usize) -> Option<Vec<u16>> {
+    (bytes.len() == pixels * 2).then(|| bytes.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect())
 }
 
 /// Which way the frame is going: on to the next photo, or back to the one
@@ -371,7 +473,7 @@ struct Reading {
 
 enum Answer {
     /// The photo brought down, or None if it would not read.
-    Photo(Option<Vec<u32>>),
+    Photo(Option<Vec<u16>>),
     Folder(Vec<PathBuf>),
 }
 
@@ -396,9 +498,9 @@ pub struct Photo {
     block: i32,
     /// The photo shown, `w` x `h`, as it was read and brought down
     /// (`read_photo`); empty while there is none.
-    source: Vec<u32>,
+    source: Vec<u16>,
     /// The same, as it is drawn: 0xFFRRGGBB.  For the Photo Frame it is the
-    /// source as it is; for the Dither Frame, the source brought down to one
+    /// source's colours; for the Dither Frame, the source brought down to one
     /// bit and painted, again whenever the method or the tint changes.
     picture: Vec<u32>,
     /// What a transparent part of a photo is laid on.
@@ -431,7 +533,7 @@ pub struct Photo {
     /// Photos read and brought down already, the latest last -- the one read
     /// ahead, and the last few shown -- and None for a file that would not
     /// read.  At most `KEPT`.
-    kept: Vec<(PathBuf, Option<Vec<u32>>)>,
+    kept: Vec<(PathBuf, Option<Vec<u16>>)>,
     /// The photo, or the folder, being read, if one is; a folder's list once
     /// it has been read, for the next round; and where the frame is going
     /// once what it is waiting for has been read.  The photo up stays up
@@ -555,10 +657,10 @@ impl Photo {
     }
 
     /// The photo as it is drawn, from what was read of it: the Photo Frame's
-    /// as it is, the Dither Frame's brought down to one bit and painted.
-    fn develop(&self, source: &[u32]) -> Vec<u32> {
+    /// in its colours, the Dither Frame's brought down to one bit and painted.
+    fn develop(&self, source: &[u16]) -> Vec<u32> {
         match self.look {
-            Look::Photo => source.to_vec(),
+            Look::Photo => source.iter().map(|&p| unpack12(p)).collect(),
             Look::Dither => dither::render(source, self.w, self.method, self.ink, self.paper),
         }
     }
@@ -784,11 +886,12 @@ impl Photo {
         }
     }
 
-    /// Read a photo on a thread of its own, which ends with it.
+    /// Read a photo on a thread of its own, which ends with it -- the thread
+    /// only waits while a child reads it (`read_photo_apart`).
     fn read(&mut self, path: PathBuf) {
         let (look, w, h, bg) = (self.look, self.w, self.h, self.bg);
         let file = path.clone();
-        self.start(Some(path), move || Answer::Photo(read_photo(look, &file, w, h, bg)));
+        self.start(Some(path), move || Answer::Photo(read_photo_apart(look, &file, w, h, bg)));
     }
 
     /// Look at the folder for the photos in it, on a thread of its own.
@@ -858,7 +961,7 @@ impl Photo {
 
     /// Keep a photo read, or that it would not read, the latest last; the
     /// oldest goes when there are more than `KEPT`.
-    fn keep(&mut self, path: PathBuf, px: Option<Vec<u32>>) {
+    fn keep(&mut self, path: PathBuf, px: Option<Vec<u16>>) {
         self.take_kept(&path);
         if self.kept.len() == KEPT {
             self.kept.remove(0);
@@ -866,7 +969,7 @@ impl Photo {
         self.kept.push((path, px));
     }
 
-    fn take_kept(&mut self, path: &Path) -> Option<Option<Vec<u32>>> {
+    fn take_kept(&mut self, path: &Path) -> Option<Option<Vec<u16>>> {
         let at = self.kept.iter().position(|k| k.0 == path)?;
         Some(self.kept.remove(at).1)
     }
@@ -1453,6 +1556,51 @@ mod tests {
         }
         // and its first row is the matrix's: 0 8 2 10 -- the two over half
         assert_eq!(&px[..4], [seven, eight, seven, eight]);
+    }
+
+    #[test]
+    fn a_photo_is_kept_in_twelve_bits_and_drawn_as_it_was_brought_down() {
+        // every one of the 4096 colours goes into its 12 bits and comes out
+        // the same, and each is kept as 0xRGB
+        for v in 0..4096u16 {
+            let colour = unpack12(v);
+            assert_eq!(colour >> 24, 0xFF);
+            assert!([16, 8, 0].iter().all(|s| ((colour >> s) & 0xFF) % 17 == 0));
+            assert_eq!(pack12(colour), v);
+        }
+        assert_eq!((unpack12(0x000), unpack12(0xFFF), unpack12(0xF80)), (0xFF00_0000, 0xFFFF_FFFF, 0xFFFF_8800));
+        // and so is any photo, once it has been brought down
+        let mut px: Vec<u32> = (0..1024u32).map(|v| 0xFF00_0000 | (v * 41 % 256) << 16 | (v * 7 % 256) << 8 | (v * 13 % 256)).collect();
+        dither12(&mut px, 32);
+        let kept: Vec<u16> = px.iter().map(|&p| pack12(p)).collect();
+        assert_eq!(kept.iter().map(|&v| unpack12(v)).collect::<Vec<_>>(), px);
+    }
+
+    #[test]
+    fn what_a_child_says_is_taken_only_if_it_is_the_whole_photo() {
+        let px: Vec<u16> = vec![0, 1, 0xFFF, 0x1234, u16::MAX, 0x8000];
+        let bytes = to_bytes(&px);
+        assert_eq!(bytes.len(), 12);
+        assert_eq!(&bytes[6..8], [0x34, 0x12]);
+        assert_eq!(from_bytes(&bytes, px.len()), Some(px.clone()));
+        // a child cut short, or saying more than was asked, is not believed
+        assert_eq!(from_bytes(&bytes[..11], px.len()), None);
+        assert_eq!(from_bytes(&bytes[..10], px.len()), None);
+        assert_eq!(from_bytes(&bytes, px.len() - 1), None);
+        assert_eq!(from_bytes(&[], 0), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_child_asked_wrongly_reads_nothing() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(read_main(&args(&[])), 2);
+        assert_eq!(read_main(&args(&["sepia", "101", "80", "FF000000", "a.jpg"])), 2);
+        assert_eq!(read_main(&args(&["photo", "0", "80", "FF000000", "a.jpg"])), 2);
+        assert_eq!(read_main(&args(&["photo", "101", "80", "not hex", "a.jpg"])), 2);
+        assert_eq!(read_main(&args(&["dither", "101", "80", "FF000000"])), 2);
+        assert_eq!(read_main(&args(&["dither", "4096", "4096", "FF000000", "a.jpg"])), 2);
+        // and one asked rightly for a file that is not there says so
+        assert_eq!(read_main(&args(&["photo", "101", "80", "FF000000", "Z:\\no\\such\\photo.jpg"])), 1);
     }
 
     #[test]

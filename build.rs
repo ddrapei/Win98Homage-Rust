@@ -1210,9 +1210,30 @@ fn rsrc_object(machine: u16, rva_reloc: u16, items: &[(u16, u16, Vec<u8>)]) -> V
     obj
 }
 
-fn compile_exe_icon(root: &Path, out_dir: &Path) {
+/// The program's manifest.  It asks for one thing: the segment heap, which
+/// Windows 10 (2004) and later give a program that asks.  Every allocation
+/// made in the process -- the program's own, and DirectWrite's and the other
+/// system DLLs' -- comes from the process heap, and the segment heap hands
+/// what is freed back to Windows sooner than the old one, and keeps less
+/// aside for itself.  An older Windows leaves it out and runs as before.
+/// Nothing else is said here: the DPI awareness is set in code.
+const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <heapType xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">SegmentHeap</heapType>
+    </windowsSettings>
+  </application>
+</assembly>
+"#;
+
+/// The resources linked into the .exe: its icon, and its manifest.
+fn compile_resources(root: &Path, out_dir: &Path) {
     const RT_ICON: u16 = 3;
     const RT_GROUP_ICON: u16 = 14;
+    const RT_MANIFEST: u16 = 24;
+    /// The manifest Windows reads as a program starts.
+    const CREATEPROCESS_MANIFEST: u16 = 1;
 
     let path = root.join("Icons").join("gears_tweakui_b.ico");
     println!("cargo:rerun-if-changed={}", path.display());
@@ -1239,6 +1260,7 @@ fn compile_exe_icon(root: &Path, out_dir: &Path) {
         group.extend_from_slice(&id.to_le_bytes());
     }
     items.push((RT_GROUP_ICON, 1, group));
+    items.push((RT_MANIFEST, CREATEPROCESS_MANIFEST, MANIFEST.as_bytes().to_vec()));
 
     // The MSVC linker converts a .res itself; the GNU one wants an object
     // file, with the relocation that means "address, less the image base".
@@ -1251,7 +1273,7 @@ fn compile_exe_icon(root: &Path, out_dir: &Path) {
             "x86" => (0x014C, 7),
             "aarch64" => (0xAA64, 2),
             _ => {
-                println!("cargo:warning=no resource object for {arch}: the .exe is built without its icon");
+                println!("cargo:warning=no resource object for {arch}: the .exe is built without its icon or manifest");
                 return;
             }
         };
@@ -1290,7 +1312,7 @@ fn main() {
     writeln!(out, "];\n").unwrap();
     compile_icons(&root, &out_dir, &mut out);
     compile_folder_icons(&root, &out_dir, &mut out);
-    compile_exe_icon(&root, &out_dir);
+    compile_resources(&root, &out_dir);
 
     fs::write(out_dir.join("skins.rs"), out).unwrap();
 }
